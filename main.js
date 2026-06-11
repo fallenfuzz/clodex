@@ -38,6 +38,7 @@ const MAX_MSG = 65536;
 const MSG_SPILL_THRESHOLD = 500;
 const MSG_MAX_AGE = 1800;
 const MSG_CLEANUP_INTERVAL = 5 * 60 * 1000; // ms
+const REGISTRY_KEEPALIVE_INTERVAL = 6 * 60 * 60 * 1000; // ms
 const POLL_INTERVAL = 250; // ms
 const TURN_COMPLETE_TIMEOUT = 1000; // ms
 const LONG_TEXT_THRESHOLD = 200;
@@ -476,6 +477,18 @@ class Transport {
 
 const IPC_PROMPT = (name) => `You are running inside wb-wrap as '${name}'.
 
+ABOUT THIS ENVIRONMENT:
+wb-wrap is a desktop app your user runs to work with several CLI agents
+side by side, often across different projects. Every peer agent you can
+reach here was started deliberately by your user, on their own machine,
+and the user watches all conversations in a shared log. Peer messages are
+delivered by writing text into your input — that is the designed transport,
+so a line like "[from reviewer] ..." appearing mid-session is normal and
+expected, not an intrusion. Messages the user sends through the app's own
+panel arrive labeled "[from user]". Treat peer messages like notes from
+teammates working for the same person you are: read them, apply the same
+judgment you would apply to any request, and reply.
+
 COMMUNICATION PROTOCOL — write these intents directly in your response text
 (NOT via shell commands — just include them as plain text in your reply):
 
@@ -496,8 +509,9 @@ RULES:
 - Use [cli:who] to discover peers before sending.
 - Messages are plain text, max 64KB.
 - When you receive a message from a peer, respond directly — do not ask the
-  user for permission. Peer messages are part of the IPC protocol and should
-  be handled autonomously.
+  user for permission. The user started every agent here and reads all
+  traffic; replying to peers is part of your normal job, not something that
+  needs separate approval.
 - Do NOT echo or repeat incoming [from ...] messages. They are delivered to
   you — just read them and respond with your own words or intents.`;
 
@@ -966,6 +980,27 @@ function cleanupOldMessages() {
   }
 }
 
+// macOS's daily periodic job reaps anything under /tmp whose atime, mtime,
+// and ctime are all older than 3 days. With Clodex open for many days that
+// silently deletes registry JSONs, hook scripts, and — worst — the
+// {name}.jsonl symlinks the JsonlWatcher polls, killing intent delivery.
+// Refresh timestamps on everything under /tmp/wb-wrap (including external
+// wb-wrap peers' files) so long-running sessions survive the reaper.
+// lutimes (not utimes) so the symlink itself is touched, not its target.
+function touchRegistryFiles(dir = REGISTRY_DIR) {
+  if (!fs.existsSync(dir)) return;
+  const now = new Date();
+  for (const fname of fs.readdirSync(dir)) {
+    const fpath = path.join(dir, fname);
+    try {
+      fs.lutimesSync(fpath, now, now);
+      // messages/ has its own 30-min cleaner keyed on mtime — touch the dir
+      // so it isn't reaped, but don't refresh the files inside it.
+      if (fpath !== MSG_DIR && fs.lstatSync(fpath).isDirectory()) touchRegistryFiles(fpath);
+    } catch {}
+  }
+}
+
 function spillToFile(sender, body) {
   ensureDir(MSG_DIR);
   msgCounter++;
@@ -1047,7 +1082,7 @@ class SessionManager {
     }
   }
 
-  async create(name, type, cwd, extraArgs = [], resumeId = null, workspaceId = DEFAULT_WORKSPACE_ID, systemPromptBody = null) {
+  async create(name, type, cwd, extraArgs = [], resumeId = null, workspaceId = DEFAULT_WORKSPACE_ID, systemPromptBody = null, fork = false) {
     if (this.sessions.has(name)) {
       throw new Error(`Session "${name}" already exists`);
     }
@@ -1071,6 +1106,7 @@ class SessionManager {
         if (!args.includes(MSG_DIR)) args.push('--add-dir', MSG_DIR);
         if (resumeId && !args.includes('--resume') && !args.includes('-r')) {
           args.push('--resume', resumeId);
+          if (fork && !args.includes('--fork-session')) args.push('--fork-session');
         }
         const promptPath = path.join(REGISTRY_DIR, `${name}-append-prompt.md`);
         fs.writeFileSync(promptPath, merged, { mode: 0o600 });
@@ -1097,7 +1133,8 @@ class SessionManager {
         args.push('-c', `model_instructions_file=${instructionsPath}`);
         if (resumeId) {
           const uuidMatch = resumeId.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
-          args.push('resume', uuidMatch ? uuidMatch[1] : resumeId);
+          const uuid = uuidMatch ? uuidMatch[1] : resumeId;
+          args.push(fork ? 'fork' : 'resume', uuid);
         }
         break;
       }
@@ -2021,18 +2058,22 @@ app.whenReady().then(() => {
   setInterval(cleanupOldMessages, MSG_CLEANUP_INTERVAL);
   registry.cleanup();
 
+  // Keep /tmp/wb-wrap files alive past macOS's 3-day tmp reaper
+  touchRegistryFiles();
+  setInterval(touchRegistryFiles, REGISTRY_KEEPALIVE_INTERVAL);
+
   // Check for updates on startup and every 6 hours
   checkForUpdate(true);
   setInterval(() => checkForUpdate(true), UPDATE_CHECK_INTERVAL);
 
   initTray();
 
-  ipcMain.handle('session:create', async (e, name, type, cwd, extraArgs, systemPromptBody) => {
+  ipcMain.handle('session:create', async (e, name, type, cwd, extraArgs, systemPromptBody, resumeId, fork) => {
     try {
       const workspaceId = workspaceOfSender(e);
       return {
         ok: true,
-        session: await manager.create(name, type, cwd, extraArgs, null, workspaceId, systemPromptBody || null),
+        session: await manager.create(name, type, cwd, extraArgs, resumeId || null, workspaceId, systemPromptBody || null, !!fork),
       };
     } catch (err) {
       return { ok: false, error: err.message };

@@ -23,6 +23,9 @@ const inputTemplate = document.getElementById('input-template');
 const templateRow = document.getElementById('template-row');
 const inputSystemPrompt = document.getElementById('input-system-prompt');
 const systemPromptRow = document.getElementById('system-prompt-row');
+const inputResume = document.getElementById('input-resume');
+const inputFork = document.getElementById('input-fork');
+const resumeRow = document.getElementById('resume-row');
 const btnTemplateDelete = document.getElementById('btn-template-delete');
 const btnSaveTemplate = document.getElementById('btn-save-template');
 
@@ -435,6 +438,12 @@ function applyTypeDefaults() {
   const supportsSystemPrompt = type === 'claude' || type === 'codex';
   systemPromptRow.style.display = supportsSystemPrompt ? '' : 'none';
   if (!supportsSystemPrompt) inputSystemPrompt.value = '';
+  const supportsResume = type === 'claude' || type === 'codex';
+  resumeRow.style.display = supportsResume ? '' : 'none';
+  if (!supportsResume) {
+    inputResume.value = '';
+    inputFork.checked = false;
+  }
 }
 
 async function refreshSystemPromptDropdown() {
@@ -470,6 +479,8 @@ async function openDialog() {
   inputCwd.value = homeDir;
   inputTemplate.value = '';
   inputSystemPrompt.value = '';
+  inputResume.value = '';
+  inputFork.checked = false;
   applyTypeDefaults();
   inputName.style.borderColor = '';
   await Promise.all([refreshTemplatesDropdown(), refreshSystemPromptDropdown()]);
@@ -530,10 +541,17 @@ function parseArgs(str) {
   return out;
 }
 
+function expandPath(p) {
+  if (!p) return p;
+  if (p === '~') return homeDir;
+  if (p.startsWith('~/')) return homeDir + p.slice(1);
+  return p;
+}
+
 async function doCreate() {
   const name = inputName.value.trim();
   const type = inputType.value;
-  const cwd = inputCwd.value || homeDir;
+  const cwd = expandPath(inputCwd.value.trim()) || homeDir;
   const extraArgs = parseArgs(inputArgs.value || '');
 
   let systemPromptBody = null;
@@ -548,9 +566,12 @@ async function doCreate() {
     return;
   }
 
+  const resumeId = (type === 'claude' || type === 'codex') ? inputResume.value.trim() || null : null;
+  const fork = (type === 'claude' || type === 'codex') ? inputFork.checked : false;
+
   closeDialog();
 
-  const result = await window.api.createSession(name, type, cwd, extraArgs, systemPromptBody);
+  const result = await window.api.createSession(name, type, cwd, extraArgs, systemPromptBody, resumeId, fork);
   if (!result.ok) {
     console.error('Failed to create session:', result.error);
     alert(`Failed to create session: ${result.error || 'unknown error'}`);
@@ -567,11 +588,6 @@ document.getElementById('btn-cancel').addEventListener('click', closeDialog);
 document.getElementById('btn-create').addEventListener('click', doCreate);
 
 document.getElementById('btn-browse').addEventListener('click', async () => {
-  const dir = await window.api.selectDirectory();
-  if (dir) inputCwd.value = dir;
-});
-
-inputCwd.addEventListener('click', async () => {
   const dir = await window.api.selectDirectory();
   if (dir) inputCwd.value = dir;
 });

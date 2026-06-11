@@ -109,7 +109,7 @@
       </label>
       <label>Working Directory
         <div class="dir-picker">
-          <input type="text" id="input-cwd" readonly>
+          <input type="text" id="input-cwd" placeholder="~ or /absolute/path" spellcheck="false">
           <button id="btn-browse" class="secondary" type="button">Browse</button>
         </div>
       </label>
@@ -122,6 +122,13 @@
       <label>Extra CLI args
         <input type="text" id="input-args" placeholder="(none)">
         <span class="hint-text" id="args-hint"></span>
+      </label>
+      <label id="resume-row">Resume from session ID
+        <input type="text" id="input-resume" placeholder="(new session)" spellcheck="false">
+        <label style="display: flex; align-items: center; gap: 6px; margin-top: 4px; font-weight: normal;">
+          <input type="checkbox" id="input-fork" style="margin: 0;">
+          <span class="hint-text" style="margin: 0;">Fork instead of resume (branch into new session, original untouched)</span>
+        </label>
       </label>
       <div class="dialog-actions">
         <button id="btn-save-template" class="secondary" type="button" title="Save these settings as a reusable template">Save as Template…</button>
