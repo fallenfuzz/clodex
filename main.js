@@ -505,6 +505,11 @@ RULES:
 - Write intents as lines in your response text. Do NOT use printf, echo, or
   any shell command — the wrapper reads your response directly.
 - Intents must start at column 1 on their own line.
+- The body of [cli:dm] / [cli:broadcast] is EVERYTHING from the intent line
+  to the end of your reply — there is no terminator. Any text you write
+  after it ships to the peer, including other [cli:...] lines. So put the
+  intent last, after anything meant for your user, and write at most one
+  dm/broadcast per reply.
 - To output literal [cli:...], prefix with backslash: \\\\[cli:...]
 - Use [cli:who] to discover peers before sending.
 - Messages are plain text, max 64KB.
@@ -1121,7 +1126,9 @@ class SessionManager {
         // subcommand — clap expects subcommands AFTER top-level args.
         args = [...cleaned];
         setupCodexHook(name, cwd);
-        if (!args.includes('codex_hooks')) args.push('--enable', 'codex_hooks');
+        // `codex_hooks` was renamed to `hooks` (deprecated in codex-cli
+        // ~0.139). Honor either if the user passed one in extraArgs.
+        if (!args.includes('hooks') && !args.includes('codex_hooks')) args.push('--enable', 'hooks');
         if (!args.includes('--no-alt-screen')) args.push('--no-alt-screen');
         if (!args.some(a => a.startsWith('tui.status_line'))) {
           args.push('-c', codexStatusLineArg());
@@ -1472,8 +1479,11 @@ class SessionManager {
 
     if (body.length > MSG_SPILL_THRESHOLD) {
       const filePath = spillToFile(senderName, body);
-      this._injectText(target,
-        `${prefix} Message (${body.length} bytes) saved to ${filePath} — read it with your Read tool.`);
+      // @-mention makes Claude Code attach the file inline instead of
+      // spending a turn on a Read call; Codex has no equivalent.
+      this._injectText(target, target.agentType === 'claude'
+        ? `${prefix} Message (${body.length} bytes) attached: @${filePath}`
+        : `${prefix} Message (${body.length} bytes) saved to ${filePath} — read it with your Read tool.`);
     } else {
       this._injectText(target, `${prefix} ${body}`);
     }
