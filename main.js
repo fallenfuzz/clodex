@@ -1195,15 +1195,15 @@ class SessionManager {
     };
     this.sessions.set(name, session);
 
-    // Persist this session so we can resume it on next launch
-    if (agentType) {
-      persistence.upsert({
-        name, type, cwd,
-        extraArgs,
-        sessionId: resumeId || null,
-        workspaceId,
-      });
-    }
+    // Persist this session so we can resume it on next launch.
+    // Bash/other sessions persist too (restored as fresh shells in the
+    // saved cwd); their entry is dropped on natural exit instead.
+    persistence.upsert({
+      name, type, cwd,
+      extraArgs,
+      sessionId: resumeId || null,
+      workspaceId,
+    });
 
     // JSONL watcher for agent modes
     if (agentType) {
@@ -1273,6 +1273,12 @@ class SessionManager {
       // the session → workspace → window mapping. Otherwise the sidebar
       // tab sticks around as a "dead" entry.
       this._sendToSession(name, 'session-exit', name, exitCode);
+      // Agents keep their entry on natural exit (they get --resume'd next
+      // launch). A shell exiting naturally (user typed `exit`) is done —
+      // don't respawn it forever. Quit-kills keep entries for restore.
+      if (!agentType && !session._shuttingDown && !session._userKilled) {
+        persistence.remove(name);
+      }
       this._cleanup(name);
       if (typeof refreshTrayMenu === 'function') refreshTrayMenu();
     });
