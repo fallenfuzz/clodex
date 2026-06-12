@@ -184,6 +184,8 @@
         <h4>Claude statusline</h4>
         <p class="hint-text">Session name <code>[clodex:NAME]</code> is always shown.</p>
         <div id="prefs-claude-components" class="prefs-checkboxes"></div>
+        <p class="hint-text">Custom command (optional): gets the statusline JSON on stdin with <code>CLODEX_AGENT_NAME</code> set; its output replaces the components above. Falls back to them if it fails or prints nothing.</p>
+        <input type="text" id="prefs-claude-sl-cmd" placeholder="$CLAUDE_PROJECT_DIR/.claude/status-line.sh" spellcheck="false">
       </section>
       <section>
         <h4>Codex statusline</h4>

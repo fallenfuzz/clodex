@@ -276,6 +276,7 @@ const CODEX_SL_COMPONENTS = [
 const DEFAULT_UI_SETTINGS = {
   statusline: {
     claude: ['model', 'context', 'cost', 'cwd'],
+    claudeCommand: '',
     codex: ['context-used', 'model-name', 'project-root', 'git-branch', 'five-hour-limit', 'current-dir'],
   },
   proxyEnabled: false,
@@ -289,6 +290,7 @@ const uiSettings = {
       return {
         statusline: {
           claude: Array.isArray(raw?.statusline?.claude) ? raw.statusline.claude : DEFAULT_UI_SETTINGS.statusline.claude,
+          claudeCommand: typeof raw?.statusline?.claudeCommand === 'string' ? raw.statusline.claudeCommand : '',
           codex: Array.isArray(raw?.statusline?.codex) ? raw.statusline.codex : DEFAULT_UI_SETTINGS.statusline.codex,
         },
         proxyEnabled: typeof raw?.proxyEnabled === 'boolean' ? raw.proxyEnabled : DEFAULT_UI_SETTINGS.proxyEnabled,
@@ -302,6 +304,7 @@ const uiSettings = {
     const next = {
       statusline: {
         claude: partial?.statusline?.claude ?? cur.statusline.claude,
+        claudeCommand: partial?.statusline?.claudeCommand ?? cur.statusline.claudeCommand,
         codex: partial?.statusline?.codex ?? cur.statusline.codex,
       },
       proxyEnabled: partial?.proxyEnabled ?? cur.proxyEnabled,
@@ -575,8 +578,17 @@ function mergeCodexInstructions(extraArgs, ipcPrompt, libraryBody) {
 // Session name prefix is always shown. Components: model, context, cost,
 // cwd, git-branch. Context % is a byte-count estimate (bytes/5 ≈ tokens
 // vs 200k budget) — cheap and monotonic enough for a status indicator.
+//
+// If the user configured a custom statusline command (Preferences), the
+// generated script becomes a wrapper: it still writes the ctx side-channel
+// (the sidebar badge depends on it), exports CLODEX_AGENT_NAME for the
+// custom script, pipes the statusline JSON through the command, and falls
+// back to the built-in component line when the command fails or prints
+// nothing (e.g. a $CLAUDE_PROJECT_DIR-relative script missing in this repo).
 function renderClaudeStatusScript(name) {
-  const enabled = new Set(uiSettings.get().statusline.claude);
+  const sl = uiSettings.get().statusline;
+  const enabled = new Set(sl.claude);
+  const customCmd = (sl.claudeCommand || '').trim();
   const pieces = [`\\033[36m[clodex:${name}]\\033[0m`];
   const fmt = [];
   const vars = [];
@@ -602,7 +614,13 @@ SHORT_CWD="\${CWD##*/}"
 ${branchSh}
 # Side-channel: expose the numeric ctx% to Clodex for sidebar decoration
 echo -n "\${CTX_NUM}" > "${REGISTRY_DIR}/${name}-ctx" 2>/dev/null || true
-printf '${format}'${fmt.length ? ' ' + fmt.map(v => `"${v}"`).join(' ') : ''}
+${customCmd ? `export CLODEX_AGENT_NAME="${name}"
+OUT="$(printf '%s' "$INPUT" | ( ${customCmd} ) 2>/dev/null)"
+if [ -n "$OUT" ]; then
+  printf '%s\\n' "$OUT"
+  exit 0
+fi
+` : ''}printf '${format}'${fmt.length ? ' ' + fmt.map(v => `"${v}"`).join(' ') : ''}
 `;
 }
 

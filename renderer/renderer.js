@@ -978,6 +978,7 @@ window.api.onRequestOpenNewDialog(() => openDialog());
 
 const prefsOverlay = document.getElementById('prefs-overlay');
 const prefsClaudeBox = document.getElementById('prefs-claude-components');
+const prefsClaudeCmd = document.getElementById('prefs-claude-sl-cmd');
 const prefsCodexBox = document.getElementById('prefs-codex-components');
 const prefsProxyEnabled = document.getElementById('prefs-proxy-enabled');
 const prefsProxyUrl = document.getElementById('prefs-proxy-url');
@@ -1020,6 +1021,7 @@ function renderPrefsCheckboxes(container, all, enabled, labels) {
 async function openPrefs() {
   const s = await window.api.getSettings();
   renderPrefsCheckboxes(prefsClaudeBox, s.claudeComponents, s.statusline.claude, CLAUDE_LABELS);
+  prefsClaudeCmd.value = s.statusline.claudeCommand || '';
   renderPrefsCheckboxes(prefsCodexBox, s.codexComponents, s.statusline.codex, CODEX_LABELS);
   prefsProxyEnabled.checked = !!s.proxyEnabled;
   prefsProxyUrl.value = s.proxyUrl || 'http://127.0.0.1:7800';
@@ -1039,6 +1041,7 @@ document.getElementById('btn-prefs-save').addEventListener('click', async () => 
   await window.api.setSettings({
     statusline: {
       claude: collectChecked(prefsClaudeBox),
+      claudeCommand: prefsClaudeCmd.value.trim(),
       codex: collectChecked(prefsCodexBox),
     },
     proxyEnabled: prefsProxyEnabled.checked,
