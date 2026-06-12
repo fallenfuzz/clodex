@@ -1462,9 +1462,12 @@ class SessionManager {
     if (body.length > MSG_SPILL_THRESHOLD) {
       const filePath = spillToFile(senderName, body);
       // @-mention makes Claude Code attach the file inline instead of
-      // spending a turn on a Read call; Codex has no equivalent.
+      // spending a turn on a Read call; Codex has no equivalent. The
+      // trailing space after the path closes the @-autocomplete popup —
+      // without it the deferred Enter can land on the popup and select a
+      // DIFFERENT file (observed live: pointer said msg-2, body was msg-3).
       this._injectText(target, target.agentType === 'claude'
-        ? `${prefix} Message (${body.length} bytes) attached: @${filePath}`
+        ? `${prefix} Message (${body.length} bytes) attached: @${filePath} `
         : `${prefix} Message (${body.length} bytes) saved to ${filePath} — read it with your Read tool.`);
     } else {
       this._injectText(target, `${prefix} ${body}`);
