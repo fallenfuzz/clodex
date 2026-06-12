@@ -32,13 +32,17 @@ function fixPathFromLoginShell() {
 }
 fixPathFromLoginShell();
 
-const REGISTRY_DIR = '/tmp/wb-wrap';
+// Clodex-owned runtime dir: registry, sockets, hook scripts, prompt files,
+// jsonl symlinks, spilled messages. Lives in $HOME (not /tmp) so macOS's
+// 3-day tmp reaper can't delete files under long-running sessions, and kept
+// short because {name}.sock must fit the 104-char Unix socket path limit.
+// Moving here (v0.6.6) ended /tmp/wb-wrap interop with the Python wb-wrap.
+const REGISTRY_DIR = path.join(os.homedir(), '.clodex');
 const MSG_DIR = path.join(REGISTRY_DIR, 'messages');
 const MAX_MSG = 65536;
 const MSG_SPILL_THRESHOLD = 500;
 const MSG_MAX_AGE = 1800;
 const MSG_CLEANUP_INTERVAL = 5 * 60 * 1000; // ms
-const REGISTRY_KEEPALIVE_INTERVAL = 6 * 60 * 60 * 1000; // ms
 const POLL_INTERVAL = 250; // ms
 const TURN_COMPLETE_TIMEOUT = 1000; // ms
 const LONG_TEXT_THRESHOLD = 200;
@@ -978,27 +982,6 @@ function cleanupOldMessages() {
   }
 }
 
-// macOS's daily periodic job reaps anything under /tmp whose atime, mtime,
-// and ctime are all older than 3 days. With Clodex open for many days that
-// silently deletes registry JSONs, hook scripts, and — worst — the
-// {name}.jsonl symlinks the JsonlWatcher polls, killing intent delivery.
-// Refresh timestamps on everything under /tmp/wb-wrap (including external
-// wb-wrap peers' files) so long-running sessions survive the reaper.
-// lutimes (not utimes) so the symlink itself is touched, not its target.
-function touchRegistryFiles(dir = REGISTRY_DIR) {
-  if (!fs.existsSync(dir)) return;
-  const now = new Date();
-  for (const fname of fs.readdirSync(dir)) {
-    const fpath = path.join(dir, fname);
-    try {
-      fs.lutimesSync(fpath, now, now);
-      // messages/ has its own 30-min cleaner keyed on mtime — touch the dir
-      // so it isn't reaped, but don't refresh the files inside it.
-      if (fpath !== MSG_DIR && fs.lstatSync(fpath).isDirectory()) touchRegistryFiles(fpath);
-    } catch {}
-  }
-}
-
 function spillToFile(sender, body) {
   ensureDir(MSG_DIR);
   msgCounter++;
@@ -1396,8 +1379,8 @@ class SessionManager {
   async _handleIntent(senderName, intent, senderWorkspaceId = null) {
     const session = this.sessions.get(senderName);
     // Broadcast & who are workspace-scoped for Clodex-originated intents:
-    // they only see sessions in the same workspace. External peers stay
-    // global because they have no workspace concept. Inbound wb-wrap
+    // they only see sessions in the same workspace. External socket peers
+    // stay global because they have no workspace concept. Inbound socket
     // broadcasts bypass this entirely (handled in the Transport callback).
     const senderWs = senderWorkspaceId ?? (session && session.workspaceId) ?? null;
 
@@ -2032,7 +2015,7 @@ function workspaceOfSender(e) {
   return DEFAULT_WORKSPACE_ID;
 }
 
-// Prevent two Clodex instances from racing on /tmp/wb-wrap/ sockets and
+// Prevent two Clodex instances from racing on ~/.clodex sockets and
 // persistence files. If a second instance launches, focus the existing one.
 const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) {
@@ -2060,10 +2043,6 @@ app.whenReady().then(() => {
   cleanupOldMessages();
   setInterval(cleanupOldMessages, MSG_CLEANUP_INTERVAL);
   registry.cleanup();
-
-  // Keep /tmp/wb-wrap files alive past macOS's 3-day tmp reaper
-  touchRegistryFiles();
-  setInterval(touchRegistryFiles, REGISTRY_KEEPALIVE_INTERVAL);
 
   // Check for updates on startup and every 6 hours
   checkForUpdate(true);

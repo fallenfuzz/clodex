@@ -16,7 +16,7 @@ A visual multi-agent PTY manager for **Cl**aude Code and C**odex** CLIs. Run mul
 - **Edit args mid-stream** — right-click a session → "Edit Args…" to update its CLI args; choose to apply on next spawn or restart immediately (sessionId is preserved across restart)
 - **Customizable statusline** — via Preferences (⌘,), pick which components show in Claude and Codex statuslines
 - **Persistence** — sessions resume across app restarts via `claude --resume` / `codex resume`
-- **Wire-compatible with [wb-wrap](https://github.com/bogdan/wb-wrap)** — registers on `/tmp/wb-wrap/` so Clodex sessions and external `wb-wrap` instances can talk
+- **Self-contained runtime** — registry, sockets, and message files live under `~/.clodex/`, owned entirely by Clodex
 
 ## Install
 
@@ -67,7 +67,7 @@ Once two or more agent sessions are running, they can message each other. Just t
 
 Bash sessions are private terminals — they don't participate in IPC.
 
-**Scoping:** `[cli:broadcast]` and `[cli:who]` are scoped to the sender's workspace — they only see agents in the same window. External `wb-wrap` peers on the machine are still reached (they have no workspace concept). `[cli:dm <name>]` is global: if an agent by that name exists anywhere, it'll receive the DM.
+**Scoping:** `[cli:broadcast]` and `[cli:who]` are scoped to the sender's workspace — they only see agents in the same window. `[cli:dm <name>]` is global: if an agent by that name exists in any workspace, it'll receive the DM.
 
 ### Prompts library
 
@@ -113,11 +113,11 @@ npm run dist:mac       # build .dmg + .zip for both archs
 
 Each agent session is a node-pty subprocess running `claude` or `codex`. Clodex does three things at spawn:
 
-1. **Registers on `/tmp/wb-wrap/{name}.sock`** so external `wb-wrap` peers can deliver messages.
-2. **Installs a SessionStart hook** that creates a symlink (`/tmp/wb-wrap/{name}.jsonl`) pointing at the agent's transcript file.
+1. **Registers on `~/.clodex/{name}.sock`** so messages can be delivered across Clodex windows.
+2. **Installs a SessionStart hook** that creates a symlink (`~/.clodex/{name}.jsonl`) pointing at the agent's transcript file.
 3. **Injects the IPC protocol as a system prompt** — `--append-system-prompt-file` for Claude, `-c model_instructions_file=…` for Codex — so the agent knows the `[cli:…]` intents it can emit.
 
-A watcher tails the JSONL (seeking to EOF on first open so past turns don't re-fire), extracts assistant text, and scans it for `[cli:…]` intents. Matching intents get routed to the target session's PTY stdin or to an external peer's Unix socket. Messages larger than 500 bytes spill to `/tmp/wb-wrap/messages/` and are delivered as a pointer for the recipient to read via its file-access tool.
+A watcher tails the JSONL (seeking to EOF on first open so past turns don't re-fire), extracts assistant text, and scans it for `[cli:…]` intents. Matching intents get routed to the target session's PTY stdin. Messages larger than 500 bytes spill to `~/.clodex/messages/` and are delivered as a pointer for the recipient to read via its file-access tool.
 
 Persistent data lives under `~/Library/Application Support/Clodex/`:
 - `sessions.json` — one entry per session with name, type, cwd, extraArgs, sessionId (for resume), workspaceId, label
@@ -126,7 +126,7 @@ Persistent data lives under `~/Library/Application Support/Clodex/`:
 - `templates.json` — saved new-session dialog configs
 - `ui-settings.json` — statusline component choices
 
-See the [wb-wrap project](https://github.com/bogdan/wb-wrap) for the original CLI version this app is derived from.
+Clodex is derived from the [wb-wrap project](https://github.com/bogdan/wb-wrap), a proof-of-concept CLI version of the same idea. As of v0.6.6 they are independent: Clodex owns its runtime dir (`~/.clodex/`) and no longer shares the `/tmp/wb-wrap/` namespace with wb-wrap sessions.
 
 ## License
 
