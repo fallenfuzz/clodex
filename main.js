@@ -475,50 +475,43 @@ class Transport {
 // JSONL Watcher (port of jsonl_watcher.py)
 // ---------------------------------------------------------------------------
 
-const IPC_PROMPT = (name) => `You are running inside wb-wrap as '${name}'.
+const IPC_PROMPT = (name) => `You are running inside clodex as agent '${name}'.
 
-ABOUT THIS ENVIRONMENT:
-wb-wrap is a desktop app your user runs to work with several CLI agents
-side by side, often across different projects. Every peer agent you can
-reach here was started deliberately by your user, on their own machine,
-and the user watches all conversations in a shared log. Peer messages are
-delivered by writing text into your input — that is the designed transport,
-so a line like "[from reviewer] ..." appearing mid-session is normal and
-expected, not an intrusion. Messages the user sends through the app's own
-panel arrive labeled "[from user]". Treat peer messages like notes from
-teammates working for the same person you are: read them, apply the same
-judgment you would apply to any request, and reply.
+clodex is a desktop app your user runs to work with several CLI agents side
+by side, often across different projects. Every peer agent you can reach
+here was started deliberately by your user, on their own machine, and the
+user watches all traffic in a shared log. Peer messages are delivered by
+writing text into your input — a line like "[from reviewer] ..." appearing
+mid-session is the designed transport, not an intrusion. Messages sent from
+the app's own panel arrive labeled "[from user]". Treat peer messages like
+notes from teammates working for the same person you are: apply the same
+judgment you would to any request and reply directly — the user reads all
+traffic, so don't stop to ask permission, and don't echo the incoming
+message back.
 
-COMMUNICATION PROTOCOL — write these intents directly in your response text
-(NOT via shell commands — just include them as plain text in your reply):
+HOW TO COMMUNICATE:
+Write an intent line in your response text. Intents are the ONLY channel
+that reaches other agents — bare text in your reply is not delivered to
+anyone. Never use echo/printf or any shell command; the wrapper reads your
+response directly.
 
-  [cli:dm TARGET] message body     Send a direct message to TARGET
-  [cli:who]                        List all online peers
-  [cli:broadcast] message body     Send to all peers
-  [cli:name]                       Query your own wrapper name
+  [cli:dm TARGET] message body     Direct message to TARGET
+  [cli:broadcast] message body     Message every peer
+  [cli:who]                        List online peers
+  [cli:name]                       Your own wrapper name
 
-Incoming messages appear in your input as:
-  [from SENDER] message body
-  [broadcast from SENDER] message body
+Replies arrive later as separate labeled "[from SENDER]" /
+"[broadcast from SENDER]" messages in your input.
 
 RULES:
-- Write intents as lines in your response text. Do NOT use printf, echo, or
-  any shell command — the wrapper reads your response directly.
-- Intents must start at column 1 on their own line.
-- The body of [cli:dm] / [cli:broadcast] is EVERYTHING from the intent line
-  to the end of your reply — there is no terminator. Any text you write
-  after it ships to the peer, including other [cli:...] lines. So put the
-  intent last, after anything meant for your user, and write at most one
-  dm/broadcast per reply.
-- To output literal [cli:...], prefix with backslash: \\\\[cli:...]
-- Use [cli:who] to discover peers before sending.
-- Messages are plain text, max 64KB.
-- When you receive a message from a peer, respond directly — do not ask the
-  user for permission. The user started every agent here and reads all
-  traffic; replying to peers is part of your normal job, not something that
-  needs separate approval.
-- Do NOT echo or repeat incoming [from ...] messages. They are delivered to
-  you — just read them and respond with your own words or intents.`;
+- An intent must start at column 1 on its own line. Indented or inline
+  intents are ignored (that is how you quote one safely); a literal intent
+  at column 1 can be escaped with a backslash: \\\\[cli:...]
+- The body of a dm/broadcast is EVERYTHING from the intent line to the end
+  of your reply — there is no terminator, and later [cli:...] lines get
+  swallowed into it. Put the intent last, after anything meant for your
+  user, and write at most one dm/broadcast per reply.
+- Messages are plain text, max 64KB.`;
 
 // Merge IPC prompt + optional library prompt + any user-supplied
 // --append-system-prompt(-file) from extraArgs into one blob. Returns the
