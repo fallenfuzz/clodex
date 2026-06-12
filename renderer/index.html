@@ -123,12 +123,13 @@
         <input type="text" id="input-args" placeholder="(none)">
         <span class="hint-text" id="args-hint"></span>
       </label>
-      <label id="proxy-row">
-        <label style="display: flex; align-items: center; gap: 6px; font-weight: normal;">
-          <input type="checkbox" id="input-proxy-enabled" style="margin: 0;">
-          <span>Route through API proxy</span>
-        </label>
-        <input type="text" id="input-proxy-url" placeholder="http://127.0.0.1:7800" spellcheck="false" disabled>
+      <label id="proxy-row">API Proxy
+        <select id="input-proxy-mode">
+          <option value="">Default</option>
+          <option value="off">Off</option>
+          <option value="custom">Custom URL…</option>
+        </select>
+        <input type="text" id="input-proxy-url" placeholder="http://127.0.0.1:7800" spellcheck="false" style="display:none;">
         <span class="hint-text">Traffic goes via &lt;proxy&gt;/agent/&lt;name&gt;/… — Claude: ANTHROPIC_BASE_URL · Codex: openai_base_url</span>
       </label>
       <label id="resume-row">Resume from session ID
@@ -155,9 +156,17 @@
       <label>Extra CLI args
         <input type="text" id="args-input" placeholder="(none)">
       </label>
+      <label id="args-proxy-row">API Proxy
+        <select id="args-proxy-mode">
+          <option value="">Default</option>
+          <option value="off">Off</option>
+          <option value="custom">Custom URL…</option>
+        </select>
+        <input type="text" id="args-proxy-url" placeholder="http://127.0.0.1:7800" spellcheck="false" style="display:none;">
+      </label>
       <label style="display: flex; align-items: center; gap: 8px;">
         <input type="checkbox" id="args-restart" style="margin: 0;">
-        <span>Restart session now (kills running process, respawns with new args)</span>
+        <span>Restart session now (kills running process, respawns with new settings)</span>
       </label>
       <div class="dialog-actions">
         <div style="flex: 1;"></div>
@@ -180,6 +189,15 @@
         <h4>Codex statusline</h4>
         <p class="hint-text">Applied at session start. Existing Codex sessions need a restart to pick up changes.</p>
         <div id="prefs-codex-components" class="prefs-checkboxes"></div>
+      </section>
+      <section>
+        <h4>API proxy</h4>
+        <p class="hint-text">Default for all agent sessions; override per session at create or via Edit Session Args. Applied at spawn — running sessions pick it up on restart.</p>
+        <label style="display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="prefs-proxy-enabled" style="margin: 0;">
+          <span>Route agent sessions through an API proxy</span>
+        </label>
+        <input type="text" id="prefs-proxy-url" placeholder="http://127.0.0.1:7800" spellcheck="false">
       </section>
       <div class="dialog-actions">
         <div style="flex: 1;"></div>

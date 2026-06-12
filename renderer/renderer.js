@@ -27,8 +27,33 @@ const inputResume = document.getElementById('input-resume');
 const inputFork = document.getElementById('input-fork');
 const resumeRow = document.getElementById('resume-row');
 const proxyRow = document.getElementById('proxy-row');
-const inputProxyEnabled = document.getElementById('input-proxy-enabled');
+const inputProxyMode = document.getElementById('input-proxy-mode');
 const inputProxyUrl = document.getElementById('input-proxy-url');
+
+// Map a proxy <select> mode + URL field to the persisted tri-state value:
+// null = follow the Clodex-level preference, false = off, string = custom.
+function proxyValueFromControls(modeSel, urlInput) {
+  if (modeSel.value === 'off') return false;
+  if (modeSel.value === 'custom') return urlInput.value.trim() || false;
+  return null;
+}
+
+function setProxyControls(modeSel, urlInput, proxy, rememberedUrl) {
+  modeSel.value = proxy === false ? 'off' : (typeof proxy === 'string' ? 'custom' : '');
+  urlInput.value = typeof proxy === 'string' ? proxy : (rememberedUrl || 'http://127.0.0.1:7800');
+  urlInput.style.display = modeSel.value === 'custom' ? '' : 'none';
+}
+
+// Reflect the global preference in the "Default" option label so the
+// dialog says what inheriting actually means right now.
+function labelProxyDefault(modeSel, settings) {
+  const opt = modeSel.querySelector('option[value=""]');
+  if (opt) {
+    opt.textContent = settings?.proxyEnabled
+      ? `Default (on — ${settings.proxyUrl})`
+      : 'Default (off)';
+  }
+}
 const btnTemplateDelete = document.getElementById('btn-template-delete');
 const btnSaveTemplate = document.getElementById('btn-save-template');
 
@@ -449,8 +474,10 @@ function applyTypeDefaults() {
   }
   // Proxy routing only makes sense for agent types
   proxyRow.style.display = supportsResume ? '' : 'none';
-  if (!supportsResume) inputProxyEnabled.checked = false;
-  inputProxyUrl.disabled = !inputProxyEnabled.checked;
+  if (!supportsResume) {
+    inputProxyMode.value = '';
+    inputProxyUrl.style.display = 'none';
+  }
 }
 
 async function refreshSystemPromptDropdown() {
@@ -488,7 +515,6 @@ async function openDialog() {
   inputSystemPrompt.value = '';
   inputResume.value = '';
   inputFork.checked = false;
-  inputProxyEnabled.checked = false;
   applyTypeDefaults();
   inputName.style.borderColor = '';
   const [, , settings] = await Promise.all([
@@ -496,16 +522,17 @@ async function openDialog() {
     refreshSystemPromptDropdown(),
     window.api.getSettings(),
   ]);
-  inputProxyUrl.value = settings?.proxyUrl || 'http://127.0.0.1:7800';
+  setProxyControls(inputProxyMode, inputProxyUrl, null, settings?.proxyUrl);
+  labelProxyDefault(inputProxyMode, settings);
   dialogOverlay.classList.remove('hidden');
   setTimeout(() => inputName.select(), 50);
 }
 
 inputType.addEventListener('change', applyTypeDefaults);
 
-inputProxyEnabled.addEventListener('change', () => {
-  inputProxyUrl.disabled = !inputProxyEnabled.checked;
-  if (inputProxyEnabled.checked) inputProxyUrl.focus();
+inputProxyMode.addEventListener('change', () => {
+  inputProxyUrl.style.display = inputProxyMode.value === 'custom' ? '' : 'none';
+  if (inputProxyMode.value === 'custom') inputProxyUrl.focus();
 });
 
 // Apply a template's values to the form when selected
@@ -586,12 +613,12 @@ async function doCreate() {
 
   const resumeId = (type === 'claude' || type === 'codex') ? inputResume.value.trim() || null : null;
   const fork = (type === 'claude' || type === 'codex') ? inputFork.checked : false;
-  const proxy = (type === 'claude' || type === 'codex') && inputProxyEnabled.checked
-    ? inputProxyUrl.value.trim() || null : null;
+  const proxy = (type === 'claude' || type === 'codex')
+    ? proxyValueFromControls(inputProxyMode, inputProxyUrl) : null;
 
   closeDialog();
 
-  if (proxy) window.api.setSettings({ proxyUrl: proxy }); // remember last used
+  if (typeof proxy === 'string') window.api.setSettings({ proxyUrl: proxy }); // remember last used
   const result = await window.api.createSession(name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy);
   if (!result.ok) {
     console.error('Failed to create session:', result.error);
@@ -952,6 +979,8 @@ window.api.onRequestOpenNewDialog(() => openDialog());
 const prefsOverlay = document.getElementById('prefs-overlay');
 const prefsClaudeBox = document.getElementById('prefs-claude-components');
 const prefsCodexBox = document.getElementById('prefs-codex-components');
+const prefsProxyEnabled = document.getElementById('prefs-proxy-enabled');
+const prefsProxyUrl = document.getElementById('prefs-proxy-url');
 const CLAUDE_LABELS = {
   'model': 'Model name',
   'context': 'Context usage (estimated)',
@@ -992,6 +1021,8 @@ async function openPrefs() {
   const s = await window.api.getSettings();
   renderPrefsCheckboxes(prefsClaudeBox, s.claudeComponents, s.statusline.claude, CLAUDE_LABELS);
   renderPrefsCheckboxes(prefsCodexBox, s.codexComponents, s.statusline.codex, CODEX_LABELS);
+  prefsProxyEnabled.checked = !!s.proxyEnabled;
+  prefsProxyUrl.value = s.proxyUrl || 'http://127.0.0.1:7800';
   prefsOverlay.classList.remove('hidden');
 }
 
@@ -1010,6 +1041,8 @@ document.getElementById('btn-prefs-save').addEventListener('click', async () => 
       claude: collectChecked(prefsClaudeBox),
       codex: collectChecked(prefsCodexBox),
     },
+    proxyEnabled: prefsProxyEnabled.checked,
+    proxyUrl: prefsProxyUrl.value.trim() || 'http://127.0.0.1:7800',
   });
   closePrefs();
 });
@@ -1024,14 +1057,29 @@ const argsOverlay = document.getElementById('args-overlay');
 const argsInput = document.getElementById('args-input');
 const argsTarget = document.getElementById('args-target');
 const argsRestart = document.getElementById('args-restart');
+const argsProxyRow = document.getElementById('args-proxy-row');
+const argsProxyMode = document.getElementById('args-proxy-mode');
+const argsProxyUrl = document.getElementById('args-proxy-url');
 let argsEditingName = null;
 
+argsProxyMode.addEventListener('change', () => {
+  argsProxyUrl.style.display = argsProxyMode.value === 'custom' ? '' : 'none';
+  if (argsProxyMode.value === 'custom') argsProxyUrl.focus();
+});
+
 async function openArgsDialog(name) {
-  const res = await window.api.getSessionArgs(name);
+  const [res, settings] = await Promise.all([
+    window.api.getSessionArgs(name),
+    window.api.getSettings(),
+  ]);
   if (!res || !res.ok) { alert('Session not found in persistence.'); return; }
   argsEditingName = name;
-  argsTarget.textContent = `${name} (${res.type}) — new args apply on next spawn.`;
+  argsTarget.textContent = `${name} (${res.type}) — new settings apply on next spawn.`;
   argsInput.value = (res.extraArgs || []).map(a => /\s/.test(a) ? `"${a}"` : a).join(' ');
+  const isAgent = res.type === 'claude' || res.type === 'codex';
+  argsProxyRow.style.display = isAgent ? '' : 'none';
+  setProxyControls(argsProxyMode, argsProxyUrl, res.proxy, settings?.proxyUrl);
+  labelProxyDefault(argsProxyMode, settings);
   argsRestart.checked = false;
   argsOverlay.classList.remove('hidden');
   setTimeout(() => argsInput.focus(), 50);
@@ -1047,6 +1095,8 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
   if (!argsEditingName) return closeArgsDialog();
   const parsed = parseArgs(argsInput.value || '');
   const restart = argsRestart.checked;
+  const proxy = argsProxyRow.style.display === 'none'
+    ? null : proxyValueFromControls(argsProxyMode, argsProxyUrl);
   const name = argsEditingName;
   // Snapshot metadata from the current sidebar entry so we can re-render it
   // after the kill+respawn wipes it via session-exit.
@@ -1054,7 +1104,7 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
   const snapType = existing ? existing.querySelector('.session-type')?.textContent : null;
   const snapCwd = existing ? existing.dataset.cwd : null;
   closeArgsDialog();
-  const res = await window.api.setSessionArgs(name, parsed, restart);
+  const res = await window.api.setSessionArgs(name, parsed, restart, proxy);
   if (!res || !res.ok) {
     alert(`Failed: ${res && res.error ? res.error : 'unknown error'}`);
     return;

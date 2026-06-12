@@ -118,6 +118,14 @@ const persistence = {
       this._save(all);
     }
   },
+  setProxy(name, proxy) {
+    const all = this._load();
+    const entry = all.find(s => s.name === name);
+    if (entry) {
+      entry.proxy = proxy;
+      this._save(all);
+    }
+  },
   get(name) {
     return this._load().find(s => s.name === name) || null;
   },
@@ -270,6 +278,7 @@ const DEFAULT_UI_SETTINGS = {
     claude: ['model', 'context', 'cost', 'cwd'],
     codex: ['context-used', 'model-name', 'project-root', 'git-branch', 'five-hour-limit', 'current-dir'],
   },
+  proxyEnabled: false,
   proxyUrl: 'http://127.0.0.1:7800',
 };
 
@@ -282,6 +291,7 @@ const uiSettings = {
           claude: Array.isArray(raw?.statusline?.claude) ? raw.statusline.claude : DEFAULT_UI_SETTINGS.statusline.claude,
           codex: Array.isArray(raw?.statusline?.codex) ? raw.statusline.codex : DEFAULT_UI_SETTINGS.statusline.codex,
         },
+        proxyEnabled: typeof raw?.proxyEnabled === 'boolean' ? raw.proxyEnabled : DEFAULT_UI_SETTINGS.proxyEnabled,
         proxyUrl: typeof raw?.proxyUrl === 'string' ? raw.proxyUrl : DEFAULT_UI_SETTINGS.proxyUrl,
       };
     } catch { return DEFAULT_UI_SETTINGS; }
@@ -294,6 +304,7 @@ const uiSettings = {
         claude: partial?.statusline?.claude ?? cur.statusline.claude,
         codex: partial?.statusline?.codex ?? cur.statusline.codex,
       },
+      proxyEnabled: partial?.proxyEnabled ?? cur.proxyEnabled,
       proxyUrl: partial?.proxyUrl ?? cur.proxyUrl,
     };
     try {
@@ -617,6 +628,17 @@ function codexStatusLineArg() {
 function normalizeProxyBase(url) {
   const u = (url || '').trim().replace(/\/+$/, '');
   return u || null;
+}
+
+// Resolve a session's tri-state proxy setting to a base URL (or null = no
+// proxy). null/undefined = follow the Clodex-level preference; false =
+// explicitly off; string = explicit base URL. Resolved at spawn time, so a
+// changed global preference applies to inheriting sessions on next respawn.
+function resolveProxyBase(proxy) {
+  if (proxy === false) return null;
+  if (typeof proxy === 'string') return normalizeProxyBase(proxy);
+  const s = uiSettings.get();
+  return s.proxyEnabled ? normalizeProxyBase(s.proxyUrl) : null;
 }
 
 function setupClaudeHook(name, proxyBase = null) {
@@ -1084,7 +1106,7 @@ class SessionManager {
     if (this.sessions.has(name)) {
       throw new Error(`Session "${name}" already exists`);
     }
-    const proxyBase = normalizeProxyBase(proxy);
+    const proxyBase = resolveProxyBase(proxy);
 
     let cmd, args;
     const shell = process.env.SHELL || '/bin/bash';
@@ -1225,7 +1247,9 @@ class SessionManager {
       extraArgs,
       sessionId: resumeId || null,
       workspaceId,
-      proxy: proxyBase,
+      // Tri-state, NOT the resolved base: inheriting sessions must keep
+      // following the Clodex-level preference across restarts.
+      proxy: typeof proxy === 'string' ? normalizeProxyBase(proxy) : (proxy === false ? false : null),
     });
 
     // JSONL watcher for agent modes
@@ -2093,7 +2117,7 @@ app.whenReady().then(() => {
       const workspaceId = workspaceOfSender(e);
       return {
         ok: true,
-        session: await manager.create(name, type, cwd, extraArgs, resumeId || null, workspaceId, systemPromptBody || null, !!fork, proxy || null),
+        session: await manager.create(name, type, cwd, extraArgs, resumeId || null, workspaceId, systemPromptBody || null, !!fork, proxy ?? null),
       };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -2137,18 +2161,19 @@ app.whenReady().then(() => {
 
   ipcMain.handle('session:getArgs', (_e, name) => {
     const entry = persistence.get(name);
-    return entry ? { ok: true, extraArgs: entry.extraArgs || [], type: entry.type } : { ok: false };
+    return entry ? { ok: true, extraArgs: entry.extraArgs || [], type: entry.type, proxy: entry.proxy ?? null } : { ok: false };
   });
-  ipcMain.handle('session:setArgs', async (e, name, extraArgs, restart) => {
+  ipcMain.handle('session:setArgs', async (e, name, extraArgs, restart, proxy) => {
     const beforeKill = persistence.get(name);
     persistence.setExtraArgs(name, extraArgs);
+    persistence.setProxy(name, proxy ?? null);
     if (!restart) return { ok: true, restarted: false };
     if (!beforeKill) return { ok: false, error: 'Session not found in persistence' };
     const wsId = workspaceOfSender(e);
     try {
       if (manager.sessions.has(name)) await manager.kill(name);
       await new Promise(r => setTimeout(r, 300));
-      await manager.create(name, beforeKill.type, beforeKill.cwd, extraArgs, beforeKill.sessionId || null, wsId);
+      await manager.create(name, beforeKill.type, beforeKill.cwd, extraArgs, beforeKill.sessionId || null, wsId, null, false, proxy ?? null);
       if (beforeKill.label) persistence.setLabel(name, beforeKill.label);
       return { ok: true, restarted: true };
     } catch (err) {
@@ -2156,12 +2181,16 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('settings:get', () => ({
-    statusline: uiSettings.get().statusline,
-    claudeComponents: CLAUDE_SL_COMPONENTS,
-    codexComponents: CODEX_SL_COMPONENTS,
-    proxyUrl: uiSettings.get().proxyUrl,
-  }));
+  ipcMain.handle('settings:get', () => {
+    const s = uiSettings.get();
+    return {
+      statusline: s.statusline,
+      claudeComponents: CLAUDE_SL_COMPONENTS,
+      codexComponents: CODEX_SL_COMPONENTS,
+      proxyEnabled: s.proxyEnabled,
+      proxyUrl: s.proxyUrl,
+    };
+  });
   ipcMain.handle('settings:set', (_e, partial) => {
     const next = uiSettings.set(partial);
     rebuildAllStatusScripts(manager);
@@ -2308,7 +2337,7 @@ app.whenReady().then(() => {
           workspaceId,
           null,
           false,
-          entry.proxy || null,
+          entry.proxy ?? null,
         );
         restored.push({
           name: entry.name,
@@ -2350,7 +2379,7 @@ app.whenReady().then(() => {
         workspaceId,
         null,
         false,
-        entry.proxy || null,
+        entry.proxy ?? null,
       );
       return { ok: true };
     } catch (err) {
