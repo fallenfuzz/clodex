@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog, Menu, shell, Notification, Tray, nativeImage } = require('electron');
 const https = require('https');
+const http = require('http');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -563,6 +564,15 @@ function mergeCodexInstructions(extraArgs, ipcPrompt, libraryBody) {
   return { cleaned, merged: parts.filter(Boolean).join('\n\n') };
 }
 
+// Parse the statusline ctx side-channel "<pct>\t<used_tokens>\t<window_size>".
+// pct is the first whitespace-delimited field, so callers that still parseInt
+// the whole file keep working; tok/size are null on legacy single-value files.
+function parseCtxFile(raw) {
+  const parts = String(raw).trim().split('\t');
+  const num = (s) => { const n = parseInt(s, 10); return isNaN(n) ? null : n; };
+  return { pct: num(parts[0]), tok: num(parts[1]), size: num(parts[2]) };
+}
+
 // Render Claude's statusline bash script based on user-selected components.
 // Session name prefix is always shown. Components: model, context, cost,
 // cwd, git-branch. Context % is a byte-count estimate (bytes/5 ≈ tokens
@@ -574,7 +584,15 @@ function mergeCodexInstructions(extraArgs, ipcPrompt, libraryBody) {
 // custom script, pipes the statusline JSON through the command, and falls
 // back to the built-in component line when the command fails or prints
 // nothing (e.g. a $CLAUDE_PROJECT_DIR-relative script missing in this repo).
-function renderClaudeStatusScript(name) {
+// `headless` (set for proxy-routed sessions): suppress the visible component
+// line — wirescope's status bar already renders model/ctx/turn/cache/cost live,
+// so the in-terminal statusline would just double it. The script still RUNS to
+// write the -ctx side-channel: the context-window SIZE is off-wire (the proxy
+// only has the token count), so the CLI is the sole source of the bar's
+// denominator. A WORKING custom command still prints (the user opted in); only
+// the default-component-line fallback is suppressed under headless, so a
+// missing/failing custom command goes blank rather than resurrecting the line.
+function renderClaudeStatusScript(name, headless = false) {
   const sl = uiSettings.get().statusline;
   const enabled = new Set(sl.claude);
   const customCmd = (sl.claudeCommand || '').trim();
@@ -592,24 +610,28 @@ function renderClaudeStatusScript(name) {
     : '';
   return `#!/bin/bash
 INPUT="$(cat)"
-IFS=$'\\t' read -r MODEL CTX_NUM CTX_PCT COST CWD <<<"$(echo "$INPUT" | jq -r '[
+IFS=$'\\t' read -r MODEL CTX_NUM CTX_PCT COST CWD CTX_TOK CTX_SIZE <<<"$(echo "$INPUT" | jq -r '[
   (.model.display_name // "?"),
   ((.context_window.used_percentage // 0) | floor | tostring),
   (((.context_window.used_percentage // 0) | floor | tostring) + "%"),
   ("$" + (((.cost.total_cost_usd // 0) * 100 | floor) / 100 | tostring)),
-  (.workspace.current_dir // .cwd // "")
+  (.workspace.current_dir // .cwd // ""),
+  ((.context_window.total_input_tokens // 0) | floor | tostring),
+  ((.context_window.context_window_size // 0) | floor | tostring)
 ] | @tsv' 2>/dev/null)"
 SHORT_CWD="\${CWD##*/}"
 ${branchSh}
-# Side-channel: expose the numeric ctx% to Clodex for sidebar decoration
-echo -n "\${CTX_NUM}" > "${REGISTRY_DIR}/${name}-ctx" 2>/dev/null || true
+# Side-channel for Clodex: "<pct>\\t<used_tokens>\\t<window_size>". pct stays the
+# first field so legacy parseInt readers (sidebar badge) are unaffected; the
+# token counts feed the proxy bar's absolute "used/size" display.
+printf '%s\\t%s\\t%s' "\${CTX_NUM}" "\${CTX_TOK}" "\${CTX_SIZE}" > "${REGISTRY_DIR}/${name}-ctx" 2>/dev/null || true
 ${customCmd ? `export CLODEX_AGENT_NAME="${name}"
 OUT="$(printf '%s' "$INPUT" | ( ${customCmd} ) 2>/dev/null)"
 if [ -n "$OUT" ]; then
   printf '%s\\n' "$OUT"
   exit 0
 fi
-` : ''}printf '${format}'${fmt.length ? ' ' + fmt.map(v => `"${v}"`).join(' ') : ''}
+` : ''}${headless ? ': # headless: side-channel only, wirescope bar shows the line' : `printf '${format}'${fmt.length ? ' ' + fmt.map(v => `"${v}"`).join(' ') : ''}`}
 `;
 }
 
@@ -620,7 +642,7 @@ function rebuildAllStatusScripts(manager) {
   for (const [name, s] of manager.sessions) {
     if (s.agentType !== 'claude') continue;
     const p = path.join(REGISTRY_DIR, `${name}-statusline.sh`);
-    try { fs.writeFileSync(p, renderClaudeStatusScript(name), { mode: 0o700 }); } catch {}
+    try { fs.writeFileSync(p, renderClaudeStatusScript(name, !!s.proxyBase), { mode: 0o700 }); } catch {}
   }
 }
 
@@ -648,7 +670,180 @@ function resolveProxyBase(proxy) {
   return s.proxyEnabled ? normalizeProxyBase(s.proxyUrl) : null;
 }
 
-function setupClaudeHook(name, proxyBase = null) {
+// ---------------------------------------------------------------------------
+// wirescope integration — identity probe + per-session telemetry pull
+// ---------------------------------------------------------------------------
+// Agent sessions route through a local analytical proxy at
+// <base>/agent/<proxyAgent>/…. When that proxy is the real wirescope we can
+// PULL live per-session cost / cache-warmth / context off the wire — data the
+// statusline can't surface for an idle session (its script only runs while the
+// user is interacting). One /_status poll per base, fanned out to sessions by
+// EXACT proxyAgent match. We deliberately do not subscribe (push is for
+// streaming/refusals, a clodex2 concern).
+// See https://github.com/avirtual/wirescope (INTEGRATION.md).
+
+const { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, shapeProxyRecord } = require('./proxy-util');
+const PROXY_POLL_INTERVAL = 5000; // ms
+const PROXY_HTTP_TIMEOUT = 4000;  // ms
+const PROXY_PROBE_TTL = 60000;    // ms — re-confirm identity at most this often
+// /_identity product names we recognize. A set so the formerly-logproxy
+// rename (now wirescope, protocols.identity 2) stays trivial to extend.
+const PROXY_PRODUCTS = new Set(['wirescope']);
+
+const ProxyClient = {
+  _req(base, pathname, method = 'GET') {
+    return new Promise((resolve, reject) => {
+      let url;
+      try { url = new URL(base + pathname); } catch (e) { return reject(e); }
+      const lib = url.protocol === 'https:' ? https : http;
+      const req = lib.request(url, { method, timeout: PROXY_HTTP_TIMEOUT }, (res) => {
+        let body = '';
+        res.on('data', (d) => { body += d; });
+        res.on('end', () => {
+          let json = null;
+          try { json = JSON.parse(body); } catch {}
+          resolve({ status: res.statusCode, json });
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => req.destroy(new Error('timeout')));
+      req.end();
+    });
+  },
+  _getJson(base, pathname) { return this._req(base, pathname, 'GET'); },
+
+  // Arm/disarm a cache hold. hours=0 disarms. The proxy may decline a cold
+  // prefix (200 with armed:false, skipped:<state>) unless force=1. HTTP status
+  // reflects request validity, not the side-effect — branch on the body.
+  async hold(base, sessionId, hours, force) {
+    const qs = new URLSearchParams({ session: sessionId, hours: String(hours) });
+    if (force) qs.set('force', '1');
+    return this._req(base, `/_hold?${qs.toString()}`, 'POST');
+  },
+
+  // Confirm a base is our telemetry proxy (wirescope) and read its live
+  // capabilities. Prefers the /_identity handshake (v0.2.8+); falls back to
+  // /_status + proxy.version/flags for older deployments. Returns null when
+  // it's not recognized / unreachable.
+  async probe(base) {
+    try {
+      const id = await this._getJson(base, '/_identity');
+      if (id.status === 200 && id.json && PROXY_PRODUCTS.has(id.json.product)) {
+        return {
+          product: id.json.product,
+          version: id.json.version || null,
+          capabilities: id.json.capabilities || {},
+        };
+      }
+    } catch {}
+    try {
+      const st = await this._getJson(base, '/_status');
+      const p = st.json && st.json.proxy;
+      if (st.status === 200 && p && p.version) {
+        const flags = p.flags || {};
+        return {
+          // /_status carries no product field; this fallback only matches
+          // pre-/_identity deployments, which predate the wirescope rename.
+          product: 'logproxy',
+          version: p.version,
+          capabilities: {
+            stats: true,
+            hold: !!flags.hold,
+            warmth: !!flags.pinger,
+            subscribers: !!(p.subscribers && p.subscribers.enabled),
+          },
+        };
+      }
+    } catch {}
+    return null;
+  },
+
+  async status(base) {
+    const st = await this._getJson(base, '/_status');
+    if (st.status === 200 && st.json && Array.isArray(st.json.sessions)) {
+      return st.json.sessions;
+    }
+    return [];
+  },
+};
+
+// App-global poller (one per process, shared across windows): a single
+// /_status fetch per distinct proxy base each tick, regardless of window
+// count, fanned out to live routed sessions. Pauses entirely when no session
+// is routed through a proxy.
+class ProxyPoller {
+  constructor(manager) {
+    this.manager = manager;
+    this.timer = null;
+    this.probeCache = new Map(); // base -> { result, ts }
+    this.last = new Map();       // session name -> last shaped payload
+    this._busy = false;
+  }
+
+  start() {
+    if (this.timer) return;
+    this.timer = setInterval(() => this._tick().catch(() => {}), PROXY_POLL_INTERVAL);
+    this._tick().catch(() => {});
+  }
+
+  stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
+
+  snapshot(name) { return this.last.get(name) || null; }
+
+  _activeBases() {
+    const bases = new Map(); // base -> [session]
+    for (const s of this.manager.sessions.values()) {
+      if (!s.agentType || !s.proxyBase || !s.proxyAgent) continue;
+      if (!bases.has(s.proxyBase)) bases.set(s.proxyBase, []);
+      bases.get(s.proxyBase).push(s);
+    }
+    return bases;
+  }
+
+  async _probe(base) {
+    const cached = this.probeCache.get(base);
+    if (cached && Date.now() - cached.ts < PROXY_PROBE_TTL) return cached.result;
+    const result = await ProxyClient.probe(base);
+    this.probeCache.set(base, { result, ts: Date.now() });
+    return result;
+  }
+
+  async _tick() {
+    if (this._busy) return;
+    // Prune telemetry for sessions that have gone away.
+    for (const name of this.last.keys()) {
+      if (!this.manager.sessions.has(name)) this.last.delete(name);
+    }
+    const bases = this._activeBases();
+    if (bases.size === 0) return; // nobody cares — skip all HTTP
+    this._busy = true;
+    try {
+      for (const [base, sess] of bases) {
+        const probe = await this._probe(base);
+        if (!probe || !probe.capabilities.stats) continue;
+        let records;
+        try { records = await ProxyClient.status(base); } catch { continue; }
+        const byAgent = new Map();
+        for (const r of records) {
+          // Prefilter to our namespace; exact equality below is the real bind.
+          if (r && typeof r.agent === 'string' && r.agent.startsWith(PROXY_AGENT_PREFIX)) {
+            byAgent.set(r.agent, r);
+          }
+        }
+        for (const s of sess) {
+          const payload = shapeProxyRecord(byAgent.get(s.proxyAgent), probe);
+          payload.base = base; // poller context, not record shape — for the session-page link
+          this.last.set(s.name, payload);
+          this.manager._sendToSession(s.name, 'session-proxy', s.name, payload);
+        }
+      }
+    } finally {
+      this._busy = false;
+    }
+  }
+}
+
+function setupClaudeHook(name, proxyBase = null, proxyAgent = null) {
   ensureDir(REGISTRY_DIR);
   const linkPath = path.join(REGISTRY_DIR, `${name}.jsonl`);
   const scriptPath = path.join(REGISTRY_DIR, `${name}-hook.sh`);
@@ -683,7 +878,7 @@ mv -f "$TMPLINK" "${linkPath}"
 `;
   fs.writeFileSync(scriptPath, script, { mode: 0o700 });
 
-  fs.writeFileSync(statusPath, renderClaudeStatusScript(name), { mode: 0o700 });
+  fs.writeFileSync(statusPath, renderClaudeStatusScript(name, !!proxyBase), { mode: 0o700 });
 
   // Settings JSON
   const settings = {
@@ -701,7 +896,7 @@ mv -f "$TMPLINK" "${linkPath}"
   // their own ANTHROPIC_BASE_URL. /agent/<name>/ is the proxy's per-agent
   // addressing scheme (session name = agent name).
   if (proxyBase) {
-    settings.env = { ANTHROPIC_BASE_URL: `${proxyBase}/agent/${name}/anthropic` };
+    settings.env = { ANTHROPIC_BASE_URL: `${proxyBase}/agent/${proxyAgent || name}/anthropic` };
   }
   fs.writeFileSync(settingsPath, JSON.stringify(settings));
   return settingsPath;
@@ -1119,6 +1314,19 @@ class SessionManager {
     const shell = process.env.SHELL || '/bin/bash';
     const agentType = (type === 'claude') ? 'claude' : (type === 'codex') ? 'codex' : null;
 
+    // Stable per-session proxy identity (clodex-<name>-<nonce>). Reuse the
+    // persisted one across resume/restart/restore/clear; mint fresh on a new
+    // create or a fork (divergent session = fresh cost ledger); lazy-mint for
+    // legacy entries that predate this field. Uniqueness enforced against both
+    // persisted and live ids. See ProxyPoller / github.com/avirtual/wirescope.
+    let proxyAgent = null;
+    if (agentType) {
+      const taken = new Set();
+      for (const e of persistence.list()) if (e.proxyAgent) taken.add(e.proxyAgent);
+      for (const s of this.sessions.values()) if (s.proxyAgent) taken.add(s.proxyAgent);
+      proxyAgent = resolveProxyAgentId({ name, fork, existing: persistence.get(name), taken });
+    }
+
     switch (type) {
       case 'claude': {
         cmd = 'claude';
@@ -1134,7 +1342,7 @@ class SessionManager {
           (a, i) => a === '--settings' && (args[i + 1] || '').startsWith('/tmp/wb-wrap/'));
         if (staleSettings !== -1) args.splice(staleSettings, 2);
         if (!args.includes('--settings')) {
-          const settingsPath = setupClaudeHook(name, proxyBase);
+          const settingsPath = setupClaudeHook(name, proxyBase, proxyAgent);
           args.push('--settings', settingsPath);
         }
         ensureDir(MSG_DIR);
@@ -1169,7 +1377,7 @@ class SessionManager {
         args.push('-c', `model_instructions_file=${instructionsPath}`);
         // Optional API proxy routing (skip if the user already set one in args)
         if (proxyBase && !args.some(a => a.startsWith('openai_base_url='))) {
-          args.push('-c', `openai_base_url=${proxyBase}/agent/${name}/openai/v1`);
+          args.push('-c', `openai_base_url=${proxyBase}/agent/${proxyAgent || name}/openai/v1`);
         }
         if (resumeId) {
           const uuidMatch = resumeId.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
@@ -1243,6 +1451,7 @@ class SessionManager {
       agentType, lineBuffer: '', watcher: null,
       sessionId: resumeId || null,
       workspaceId,
+      proxyAgent, proxyBase,
     };
     this.sessions.set(name, session);
 
@@ -1258,6 +1467,7 @@ class SessionManager {
       // Tri-state, NOT the resolved base: inheriting sessions must keep
       // following the Clodex-level preference across restarts.
       proxy: typeof proxy === 'string' ? normalizeProxyBase(proxy) : (proxy === false ? false : null),
+      proxyAgent,
     });
 
     // JSONL watcher for agent modes
@@ -1295,15 +1505,14 @@ class SessionManager {
     // tail it to decorate the sidebar tab.
     if (agentType === 'claude') {
       const ctxPath = path.join(REGISTRY_DIR, `${name}-ctx`);
-      let lastPct = null;
+      let lastRaw = null;
       const readCtx = () => {
         try {
           const raw = fs.readFileSync(ctxPath, 'utf-8').trim();
-          const n = parseInt(raw, 10);
-          if (!isNaN(n) && n !== lastPct) {
-            lastPct = n;
-            this._sendToSession(name, 'session-ctx', name, n);
-          }
+          if (raw === lastRaw) return; // push on any field change (pct or tokens)
+          lastRaw = raw;
+          const c = parseCtxFile(raw);
+          if (c.pct != null) this._sendToSession(name, 'session-ctx', name, c.pct, c.tok, c.size);
         } catch {}
       };
       try {
@@ -2002,6 +2211,7 @@ function refreshAppMenu() {
 // ---------------------------------------------------------------------------
 
 const manager = new SessionManager();
+const proxyPoller = new ProxyPoller(manager);
 
 function createWindow(workspaceId = DEFAULT_WORKSPACE_ID) {
   // If a window for this workspace already exists, just bring it forward
@@ -2105,6 +2315,7 @@ if (!singleInstance) {
 
 app.whenReady().then(() => {
   PERSIST_FILE = path.join(app.getPath('userData'), 'sessions.json');
+  proxyPoller.start();
   TEMPLATES_FILE = path.join(app.getPath('userData'), 'templates.json');
   PROMPTS_FILE = path.join(app.getPath('userData'), 'prompts.json');
   WORKSPACES_FILE = path.join(app.getPath('userData'), 'workspaces.json');
@@ -2165,6 +2376,41 @@ app.whenReady().then(() => {
     if (!s) return { ok: false, error: 'Session not found' };
     manager._injectText(s, body);
     return { ok: true };
+  });
+
+  // Last-known proxy telemetry for a session — lets the renderer fill the
+  // status bar immediately on attach/switch instead of waiting for the next poll.
+  ipcMain.handle('proxy:snapshot', (_e, name) => proxyPoller.snapshot(name));
+
+  // Open an external URL in the default browser (e.g. the proxy session page).
+  // http(s) only — never hand arbitrary schemes to the OS opener.
+  ipcMain.handle('app:openExternal', (_e, url) => {
+    if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
+  });
+
+  // Arm/disarm a cache hold for a session. Writes are gated: the session must
+  // be routed AND exactly linked to a live proxy record (we use that record's
+  // own session_id, never a possibly-stale persisted one), and the proxy must
+  // advertise the hold capability. hours=0 disarms.
+  ipcMain.handle('proxy:hold', async (_e, name, hours, force) => {
+    const s = manager.sessions.get(name);
+    if (!s || !s.proxyBase) return { ok: false, error: 'Session is not routed through a proxy' };
+    const snap = proxyPoller.snapshot(name);
+    if (!snap || !snap.linked || !snap.sessionId) {
+      return { ok: false, error: 'No live proxy session to hold (unlinked)' };
+    }
+    if (snap.capabilities && snap.capabilities.hold === false) {
+      return { ok: false, error: 'This proxy does not support holds' };
+    }
+    try {
+      const r = await ProxyClient.hold(s.proxyBase, snap.sessionId, hours, !!force);
+      const j = r.json || {};
+      // Distinguish armed from declined (skipped) — a 200 can mean "I chose
+      // not to act". Surface the reason so the UI never reads a no-op as success.
+      return { ok: true, status: r.status, armed: !!j.armed, skipped: j.skipped || null, body: j };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
   });
 
   ipcMain.handle('session:getArgs', (_e, name) => {
@@ -2361,9 +2607,9 @@ app.whenReady().then(() => {
   // render them without double-spawning.
   const readCtxFor = (name) => {
     try {
-      const n = parseInt(fs.readFileSync(path.join(REGISTRY_DIR, `${name}-ctx`), 'utf-8').trim(), 10);
-      return isNaN(n) ? null : n;
-    } catch { return null; }
+      const c = parseCtxFile(fs.readFileSync(path.join(REGISTRY_DIR, `${name}-ctx`), 'utf-8'));
+      return { ctx: c.pct, ctxTok: c.tok, ctxSize: c.size };
+    } catch { return { ctx: null, ctxTok: null, ctxSize: null }; }
   };
 
   ipcMain.handle('app:restore-sessions', async (e) => {
@@ -2383,7 +2629,8 @@ app.whenReady().then(() => {
           cwd: entry.cwd,
           label: entry.label || null,
           replay,
-          ctx: readCtxFor(entry.name),
+          ...readCtxFor(entry.name),
+          proxy: proxyPoller.snapshot(entry.name),
         });
         continue;
       }
@@ -2404,7 +2651,8 @@ app.whenReady().then(() => {
           type: entry.type,
           cwd: entry.cwd,
           label: entry.label || null,
-          ctx: readCtxFor(entry.name),
+          ...readCtxFor(entry.name),
+          proxy: proxyPoller.snapshot(entry.name),
         });
       } catch (err) {
         // DO NOT remove from persistence — surface the failure to the UI

@@ -65,7 +65,14 @@ window.api = {
   onSessionActivity: (callback) =>
     ipcRenderer.on('session-activity', (_e, name, state) => callback(name, state)),
   onSessionCtx: (callback) =>
-    ipcRenderer.on('session-ctx', (_e, name, pct) => callback(name, pct)),
+    ipcRenderer.on('session-ctx', (_e, name, pct, tok, size) => callback(name, pct, tok, size)),
+  onSessionProxy: (callback) =>
+    ipcRenderer.on('session-proxy', (_e, name, payload) => callback(name, payload)),
+  openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
+  getProxySnapshot: (name) =>
+    ipcRenderer.invoke('proxy:snapshot', name),
+  proxyHold: (name, hours, force) =>
+    ipcRenderer.invoke('proxy:hold', name, hours, force),
   onSessionMention: (callback) =>
     ipcRenderer.on('session-mention', (_e, name, mtype, from) => callback(name, mtype, from)),
   onRequestSwitchSession: (callback) =>

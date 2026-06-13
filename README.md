@@ -15,6 +15,7 @@ A visual multi-agent PTY manager for **Cl**aude Code and C**odex** CLIs. Run mul
 - **Templates** — save New Session dialog configs and pick them from a dropdown
 - **Edit args mid-stream** — right-click a session → "Edit Args…" to update its CLI args; choose to apply on next spawn or restart immediately (sessionId is preserved across restart)
 - **Customizable statusline** — via Preferences (⌘,), pick which components show in Claude and Codex statuslines
+- **[wirescope](https://github.com/avirtual/wirescope) integration** — route sessions through a wirescope proxy to get a live telemetry bar (context tokens, cache warmth, turn count, cost) and a one-click "keep warm" cache hold
 - **Persistence** — sessions resume across app restarts via `claude --resume` / `codex resume`
 - **Self-contained runtime** — registry, sockets, and message files live under `~/.clodex/`, owned entirely by Clodex
 
@@ -82,12 +83,28 @@ Click the 📝 icon in the sidebar header to open the library. Save reusable pro
 
 ### Preferences
 
-`⌘,` opens the Preferences dialog. Today it controls the statusline:
+`⌘,` opens the Preferences dialog. It controls the statusline and the default API proxy.
 
-- **Claude**: pick any of model name, context % (real-time), session cost, working directory, git branch. Session name (`[clodex:NAME]`) is always shown.
-- **Codex**: pick any native components Codex supports (context-used, model-name, project-root, git-branch, five-hour-limit, current-dir, context-remaining, model-with-reasoning).
+- **Claude statusline**: pick any of model name, context % (real-time), session cost, working directory, git branch. Session name (`[clodex:NAME]`) is always shown.
+- **Codex statusline**: pick any native components Codex supports (context-used, model-name, project-root, git-branch, five-hour-limit, current-dir, context-remaining, model-with-reasoning).
+- **API proxy**: a default proxy base URL (on/off) that new sessions inherit. Per-session overrides live in the New Session / Edit Session dialog.
 
 Running Claude sessions update live. Codex sessions pick up changes on next spawn.
+
+### wirescope integration
+
+Clodex can route a session's API traffic through a local proxy by pointing the CLI's base URL at it. Set a default in Preferences (proxy URL + on/off), or override per session in the New Session / Edit Session dialog (**Default** / **Off** / **Custom** URL). Claude sessions get `ANTHROPIC_BASE_URL=<proxy>/agent/<name>/anthropic`; Codex gets `-c openai_base_url=<proxy>/agent/<name>/openai/v1`.
+
+When that proxy is [**wirescope**](https://github.com/avirtual/wirescope), Clodex pulls live per-session telemetry off the wire and shows it in a status bar under the terminal:
+
+- **Context usage** — tokens used / window size and percentage (e.g. `ctx 113k/1M (11%)`), from the CLI statusline; falls back to message count for Codex
+- **Turn count** and **model**
+- **Cache warmth** — a live countdown to prompt-cache expiry, shown per sidebar tab even while a session is unfocused (the statusline can't do this — its script only runs while you interact)
+- **Cost** — a wire-accurate estimate (`px est.`)
+- **🔍 wirescope** — a link to the session's page on the proxy
+- **keep warm** — arm a cache hold (`1h` / `4h` / `8h`) so the proxy pings periodically to keep the prompt cache warm while you're away; `✕` disarms
+
+Telemetry is pulled (one `/_status` poll per proxy every few seconds), not pushed, and the bar only appears for sessions actually routed through a wirescope proxy. See the [wirescope repo](https://github.com/avirtual/wirescope) for the proxy itself.
 
 ### Keyboard shortcuts
 

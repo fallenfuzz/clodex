@@ -225,6 +225,7 @@ function addSessionToSidebar(name, type, cwd, label) {
       </div>
     </div>
     <button class="session-close" title="Kill session">&times;</button>
+    <span class="session-warm" title="Prompt-cache warmth (time to expiry)"></span>
     <span class="session-ctx" title="Context used"></span>
   `;
 
@@ -442,6 +443,18 @@ function switchSession(name) {
   updateSidebarActive();
   emptyState.style.display = 'none';
 
+  // Proxy status bar follows the active session. Render last-known immediately,
+  // then pull a fresh snapshot so the bar fills without waiting for a poll.
+  renderProxyBar();
+  if (window.api.getProxySnapshot) {
+    window.api.getProxySnapshot(name).then((p) => {
+      if (!p) return;
+      proxyState.set(name, { payload: p, at: Date.now() });
+      applyWarmBadge(name);
+      if (activeSession === name) renderProxyBar();
+    }).catch(() => {});
+  }
+
   // Fit and focus after becoming visible
   const { fitAddon, terminal } = sessions.get(name);
   requestAnimationFrame(() => {
@@ -460,6 +473,7 @@ function removeSession(name) {
   }
   removeSessionFromSidebar(name);
   updateWindowTitle();
+  proxyState.delete(name);
 
   if (activeSession === name) {
     const remaining = Array.from(sessions.keys());
@@ -468,6 +482,7 @@ function removeSession(name) {
     } else {
       activeSession = null;
       emptyState.style.display = '';
+      renderProxyBar();
     }
   }
 }
@@ -682,6 +697,25 @@ window.api.onSessionActivity((name, state) => {
   if (el) el.dataset.activity = state;
 });
 
+// Context-window usage per session, from Claude's statusline side-channel (the
+// real figures — the proxy only reports message/turn counts, not % or absolute
+// tokens of the window). Cached so the proxy bar can show them too.
+const ctxPct = new Map();
+const ctxTokens = new Map(); // name -> { used, size }
+
+// Context heaviness thresholds (absolute tokens), mirroring status-line.sh's
+// WARN_TOKENS / HEAVY_TOKENS so the bar and the statusline agree on color.
+// Absolute, not %: long context degrades quality regardless of the window cap.
+const CTX_WARN_TOKENS = 200000;   // yellow
+const CTX_HEAVY_TOKENS = 300000;  // red
+
+// Compact token count: 201234 -> "201k", 1000000 -> "1M".
+function fmtTokens(n) {
+  if (n >= 1e6) { const m = n / 1e6; return (Number.isInteger(m) ? m : m.toFixed(1)) + 'M'; }
+  if (n >= 1000) return Math.round(n / 1000) + 'k';
+  return String(n);
+}
+
 function applyCtxBadge(name, pct) {
   const el = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
   if (!el) return;
@@ -691,7 +725,228 @@ function applyCtxBadge(name, pct) {
   badge.dataset.level = pct >= 80 ? 'high' : pct >= 60 ? 'mid' : 'low';
 }
 
-window.api.onSessionCtx((name, pct) => applyCtxBadge(name, pct));
+window.api.onSessionCtx((name, pct, tok, size) => {
+  ctxPct.set(name, pct);
+  if (typeof tok === 'number' && typeof size === 'number' && size > 0) {
+    ctxTokens.set(name, { used: tok, size });
+  }
+  applyCtxBadge(name, pct);
+  if (name === activeSession) renderProxyBar();
+});
+
+// --- Proxy telemetry status bar (wirescope pull) --------------------------
+// The main process polls the proxy and pushes a per-session payload. We show
+// the ACTIVE session's line in a strip under the terminal, ticking the cache
+// countdown locally between polls and degrading honestly (~/grey/"stale")
+// when polls stop arriving so it never fakes precision.
+const PROXY_POLL_MS = 5000;
+const proxyState = new Map(); // name -> { payload, at }
+
+function fmtCountdown(remaining_s) {
+  const s = Math.max(0, Math.round(remaining_s));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function renderProxyBar() {
+  const bar = document.getElementById('proxy-bar');
+  if (!bar) return;
+  const main = document.getElementById('main');
+  const st = activeSession ? proxyState.get(activeSession) : null;
+  if (!st || !st.payload) {
+    bar.style.display = 'none';
+    if (main) main.classList.remove('has-proxy-bar');
+    return;
+  }
+  const p = st.payload;
+  bar.style.display = '';
+  if (main) main.classList.add('has-proxy-bar');
+
+  if (!p.linked) {
+    bar.className = 'px-muted';
+    bar.textContent = 'proxy: no live session for this agent';
+    return;
+  }
+
+  const ageMs = Date.now() - st.at;
+  const stale = ageMs > PROXY_POLL_MS * 2;
+  const dead = ageMs > PROXY_POLL_MS * 4;
+  bar.className = dead ? 'px-dead' : (stale ? 'px-stale' : '');
+
+  const segs = [];
+  if (p.model) segs.push(`<span class="px-seg">${esc(p.model)}</span>`);
+  // Real context usage. Token COUNT prefers wirescope's live input_tokens (it
+  // updates even while the session is idle/unfocused — the statusline can't);
+  // the window SIZE is off-wire, so it comes from the CLI statusline side-
+  // channel. With both we show "201k/1M (20%)" — 20% of 1M reads very
+  // differently from 20% of 200k. Degrades to side-channel tokens, then bare %,
+  // then the proxy's message count (Codex, "msg" so it can't read as minutes).
+  const pct = ctxPct.get(activeSession);
+  const sc = ctxTokens.get(activeSession); // { used, size } from CLI side-channel
+  const wireTok = p.context && typeof p.context.inputTokens === 'number' ? p.context.inputTokens : null;
+  const usedTok = wireTok != null ? wireTok : (sc && sc.used > 0 ? sc.used : null);
+  const sizeTok = sc && sc.size > 0 ? sc.size : null;
+  if (usedTok != null && usedTok > 0) {
+    const heavy = usedTok >= CTX_HEAVY_TOKENS ? ' px-ctx-heavy' : usedTok >= CTX_WARN_TOKENS ? ' px-ctx-warn' : '';
+    if (sizeTok) {
+      const p2 = Math.round((usedTok / sizeTok) * 100);
+      segs.push(`<span class="px-seg${heavy}" title="Context: tokens used / window size">ctx ${fmtTokens(usedTok)}/${fmtTokens(sizeTok)} (${p2}%)</span>`);
+    } else {
+      segs.push(`<span class="px-seg${heavy}" title="Context tokens used">ctx ${fmtTokens(usedTok)}</span>`);
+    }
+  } else if (typeof pct === 'number' && pct > 0) {
+    segs.push(`<span class="px-seg" title="Context window used">ctx ${pct}%</span>`);
+  } else if (p.context && p.context.messages != null) {
+    segs.push(`<span class="px-seg" title="Messages in context">ctx ${p.context.messages} msg</span>`);
+  }
+  if (p.turns != null) segs.push(`<span class="px-seg">turn ${p.turns}</span>`);
+  if (p.warmth) {
+    let txt;
+    if (dead) {
+      txt = '🔥 ?';
+    } else if (p.warmth.state === 'warm' && p.warmth.remaining_s != null) {
+      const remaining = p.warmth.remaining_s - ageMs / 1000;
+      txt = remaining > 0 ? `🔥 ${stale ? '~' : ''}${fmtCountdown(remaining)}` : '❄️ cold';
+    } else {
+      txt = '❄️ cold';
+    }
+    segs.push(`<span class="px-seg px-warm">${txt}</span>`);
+  }
+  if (p.cost && p.cost.usd != null) {
+    // ~ signals "estimate"; drop the cryptic "px est." label. Trim decimals once
+    // the number is large enough that 4 places are just noise.
+    const costTxt = p.cost.usd >= 1 ? p.cost.usd.toFixed(2) : p.cost.usd.toFixed(4);
+    segs.push(`<span class="px-seg px-cost" title="wirescope cost estimate">~$${costTxt}</span>`);
+  }
+  if (p.refusals > 0) segs.push(`<span class="px-seg px-refusal">⚠ ${p.refusals}</span>`);
+  if (p.base && p.sessionId) {
+    const url = `${p.base}/_session?session=${encodeURIComponent(p.sessionId)}`;
+    segs.push(`<a class="px-seg px-link" data-url="${esc(url)}" title="Open this session's page on wirescope">🔍 wirescope</a>`);
+  }
+
+  // Keep-warm control (only when the proxy advertises the capability).
+  let holdHtml = '';
+  if (p.capabilities && p.capabilities.hold) {
+    if (p.hold) {
+      // `until` re-anchors to the last real turn, so this slides forward as the
+      // session is used — it's "stays warm ~N more hours if idle", not a fixed
+      // countdown. pingable=false → armed but waiting for the next turn to fire.
+      const untilS = typeof p.hold.until === 'number' ? p.hold.until : null;
+      const remH = untilS != null ? Math.max(0, (untilS - Date.now() / 1000) / 3600) : null;
+      const remTxt = remH == null ? '' : (remH < 1 ? ` ~${Math.round(remH * 60)}m` : ` ~${remH.toFixed(1)}h`);
+      const pending = p.pingable === false;
+      const label = pending ? '🔒 armed (next turn)' : `🔒 held${remTxt}`;
+      const tip = pending ? 'Armed — starts keeping warm after the next turn. Click to disarm.' : 'Hold active. Click to disarm.';
+      holdHtml = `<span class="px-hold-group"><button class="px-hold" data-act="off" title="${tip}">${label} ✕</button></span>`;
+    } else {
+      holdHtml = `<span class="px-hold-group"><span class="px-hold-label">keep warm:</span>${[1, 4, 8].map((h) => `<button class="px-hold" data-hours="${h}">${h}h</button>`).join('')}</span>`;
+    }
+  }
+  bar.innerHTML = segs.join('<span class="px-sep">·</span>') + holdHtml;
+}
+
+// Lightweight per-second update: refresh only the countdown text + staleness
+// class, leaving the keep-warm buttons (and their hover state) untouched.
+function tickProxyBar() {
+  const bar = document.getElementById('proxy-bar');
+  if (!bar || bar.style.display === 'none' || !activeSession) return;
+  const st = proxyState.get(activeSession);
+  if (!st || !st.payload || !st.payload.linked || !st.payload.warmth) return;
+  const p = st.payload;
+  const ageMs = Date.now() - st.at;
+  const stale = ageMs > PROXY_POLL_MS * 2, dead = ageMs > PROXY_POLL_MS * 4;
+  bar.classList.toggle('px-stale', stale && !dead);
+  bar.classList.toggle('px-dead', dead);
+  const w = bar.querySelector('.px-warm');
+  if (!w) return;
+  if (dead) w.textContent = '🔥 ?';
+  else if (p.warmth.state === 'warm' && p.warmth.remaining_s != null
+           && p.warmth.remaining_s - ageMs / 1000 > 0) {
+    w.textContent = `🔥 ${stale ? '~' : ''}${fmtCountdown(p.warmth.remaining_s - ageMs / 1000)}`;
+  } else w.textContent = '❄️ cold';
+}
+
+// Per-tab cache-warmth badge — the async payoff: every open session shows a
+// live countdown even while unfocused (the statusline can't, it only runs on
+// interaction). Also flags refusals on the tab.
+function applyWarmBadge(name) {
+  const el = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
+  if (!el) return;
+  const badge = el.querySelector('.session-warm');
+  const st = proxyState.get(name);
+  const p = st && st.payload;
+
+  if (badge) {
+    if (!p || !p.linked || !p.warmth) {
+      badge.textContent = '';
+      badge.dataset.state = '';
+    } else {
+      const ageMs = Date.now() - st.at;
+      if (ageMs > PROXY_POLL_MS * 4) {
+        badge.textContent = '🔥?'; badge.dataset.state = 'stale';
+      } else if (p.warmth.state === 'warm' && p.warmth.remaining_s != null
+                 && p.warmth.remaining_s - ageMs / 1000 > 0) {
+        badge.textContent = '🔥' + fmtCountdown(p.warmth.remaining_s - ageMs / 1000);
+        badge.dataset.state = 'warm';
+      } else {
+        badge.textContent = '❄️'; badge.dataset.state = 'cold';
+      }
+    }
+  }
+  el.dataset.refusal = (p && p.linked && p.refusals > 0) ? '1' : '';
+}
+
+window.api.onSessionProxy((name, payload) => {
+  proxyState.set(name, { payload, at: Date.now() });
+  applyWarmBadge(name);
+  if (name === activeSession) renderProxyBar();
+});
+
+// Tick live countdowns once a second: the active session's bar plus every
+// tab's warmth badge. Uses the light text-only update so keep-warm buttons
+// aren't rebuilt out from under the cursor.
+setInterval(() => {
+  for (const name of proxyState.keys()) applyWarmBadge(name);
+  tickProxyBar();
+}, 1000);
+
+// Keep-warm control — delegated so it survives bar re-renders. Distinguishes
+// "armed" from "proxy declined (reason)" so a no-op never reads as success;
+// discloses the per-ping cost before arming.
+(() => {
+  const bar = document.getElementById('proxy-bar');
+  if (!bar) return;
+  bar.addEventListener('click', async (e) => {
+    const link = e.target.closest('.px-link');
+    if (link && link.dataset.url) { e.preventDefault(); window.api.openExternal(link.dataset.url); return; }
+    const btn = e.target.closest('.px-hold');
+    if (!btn || !activeSession) return;
+    const name = activeSession;
+    btn.disabled = true;
+    try {
+      if (btn.dataset.act === 'off') {
+        const r = await window.api.proxyHold(name, 0, false);
+        if (!r.ok) alert('Could not disarm hold: ' + r.error);
+      } else {
+        const hours = Number(btn.dataset.hours);
+        if (!confirm(`Keep "${name}" prompt cache warm for ${hours}h?\n\nThe proxy auto-pings to refresh the cache until ${hours}h after the last turn; each ping costs ~1 token.`)) return;
+        let r = await window.api.proxyHold(name, hours, false);
+        if (r.ok && !r.armed && r.skipped) {
+          if (confirm(`Proxy declined (${r.skipped}): the cache prefix isn't warm yet, so there's nothing to keep warm. Force the hold anyway?`)) {
+            r = await window.api.proxyHold(name, hours, true);
+          } else return;
+        }
+        if (!r.ok) alert('Hold failed: ' + r.error);
+        else if (!r.armed) alert('Hold not armed' + (r.skipped ? ` (${r.skipped})` : ''));
+        else if (r.body && r.body.pingable === false) {
+          alert(`Hold armed for "${name}". It will start keeping the cache warm after the next turn (nothing to ping yet).`);
+        }
+      }
+      // The armed/disarmed state shows on the next poll (≤5s).
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
 
 window.api.onSessionMention((name, mtype /* 'dm'|'broadcast' */) => {
   const el = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
@@ -1304,7 +1559,11 @@ promptBody.addEventListener('keydown', (e) => e.stopPropagation());
     const { terminal } = createTerminal(entry.name);
     addSessionToSidebar(entry.name, entry.type, entry.cwd, entry.label);
     if (entry.replay) terminal.write(entry.replay);
-    if (typeof entry.ctx === 'number') applyCtxBadge(entry.name, entry.ctx);
+    if (typeof entry.ctx === 'number') { ctxPct.set(entry.name, entry.ctx); applyCtxBadge(entry.name, entry.ctx); }
+    if (typeof entry.ctxTok === 'number' && typeof entry.ctxSize === 'number' && entry.ctxSize > 0) {
+      ctxTokens.set(entry.name, { used: entry.ctxTok, size: entry.ctxSize });
+    }
+    if (entry.proxy) { proxyState.set(entry.name, { payload: entry.proxy, at: Date.now() }); applyWarmBadge(entry.name); }
     if (!firstHealthy) firstHealthy = entry.name;
   }
   if (firstHealthy) switchSession(firstHealthy);

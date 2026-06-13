@@ -278,6 +278,26 @@ html, body {
 .session-ctx[data-level="mid"]  { background: #d47b16; }
 .session-ctx[data-level="high"] { background: #cf222e; }
 
+/* Per-tab cache-warmth countdown (live for all open sessions). */
+.session-warm {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+.session-warm:empty { display: none; }
+.session-warm[data-state="warm"]  { color: #e0a030; }
+.session-warm[data-state="cold"]  { color: #6b7689; }
+.session-warm[data-state="stale"] { color: #6b7689; opacity: 0.7; }
+
+/* Refusal marker on the tab (wire-only signal the CLI hides). */
+.session-item[data-refusal="1"] .session-type::after {
+  content: " ⚠";
+  color: var(--accent);
+}
+
 .session-close {
   opacity: 0;
   border: none;
@@ -383,6 +403,70 @@ html, body {
 #main.ipc-expanded #terminal-container {
   bottom: 220px;
 }
+
+/* When the proxy status bar is shown, reserve a strip above the IPC log. */
+#main.has-proxy-bar #terminal-container {
+  bottom: 56px; /* 32 (collapsed IPC header) + 24 (bar) */
+}
+#main.has-proxy-bar.ipc-expanded #terminal-container {
+  bottom: 244px; /* 220 + 24 */
+}
+
+#proxy-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 32px; /* sit just above the collapsed IPC log header */
+  height: 24px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 10px;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+  background: var(--sidebar-bg);
+  border-top: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  transition: bottom 0.2s ease;
+}
+#main.ipc-expanded #proxy-bar {
+  bottom: 220px;
+}
+#proxy-bar.px-stale { opacity: 0.6; }
+#proxy-bar.px-dead { opacity: 0.4; }
+#proxy-bar.px-muted { opacity: 0.5; font-style: italic; }
+#proxy-bar .px-seg { color: var(--text); }
+#proxy-bar .px-sep { margin: 0 8px; color: var(--text-dim); }
+#proxy-bar .px-warm { color: #e0a030; }
+#proxy-bar .px-cost { color: #4caa6e; }
+#proxy-bar .px-refusal { color: var(--accent); }
+#proxy-bar .px-link { color: var(--text-dim); cursor: pointer; text-decoration: none; }
+#proxy-bar .px-link:hover { color: var(--text); text-decoration: underline; }
+#proxy-bar .px-ctx-warn { color: #e5c07b; }
+#proxy-bar .px-ctx-heavy { color: #e06c75; font-weight: 600; }
+#proxy-bar .px-hold-group {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 10px;
+}
+#proxy-bar .px-hold-label { color: var(--text-dim); }
+#proxy-bar .px-hold {
+  font: inherit;
+  font-size: 10px;
+  color: var(--text);
+  background: var(--active-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+#proxy-bar .px-hold:hover { border-color: var(--accent); }
+#proxy-bar .px-hold:disabled { opacity: 0.5; cursor: default; }
 
 .terminal-wrapper {
   position: absolute;
