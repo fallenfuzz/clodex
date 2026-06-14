@@ -500,6 +500,8 @@ function applyTypeDefaults() {
   const supportsSystemPrompt = type === 'claude' || type === 'codex';
   systemPromptRow.style.display = supportsSystemPrompt ? '' : 'none';
   if (!supportsSystemPrompt) inputSystemPrompt.value = '';
+  // Custom subagents are Claude-only (--agents has no Codex equivalent).
+  agentsRow.style.display = type === 'claude' ? '' : 'none';
   const supportsResume = type === 'claude' || type === 'codex';
   resumeRow.style.display = supportsResume ? '' : 'none';
   if (!supportsResume) {
@@ -540,6 +542,37 @@ async function refreshTemplatesDropdown() {
   return list;
 }
 
+// --- Custom subagent enablement (Claude only). Shared by the new-session
+// and edit-session dialogs; the library itself lives in the Agents drawer. ---
+const agentsRow = document.getElementById('agents-row');
+const inputAgentsList = document.getElementById('input-agents-list');
+const inputDenyBuiltins = document.getElementById('input-deny-builtins');
+let agentLibCache = [];
+
+function renderAgentChecklist(container, enabledSet) {
+  container.innerHTML = '';
+  if (!agentLibCache.length) {
+    container.innerHTML = '<span class="hint-text">No agents in library — add some via the 🤖 Agents drawer.</span>';
+    return;
+  }
+  for (const a of agentLibCache) {
+    const row = document.createElement('label');
+    row.className = 'agent-check';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = a.name;
+    cb.checked = enabledSet.has(a.name);
+    const txt = document.createElement('span');
+    txt.innerHTML = `<strong>${esc(a.name)}</strong>${a.description ? ' — ' + esc(a.description) : ''}`;
+    row.appendChild(cb);
+    row.appendChild(txt);
+    container.appendChild(row);
+  }
+}
+function collectAgentChecklist(container) {
+  return Array.from(container.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+}
+
 async function openDialog() {
   sessionCounter++;
   inputName.value = `session-${sessionCounter}`;
@@ -551,11 +584,15 @@ async function openDialog() {
   inputFork.checked = false;
   applyTypeDefaults();
   inputName.style.borderColor = '';
-  const [, , settings] = await Promise.all([
+  const [, , settings, agentLib] = await Promise.all([
     refreshTemplatesDropdown(),
     refreshSystemPromptDropdown(),
     window.api.getSettings(),
+    window.api.listAgents(),
   ]);
+  agentLibCache = agentLib || [];
+  renderAgentChecklist(inputAgentsList, new Set());
+  inputDenyBuiltins.checked = false;
   setProxyControls(inputProxyMode, inputProxyUrl, null, settings?.proxyUrl);
   labelProxyDefault(inputProxyMode, settings);
   dialogOverlay.classList.remove('hidden');
@@ -649,11 +686,13 @@ async function doCreate() {
   const fork = (type === 'claude' || type === 'codex') ? inputFork.checked : false;
   const proxy = (type === 'claude' || type === 'codex')
     ? proxyValueFromControls(inputProxyMode, inputProxyUrl) : null;
+  const agents = type === 'claude' ? collectAgentChecklist(inputAgentsList) : [];
+  const denyBuiltins = (type === 'claude' && inputDenyBuiltins.checked) ? ['general-purpose'] : [];
 
   closeDialog();
 
   if (typeof proxy === 'string') window.api.setSettings({ proxyUrl: proxy }); // remember last used
-  const result = await window.api.createSession(name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy);
+  const result = await window.api.createSession(name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins);
   if (!result.ok) {
     console.error('Failed to create session:', result.error);
     alert(`Failed to create session: ${result.error || 'unknown error'}`);
@@ -1245,6 +1284,12 @@ window.api.onUpdateAvailable((info) => showUpdateBanner(info));
 // Tray-triggered actions
 window.api.onRequestSwitchSession((name) => switchSession(name));
 window.api.onRequestOpenNewDialog(() => openDialog());
+window.api.onRequestOpenAgentsDrawer(() => openAgentsDrawer());
+window.api.onRequestOpenPromptsDrawer(() => openPromptsDrawer());
+window.api.onRequestOpenIpcLog(() => {
+  if (ipcLog.classList.contains('collapsed')) toggleIpcLog();
+  broadcastInput.focus();
+});
 
 // ---------------------------------------------------------------------------
 // Preferences dialog
@@ -1428,6 +1473,9 @@ const argsProxyUrl = document.getElementById('args-proxy-url');
 const argsPromptRow = document.getElementById('args-prompt-row');
 const argsPromptSelect = document.getElementById('args-prompt-select');
 const argsPromptBody = document.getElementById('args-prompt-body');
+const argsAgentsRow = document.getElementById('args-agents-row');
+const argsAgentsList = document.getElementById('args-agents-list');
+const argsDenyBuiltins = document.getElementById('args-deny-builtins');
 let argsEditingName = null;
 
 argsProxyMode.addEventListener('change', () => {
@@ -1444,12 +1492,14 @@ argsPromptSelect.addEventListener('change', () => {
 });
 
 async function openArgsDialog(name) {
-  const [res, settings, promptLib] = await Promise.all([
+  const [res, settings, promptLib, agentLib] = await Promise.all([
     window.api.getSessionArgs(name),
     window.api.getSettings(),
     window.api.listPrompts(),
+    window.api.listAgents(),
   ]);
   if (!res || !res.ok) { alert('Session not found in persistence.'); return; }
+  agentLibCache = agentLib || [];
   argsEditingName = name;
   argsTarget.textContent = `${name} (${res.type}) — new settings apply on next spawn.`;
   argsInput.value = (res.extraArgs || []).map(a => /\s/.test(a) ? `"${a}"` : a).join(' ');
@@ -1467,6 +1517,11 @@ async function openArgsDialog(name) {
     opt.dataset.body = p.body;
     argsPromptSelect.appendChild(opt);
   }
+  // Custom subagents — Claude-only.
+  const isClaude = res.type === 'claude';
+  argsAgentsRow.style.display = isClaude ? '' : 'none';
+  renderAgentChecklist(argsAgentsList, new Set(res.agents || []));
+  argsDenyBuiltins.checked = (res.denyBuiltins || []).includes('general-purpose');
   argsRestart.checked = false;
   argsOverlay.classList.remove('hidden');
   setTimeout(() => argsInput.focus(), 50);
@@ -1486,6 +1541,9 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
     ? null : proxyValueFromControls(argsProxyMode, argsProxyUrl);
   const systemPrompt = argsPromptRow.style.display === 'none'
     ? null : (argsPromptBody.value.trim() || null);
+  const agents = argsAgentsRow.style.display === 'none' ? [] : collectAgentChecklist(argsAgentsList);
+  const denyBuiltins = (argsAgentsRow.style.display !== 'none' && argsDenyBuiltins.checked)
+    ? ['general-purpose'] : [];
   const name = argsEditingName;
   // Snapshot metadata from the current sidebar entry so we can re-render it
   // after the kill+respawn wipes it via session-exit.
@@ -1493,7 +1551,7 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
   const snapType = existing ? existing.querySelector('.session-type')?.textContent : null;
   const snapCwd = existing ? existing.dataset.cwd : null;
   closeArgsDialog();
-  const res = await window.api.setSessionArgs(name, parsed, restart, proxy, systemPrompt);
+  const res = await window.api.setSessionArgs(name, parsed, restart, proxy, systemPrompt, agents, denyBuiltins);
   if (!res || !res.ok) {
     alert(`Failed: ${res && res.error ? res.error : 'unknown error'}`);
     return;
@@ -1519,7 +1577,6 @@ const promptBody = document.getElementById('prompt-body');
 const promptSave = document.getElementById('prompt-save');
 const promptCancel = document.getElementById('prompt-cancel');
 const promptDelete = document.getElementById('prompt-delete');
-const btnPrompts = document.getElementById('btn-prompts');
 const promptsNew = document.getElementById('prompts-new');
 const promptsClose = document.getElementById('prompts-close');
 
@@ -1598,10 +1655,6 @@ function closePromptEditor() {
   editingPromptId = null;
 }
 
-btnPrompts.addEventListener('click', () => {
-  if (promptsDrawer.classList.contains('hidden')) openPromptsDrawer();
-  else closePromptsDrawer();
-});
 promptsClose.addEventListener('click', closePromptsDrawer);
 promptsNew.addEventListener('click', () => openPromptEditor(null));
 
@@ -1627,6 +1680,123 @@ promptDelete.addEventListener('click', async () => {
 // Prevent keyboard shortcuts from firing inside the editor
 promptTitle.addEventListener('keydown', (e) => e.stopPropagation());
 promptBody.addEventListener('keydown', (e) => e.stopPropagation());
+
+// ---------------------------------------------------------------------------
+// Agents library — custom subagents stored as ~/.clodex/agents/*.md
+// ---------------------------------------------------------------------------
+
+const agentsDrawer = document.getElementById('agents-drawer');
+const agentsListEl = document.getElementById('agents-list');
+const agentsEmpty = document.getElementById('agents-empty');
+const agentEditor = document.getElementById('agent-editor');
+const agentEditorTitle = document.getElementById('agent-editor-title');
+const agentNameInput = document.getElementById('agent-name');
+const agentContent = document.getElementById('agent-content');
+const agentSave = document.getElementById('agent-save');
+const agentCancel = document.getElementById('agent-cancel');
+const agentDelete = document.getElementById('agent-delete');
+const agentsNew = document.getElementById('agents-new');
+const agentsClose = document.getElementById('agents-close');
+
+let editingAgentName = null;
+
+async function refreshAgentsList() {
+  const items = await window.api.listAgents();
+  agentLibCache = items || [];
+  agentsListEl.innerHTML = '';
+  if (!items || items.length === 0) {
+    agentsEmpty.style.display = '';
+    return;
+  }
+  agentsEmpty.style.display = 'none';
+  for (const a of items) {
+    const meta = [a.model && `model: ${a.model}`, a.tools && `tools: ${a.tools}`].filter(Boolean).join(' · ');
+    const preview = a.description || meta || '(no description)';
+    const el = document.createElement('div');
+    el.className = 'prompt-item';
+    el.innerHTML = `
+      <div class="prompt-item-title">${esc(a.name)}</div>
+      <div class="prompt-item-preview">${esc(preview)}</div>
+      <div class="prompt-item-actions">
+        <button data-action="edit">Edit</button>
+      </div>
+    `;
+    el.querySelector('[data-action="edit"]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      openAgentEditor(a);
+    });
+    el.addEventListener('click', () => openAgentEditor(a));
+    agentsListEl.appendChild(el);
+  }
+}
+
+function openAgentsDrawer() {
+  agentsDrawer.classList.remove('hidden');
+  refreshAgentsList();
+}
+function closeAgentsDrawer() {
+  agentsDrawer.classList.add('hidden');
+}
+
+async function openAgentEditor(agent = null) {
+  if (agent) {
+    editingAgentName = agent.name;
+    agentEditorTitle.textContent = 'Edit Agent';
+    agentNameInput.value = agent.name;
+    agentContent.value = (await window.api.getAgent(agent.name)) || '';
+    agentDelete.style.display = '';
+  } else {
+    editingAgentName = null;
+    agentEditorTitle.textContent = 'New Agent';
+    agentNameInput.value = '';
+    agentContent.value = '---\ndescription: Fast read-only repo search.\ntools: Read, Grep, Glob\nmodel: haiku\n---\nYou are a focused explorer. Return conclusions, not file dumps.';
+    agentDelete.style.display = 'none';
+  }
+  agentNameInput.style.borderColor = '';
+  agentEditor.classList.remove('hidden');
+  setTimeout(() => agentNameInput.focus(), 50);
+}
+function closeAgentEditor() {
+  agentEditor.classList.add('hidden');
+  editingAgentName = null;
+}
+
+agentsClose.addEventListener('click', closeAgentsDrawer);
+agentsNew.addEventListener('click', () => openAgentEditor(null));
+
+agentSave.addEventListener('click', async () => {
+  const name = agentNameInput.value.trim();
+  const content = agentContent.value;
+  if (!/^[a-zA-Z0-9._-]{1,64}$/.test(name)) {
+    agentNameInput.style.borderColor = '#e94560';
+    return;
+  }
+  const res = await window.api.saveAgent(name, content);
+  if (!res || !res.ok) {
+    alert(`Failed: ${res && res.error ? res.error : 'unknown error'}`);
+    return;
+  }
+  // Rename: a changed Name field writes a new file — drop the old one.
+  if (editingAgentName && editingAgentName !== name) {
+    await window.api.removeAgent(editingAgentName);
+  }
+  closeAgentEditor();
+  refreshAgentsList();
+});
+
+agentCancel.addEventListener('click', closeAgentEditor);
+agentDelete.addEventListener('click', async () => {
+  if (!editingAgentName) return;
+  if (!confirm(`Delete agent "${editingAgentName}"?`)) return;
+  await window.api.removeAgent(editingAgentName);
+  closeAgentEditor();
+  refreshAgentsList();
+});
+
+// Keep keyboard shortcuts from firing inside the editor fields
+agentNameInput.addEventListener('keydown', (e) => e.stopPropagation());
+agentContent.addEventListener('keydown', (e) => e.stopPropagation());
+agentNameInput.addEventListener('input', () => { agentNameInput.style.borderColor = ''; });
 
 // ---------------------------------------------------------------------------
 // Restore sessions on startup

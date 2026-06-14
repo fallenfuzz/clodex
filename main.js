@@ -135,6 +135,15 @@ const persistence = {
       this._save(all);
     }
   },
+  setAgents(name, agents, denyBuiltins) {
+    const all = this._load();
+    const entry = all.find(s => s.name === name);
+    if (entry) {
+      entry.agents = Array.isArray(agents) ? agents : [];
+      entry.denyBuiltins = Array.isArray(denyBuiltins) ? denyBuiltins : [];
+      this._save(all);
+    }
+  },
   get(name) {
     return this._load().find(s => s.name === name) || null;
   },
@@ -268,6 +277,64 @@ const prompts = {
     this._save(all);
   },
   remove(id) { this._save(this._load().filter(p => p.id !== id)); },
+};
+
+// ---------------------------------------------------------------------------
+// Custom subagent library — user-authored agents as markdown-with-frontmatter
+// files under ~/.clodex/agents/. On-disk (not in a JSON blob) so they're
+// human-inspectable and portable into a project's .claude/agents or
+// ~/.claude/agents. At spawn the enabled subset becomes the CLI's inline
+// --agents flag (see agents-util.js). Claude-only; Codex has no equivalent.
+// ---------------------------------------------------------------------------
+
+const AGENTS_DIR = path.join(REGISTRY_DIR, 'agents');
+const AGENT_NAME_RE = /^[a-zA-Z0-9._-]{1,64}$/; // mirrors session name rule
+
+const agentLibrary = {
+  _file(name) { return path.join(AGENTS_DIR, `${name}.md`); },
+  // Parsed metadata for every *.md in the folder. Identity is the frontmatter
+  // `name` (falling back to the filename); save() keys the file by name so the
+  // two stay in sync and duplicates can't arise by construction.
+  list() {
+    let files;
+    try { files = fs.readdirSync(AGENTS_DIR); }
+    catch { return []; }
+    const out = [];
+    for (const f of files) {
+      if (!f.endsWith('.md')) continue;
+      try {
+        const raw = fs.readFileSync(path.join(AGENTS_DIR, f), 'utf-8');
+        const { meta, body } = parseAgentFrontmatter(raw);
+        // Identity is the filename stem (canonical: raw()/remove() and the
+        // --agents JSON key all use it). Frontmatter `name` stays purely
+        // informational/portable (it matters when a file is copied into a
+        // real .claude/agents dir, but clodex never keys off it).
+        const name = f.replace(/\.md$/, '');
+        out.push({
+          name,
+          description: meta.description || '',
+          model: meta.model || '',
+          tools: meta.tools || '',
+          disallowedTools: meta.disallowedTools || '',
+          file: f, meta, body,
+        });
+      } catch { /* skip unreadable/garbled file */ }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  },
+  raw(name) {
+    try { return fs.readFileSync(this._file(name), 'utf-8'); } catch { return null; }
+  },
+  save(name, content) {
+    if (!AGENT_NAME_RE.test(name)) throw new Error(`invalid agent name: ${name}`);
+    ensureDir(AGENTS_DIR);
+    fs.writeFileSync(this._file(name), String(content ?? ''), { mode: 0o600 });
+    return this.list();
+  },
+  remove(name) {
+    try { fs.unlinkSync(this._file(name)); } catch {}
+    return this.list();
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -691,6 +758,7 @@ function resolveProxyBase(proxy) {
 // See https://github.com/avirtual/wirescope (INTEGRATION.md).
 
 const { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord } = require('./proxy-util');
+const { parseAgentFrontmatter, buildAgentsArg, denyAgentRules } = require('./agents-util');
 const PROXY_POLL_INTERVAL = 5000; // ms
 const PROXY_HTTP_TIMEOUT = 4000;  // ms
 const PROXY_PROBE_TTL = 60000;    // ms — re-confirm identity at most this often
@@ -989,7 +1057,7 @@ class WirescopeSupervisor {
 }
 const wirescope = new WirescopeSupervisor();
 
-function setupClaudeHook(name, proxyBase = null, proxyAgent = null) {
+function setupClaudeHook(name, proxyBase = null, proxyAgent = null, denyBuiltins = []) {
   ensureDir(REGISTRY_DIR);
   const linkPath = path.join(REGISTRY_DIR, `${name}.jsonl`);
   const scriptPath = path.join(REGISTRY_DIR, `${name}-hook.sh`);
@@ -1044,6 +1112,11 @@ mv -f "$TMPLINK" "${linkPath}"
   if (proxyBase) {
     settings.env = { ANTHROPIC_BASE_URL: `${proxyBase}/agent/${proxyAgent || name}/anthropic` };
   }
+  // Suppress built-in subagents so the model can't fall back to the heavy
+  // general-purpose instead of an enabled lean custom one (--agents is
+  // additive — built-ins stay registered unless explicitly denied here).
+  const denyRules = denyAgentRules(denyBuiltins);
+  if (denyRules.length) settings.permissions = { deny: denyRules };
   fs.writeFileSync(settingsPath, JSON.stringify(settings));
   return settingsPath;
 }
@@ -1450,7 +1523,7 @@ class SessionManager {
     }
   }
 
-  async create(name, type, cwd, extraArgs = [], resumeId = null, workspaceId = DEFAULT_WORKSPACE_ID, systemPromptBody = null, fork = false, proxy = null) {
+  async create(name, type, cwd, extraArgs = [], resumeId = null, workspaceId = DEFAULT_WORKSPACE_ID, systemPromptBody = null, fork = false, proxy = null, agents = [], denyBuiltins = []) {
     if (this.sessions.has(name)) {
       throw new Error(`Session "${name}" already exists`);
     }
@@ -1488,11 +1561,19 @@ class SessionManager {
           (a, i) => a === '--settings' && (args[i + 1] || '').startsWith('/tmp/wb-wrap/'));
         if (staleSettings !== -1) args.splice(staleSettings, 2);
         if (!args.includes('--settings')) {
-          const settingsPath = setupClaudeHook(name, proxyBase, proxyAgent);
+          const settingsPath = setupClaudeHook(name, proxyBase, proxyAgent, denyBuiltins);
           args.push('--settings', settingsPath);
         }
         ensureDir(MSG_DIR);
         if (!args.includes(MSG_DIR)) args.push('--add-dir', MSG_DIR);
+        // clodex-managed custom subagents: a session-only, priority-2 overlay
+        // (above project/user .claude/agents) read from the ~/.clodex/agents
+        // library. Writes no file, touches no repo. The paired permissions.deny
+        // (above) is what forces the model to actually use these lean agents.
+        if (!args.includes('--agents')) {
+          const agentsObj = buildAgentsArg(agents, agentLibrary.list());
+          if (agentsObj) args.push('--agents', JSON.stringify(agentsObj));
+        }
         if (resumeId && !args.includes('--resume') && !args.includes('-r')) {
           args.push('--resume', resumeId);
           if (fork && !args.includes('--fork-session')) args.push('--fork-session');
@@ -1614,6 +1695,8 @@ class SessionManager {
       // following the Clodex-level preference across restarts.
       proxy: typeof proxy === 'string' ? normalizeProxyBase(proxy) : (proxy === false ? false : null),
       proxyAgent,
+      agents: Array.isArray(agents) ? agents : [],
+      denyBuiltins: Array.isArray(denyBuiltins) ? denyBuiltins : [],
     });
 
     // JSONL watcher for agent modes
@@ -1691,9 +1774,11 @@ class SessionManager {
       }
       this._cleanup(name);
       if (typeof refreshTrayMenu === 'function') refreshTrayMenu();
+      if (typeof refreshAppMenu === 'function') refreshAppMenu();
     });
 
     if (typeof refreshTrayMenu === 'function') refreshTrayMenu();
+    if (typeof refreshAppMenu === 'function') refreshAppMenu();
     return { name, type, pid: ptyProc.pid };
   }
 
@@ -2177,6 +2262,52 @@ function refreshTrayMenu() {
 // Application menu (File > New Window, etc.)
 // ---------------------------------------------------------------------------
 
+function buildAgentsSubmenu() {
+  const agents = [...manager.sessions.values()].filter(s => s.type !== 'bash');
+  const items = [];
+
+  if (agents.length > 0) {
+    for (const s of agents) {
+      const ws = workspaces.get(s.workspaceId);
+      const wsLabel = ws ? (ws.name || ws.id) : s.workspaceId;
+      items.push({
+        label: `${s.name}  —  ${wsLabel}`,
+        click: () => {
+          let win = manager.windowForWorkspace(s.workspaceId);
+          if (!win) win = createWindow(s.workspaceId);
+          win.show();
+          win.focus();
+          win.webContents.send('request-switch-session', s.name);
+        },
+      });
+    }
+  } else {
+    items.push({ label: '(no agents running)', enabled: false });
+  }
+
+  items.push(
+    { type: 'separator' },
+    {
+      label: 'Agent Types…',
+      click: () => {
+        const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+        if (win) win.webContents.send('request-open-agents-drawer');
+      },
+    },
+    { type: 'separator' },
+    {
+      label: 'Broadcast…',
+      accelerator: 'CmdOrCtrl+Shift+B',
+      click: () => {
+        const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+        if (win) win.webContents.send('request-open-ipc-log');
+      },
+    }
+  );
+
+  return items;
+}
+
 function buildAppMenu() {
   const isMac = process.platform === 'darwin';
   const template = [
@@ -2225,6 +2356,13 @@ function buildAppMenu() {
             if (win) win.webContents.send('request-open-new-dialog');
           },
         },
+        {
+          label: 'Prompts…',
+          click: () => {
+            const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+            if (win) win.webContents.send('request-open-prompts-drawer');
+          },
+        },
         { type: 'separator' },
         {
           label: 'Rename Workspace…',
@@ -2236,6 +2374,10 @@ function buildAppMenu() {
         { type: 'separator' },
         { role: 'close' },
       ],
+    },
+    {
+      label: 'Agents',
+      submenu: buildAgentsSubmenu(),
     },
     {
       label: 'Edit',
@@ -2478,12 +2620,12 @@ app.whenReady().then(() => {
 
   initTray();
 
-  ipcMain.handle('session:create', async (e, name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy) => {
+  ipcMain.handle('session:create', async (e, name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins) => {
     try {
       const workspaceId = workspaceOfSender(e);
       return {
         ok: true,
-        session: await manager.create(name, type, cwd, extraArgs, resumeId || null, workspaceId, systemPromptBody || null, !!fork, proxy ?? null),
+        session: await manager.create(name, type, cwd, extraArgs, resumeId || null, workspaceId, systemPromptBody || null, !!fork, proxy ?? null, agents || [], denyBuiltins || []),
       };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -2518,6 +2660,15 @@ app.whenReady().then(() => {
   ipcMain.handle('prompts:list', () => prompts.list());
   ipcMain.handle('prompts:save', (_e, prompt) => { prompts.save(prompt); return prompts.list(); });
   ipcMain.handle('prompts:remove', (_e, id) => { prompts.remove(id); return prompts.list(); });
+
+  // Custom subagent library (~/.clodex/agents/*.md). Claude-only.
+  ipcMain.handle('agents:list', () => agentLibrary.list());
+  ipcMain.handle('agents:get', (_e, name) => agentLibrary.raw(name));
+  ipcMain.handle('agents:save', (_e, name, content) => {
+    try { return { ok: true, agents: agentLibrary.save(name, content) }; }
+    catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('agents:remove', (_e, name) => ({ ok: true, agents: agentLibrary.remove(name) }));
   ipcMain.handle('prompts:inject', (_e, name, body) => {
     const s = manager.sessions.get(name);
     if (!s) return { ok: false, error: 'Session not found' };
@@ -2568,6 +2719,8 @@ app.whenReady().then(() => {
       type: entry.type,
       proxy: entry.proxy ?? null,
       systemPrompt: entry.systemPrompt || null,
+      agents: entry.agents || [],
+      denyBuiltins: entry.denyBuiltins || [],
     } : { ok: false };
   });
   // kill() only sends the signal — removal from manager.sessions happens in
@@ -2583,11 +2736,14 @@ app.whenReady().then(() => {
     return !manager.sessions.has(name);
   }
 
-  ipcMain.handle('session:setArgs', async (e, name, extraArgs, restart, proxy, systemPrompt) => {
+  ipcMain.handle('session:setArgs', async (e, name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins) => {
     const beforeKill = persistence.get(name);
+    const nextAgents = agents !== undefined ? (agents || []) : (beforeKill?.agents || []);
+    const nextDeny = denyBuiltins !== undefined ? (denyBuiltins || []) : (beforeKill?.denyBuiltins || []);
     persistence.setExtraArgs(name, extraArgs);
     persistence.setProxy(name, proxy ?? null);
     persistence.setSystemPrompt(name, systemPrompt ?? null);
+    persistence.setAgents(name, nextAgents, nextDeny);
     if (!restart) return { ok: true, restarted: false };
     if (!beforeKill) return { ok: false, error: 'Session not found in persistence' };
     const wsId = workspaceOfSender(e);
@@ -2596,14 +2752,14 @@ app.whenReady().then(() => {
         await manager.kill(name);
         if (!await waitForSessionExit(name)) throw new Error('old process did not exit in time');
       }
-      await manager.create(name, beforeKill.type, beforeKill.cwd, extraArgs, beforeKill.sessionId || null, wsId, systemPrompt ?? null, false, proxy ?? null);
+      await manager.create(name, beforeKill.type, beforeKill.cwd, extraArgs, beforeKill.sessionId || null, wsId, systemPrompt ?? null, false, proxy ?? null, nextAgents, nextDeny);
       if (beforeKill.label) persistence.setLabel(name, beforeKill.label);
       return { ok: true, restarted: true };
     } catch (err) {
       // kill() dropped the persistence entry and create() failed before
       // re-adding it. Put it back (with the edited settings) so the session
       // survives as a restorable entry instead of vanishing.
-      persistence.upsert({ ...beforeKill, extraArgs, proxy: proxy ?? null, systemPrompt: systemPrompt ?? null });
+      persistence.upsert({ ...beforeKill, extraArgs, proxy: proxy ?? null, systemPrompt: systemPrompt ?? null, agents: nextAgents, denyBuiltins: nextDeny });
       return { ok: false, error: `${err.message} — session kept; it will respawn on next workspace open.` };
     }
   });
@@ -2620,7 +2776,7 @@ app.whenReady().then(() => {
         await manager.kill(name);
         if (!await waitForSessionExit(name)) throw new Error('old process did not exit in time');
       }
-      await manager.create(name, entry.type, entry.cwd, entry.extraArgs || [], entry.sessionId || null, wsId, entry.systemPrompt || null, false, entry.proxy ?? null);
+      await manager.create(name, entry.type, entry.cwd, entry.extraArgs || [], entry.sessionId || null, wsId, entry.systemPrompt || null, false, entry.proxy ?? null, entry.agents || [], entry.denyBuiltins || []);
       if (entry.label) persistence.setLabel(name, entry.label);
       return { ok: true, restarted: true };
     } catch (err) {
@@ -2798,6 +2954,8 @@ app.whenReady().then(() => {
           entry.systemPrompt || null,
           false,
           entry.proxy ?? null,
+          entry.agents || [],
+          entry.denyBuiltins || [],
         );
         restored.push({
           name: entry.name,
@@ -2841,6 +2999,8 @@ app.whenReady().then(() => {
         entry.systemPrompt || null,
         false,
         entry.proxy ?? null,
+        entry.agents || [],
+        entry.denyBuiltins || [],
       );
       return { ok: true };
     } catch (err) {

@@ -14,7 +14,6 @@
         <span class="app-brand">Clodex</span>
         <span class="workspace-name" id="workspace-name" title="Double-click to rename workspace">Workspace</span>
       </div>
-      <button id="btn-prompts" title="Prompts library">📝</button>
       <button id="btn-new" title="New session (Cmd+T)">+</button>
     </div>
     <div id="session-list"></div>
@@ -52,6 +51,38 @@
         <button id="prompt-delete" class="secondary" type="button" style="margin-right: auto;">Delete</button>
         <button id="prompt-cancel" class="secondary" type="button">Cancel</button>
         <button id="prompt-save" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+  <!-- Agents library drawer -->
+  <div id="agents-drawer" class="hidden">
+    <div id="agents-header">
+      <span class="prompts-title">Agents Library</span>
+      <button id="agents-new" title="New agent" type="button">+ New</button>
+      <button id="agents-close" title="Close" type="button">×</button>
+    </div>
+    <div id="agents-list"></div>
+    <div id="agents-empty" class="hint">
+      No agents yet. Click <strong>+ New</strong> to define a custom subagent.<br><br>
+      Stored as markdown in <code>~/.clodex/agents/</code>. Enable them per session in the New / Edit Session dialog (Claude only) — they spawn via <code>--agents</code> and touch no repo.
+    </div>
+  </div>
+
+  <!-- Agent editor modal -->
+  <div id="agent-editor" class="hidden">
+    <div class="prompt-editor-box">
+      <h3 id="agent-editor-title">New Agent</h3>
+      <label>Name
+        <input type="text" id="agent-name" placeholder="e.g. lean-explore" spellcheck="false">
+      </label>
+      <label>Definition (markdown + YAML frontmatter)
+        <textarea id="agent-content" rows="16" spellcheck="false"></textarea>
+      </label>
+      <span class="hint-text">Frontmatter fields: description, tools (allowlist), disallowedTools, model, skills, permissionMode. Body is the system prompt.</span>
+      <div class="dialog-actions">
+        <button id="agent-delete" class="secondary" type="button" style="margin-right: auto;">Delete</button>
+        <button id="agent-cancel" class="secondary" type="button">Cancel</button>
+        <button id="agent-save" type="button">Save</button>
       </div>
     </div>
   </div>
@@ -120,6 +151,13 @@
         </select>
         <span class="hint-text">Applied at create only — Claude: --append-system-prompt · Codex: model_instructions_file</span>
       </label>
+      <label id="agents-row" style="display:none;">Custom subagents
+        <div id="input-agents-list" class="agent-checklist"></div>
+        <label class="agent-deny">
+          <input type="checkbox" id="input-deny-builtins">
+          <span class="hint-text">Deny built-in <code>general-purpose</code> so the model must use the selected lean agents (cuts the big tool/skill load).</span>
+        </label>
+      </label>
       <label>Extra CLI args
         <input type="text" id="input-args" placeholder="(none)">
         <span class="hint-text" id="args-hint"></span>
@@ -162,6 +200,13 @@
           <option value="">Load from library…</option>
         </select>
         <textarea id="args-prompt-body" rows="6" spellcheck="false" placeholder="(none) — appended to the CLI's system prompt on every spawn, including resume"></textarea>
+      </label>
+      <label id="args-agents-row">Custom subagents
+        <div id="args-agents-list" class="agent-checklist"></div>
+        <label class="agent-deny">
+          <input type="checkbox" id="args-deny-builtins">
+          <span class="hint-text">Deny built-in <code>general-purpose</code> so the model must use the selected lean agents.</span>
+        </label>
       </label>
       <label id="args-proxy-row">API Proxy
         <select id="args-proxy-mode">

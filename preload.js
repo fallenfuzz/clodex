@@ -1,8 +1,8 @@
 const { ipcRenderer } = require('electron');
 
 window.api = {
-  createSession: (name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy) =>
-    ipcRenderer.invoke('session:create', name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy),
+  createSession: (name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins) =>
+    ipcRenderer.invoke('session:create', name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins),
   listSessions: () =>
     ipcRenderer.invoke('session:list'),
   killSession: (name) =>
@@ -35,6 +35,14 @@ window.api = {
     ipcRenderer.invoke('prompts:remove', id),
   injectPrompt: (name, body) =>
     ipcRenderer.invoke('prompts:inject', name, body),
+  listAgents: () =>
+    ipcRenderer.invoke('agents:list'),
+  getAgent: (name) =>
+    ipcRenderer.invoke('agents:get', name),
+  saveAgent: (name, content) =>
+    ipcRenderer.invoke('agents:save', name, content),
+  removeAgent: (name) =>
+    ipcRenderer.invoke('agents:remove', name),
   checkForUpdate: () =>
     ipcRenderer.invoke('update:check'),
   getUpdateInfo: () =>
@@ -83,6 +91,12 @@ window.api = {
     ipcRenderer.on('request-rename-workspace', () => callback()),
   onRequestOpenPreferences: (callback) =>
     ipcRenderer.on('request-open-preferences', () => callback()),
+  onRequestOpenAgentsDrawer: (callback) =>
+    ipcRenderer.on('request-open-agents-drawer', () => callback()),
+  onRequestOpenPromptsDrawer: (callback) =>
+    ipcRenderer.on('request-open-prompts-drawer', () => callback()),
+  onRequestOpenIpcLog: (callback) =>
+    ipcRenderer.on('request-open-ipc-log', () => callback()),
 
   // UI settings
   getSettings: () => ipcRenderer.invoke('settings:get'),
@@ -95,7 +109,7 @@ window.api = {
 
   // Session args
   getSessionArgs: (name) => ipcRenderer.invoke('session:getArgs', name),
-  setSessionArgs: (name, extraArgs, restart, proxy, systemPrompt) => ipcRenderer.invoke('session:setArgs', name, extraArgs, restart, proxy, systemPrompt),
+  setSessionArgs: (name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins) => ipcRenderer.invoke('session:setArgs', name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins),
   restartSession: (name) => ipcRenderer.invoke('session:restart', name),
 
   // Workspaces
