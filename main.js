@@ -202,6 +202,22 @@ const persistence = {
       this._save(all);
     }
   },
+  setDisabledSkills(name, disabledSkills) {
+    const all = this._load();
+    const entry = all.find(s => s.name === name);
+    if (entry) {
+      entry.disabledSkills = Array.isArray(disabledSkills) ? disabledSkills : [];
+      this._save(all);
+    }
+  },
+  setInjectSkills(name, injectSkills) {
+    const all = this._load();
+    const entry = all.find(s => s.name === name);
+    if (entry) {
+      entry.injectSkills = Array.isArray(injectSkills) ? injectSkills : [];
+      this._save(all);
+    }
+  },
   get(name) {
     return this._load().find(s => s.name === name) || null;
   },
@@ -345,6 +361,14 @@ const prompts = {
 const AGENTS_DIR = path.join(REGISTRY_DIR, 'agents');
 const AGENT_NAME_RE = /^[a-zA-Z0-9._-]{1,64}$/; // mirrors session name rule
 
+// clodex skill-injection library: user-authored SKILL.md files in
+// ~/.clodex/skills/*.md. At spawn the enabled subset is scaffolded into a
+// per-session plugin under ~/.clodex/skill-plugins/<name>/ and injected via
+// --plugin-dir (see skills-util.js). Claude-only.
+const SKILLS_LIB_DIR = path.join(REGISTRY_DIR, 'skills');
+const SKILL_PLUGINS_DIR = path.join(REGISTRY_DIR, 'skill-plugins');
+const SKILL_PLUGIN_NAME = 'clodex-skills';
+
 const agentLibrary = {
   _file(name) { return path.join(AGENTS_DIR, `${name}.md`); },
   // Parsed metadata for every *.md in the folder. Identity is the frontmatter
@@ -392,6 +416,68 @@ const agentLibrary = {
   },
 };
 
+// Skill-injection library — same fs shape as agentLibrary, over
+// ~/.clodex/skills/*.md. Each file is a SKILL.md (frontmatter name/description
+// + instruction body); identity is the filename stem (the frontmatter `name`
+// is normalized to it at scaffold time, see skills-util.skillMd).
+const skillLibrary = {
+  _file(name) { return path.join(SKILLS_LIB_DIR, `${name}.md`); },
+  list() {
+    let files;
+    try { files = fs.readdirSync(SKILLS_LIB_DIR); }
+    catch { return []; }
+    const out = [];
+    for (const f of files) {
+      if (!f.endsWith('.md')) continue;
+      try {
+        const raw = fs.readFileSync(path.join(SKILLS_LIB_DIR, f), 'utf-8');
+        const { meta } = parseSkillFrontmatter(raw);
+        const name = f.replace(/\.md$/, '');
+        out.push({ name, description: meta.description || '', content: raw, file: f });
+      } catch { /* skip unreadable */ }
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  },
+  raw(name) {
+    try { return fs.readFileSync(this._file(name), 'utf-8'); } catch { return null; }
+  },
+  save(name, content) {
+    if (!AGENT_NAME_RE.test(name)) throw new Error(`invalid skill name: ${name}`);
+    ensureDir(SKILLS_LIB_DIR);
+    fs.writeFileSync(this._file(name), String(content ?? ''), { mode: 0o600 });
+    return this.list();
+  },
+  remove(name) {
+    try { fs.unlinkSync(this._file(name)); } catch {}
+    return this.list();
+  },
+};
+
+// Scaffold the per-session injection plugin from the enabled skill names and
+// return its directory (for --plugin-dir), or null when nothing is injected.
+// The dir is rebuilt from scratch each spawn so a removed/edited library skill
+// can't linger. Writes only under ~/.clodex — never the repo or ~/.claude.
+function writeSkillPlugin(name, injectSkills) {
+  const plugin = buildSkillPlugin(injectSkills, skillLibrary.list(), SKILL_PLUGIN_NAME);
+  const dir = path.join(SKILL_PLUGINS_DIR, name);
+  // Clear any prior scaffold (set shrank, or nothing injected now).
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  if (!plugin) return null;
+  const manifestDir = path.join(dir, '.claude-plugin');
+  ensureDir(manifestDir);
+  fs.writeFileSync(path.join(manifestDir, 'plugin.json'), JSON.stringify(plugin.manifest, null, 2), { mode: 0o600 });
+  for (const s of plugin.skills) {
+    const sdir = path.join(dir, 'skills', s.name);
+    ensureDir(sdir);
+    fs.writeFileSync(path.join(sdir, 'SKILL.md'), s.skillMd, { mode: 0o600 });
+  }
+  return dir;
+}
+
+function cleanupSkillPlugin(name) {
+  try { fs.rmSync(path.join(SKILL_PLUGINS_DIR, name), { recursive: true, force: true }); } catch {}
+}
+
 // ---------------------------------------------------------------------------
 // UI preferences — statusline components per CLI, global
 // ---------------------------------------------------------------------------
@@ -436,6 +522,39 @@ const CLAUDE_TOOLS = [
   // Connectors
   'DesignSync',
 ];
+
+// Known CLI-shipped built-in skills. Unlike tools, skills are normally
+// DISCOVERED from the transcript (skill_listing attachments) — but a skill
+// disabled in another settings source (e.g. a hand-written $cwd/.claude/
+// settings.json `skillOverrides`) never reaches the injected roster, so the
+// transcript can't surface it. This static seed makes those known built-ins
+// visible + toggleable in the popover regardless. Unioned with the live
+// roster (which also catches plugin/cortex skills like warm-cache that aren't
+// listed here). Same authority model as CLAUDE_TOOLS: clodex tracks only the
+// skills IT disabled — one off via a manual settings.json still renders
+// checked here (clodex can't see the other source, and only ever writes
+// "off" overrides, never "on", so it can't re-enable it).
+const CLAUDE_SKILLS = [
+  // Review & analysis
+  'code-review', 'security-review', 'review', 'deep-research', 'verify',
+  // Codebase setup & config
+  'init', 'update-config', 'simplify',
+  // Execution & control flow
+  'run', 'loop', 'schedule',
+  // API & help
+  'claude-api', 'keybindings-help', 'fewer-permission-prompts',
+];
+
+// Empirical gate (Q2): whether our layer-4 `--settings` `skillOverrides:{x:"on"}`
+// actually overrides a LOWER-layer "off" in the shipping CLI and re-enables the
+// skill. The whole-settings merge is per-key later-wins, but this specific key's
+// consumer is closed-source and unverified (a community reimpl has no consumer
+// for it at all), so until a live flip-test confirms it we treat a lower-layer-
+// off skill as un-re-enableable — rendered disabled with provenance, NEVER a
+// silent no-op. Flip to true once the flip-test passes; that also unlocks the
+// "on" write path. Q1 (layer-4 "off" removes a loaded skill) needs no gate — it
+// is the same mechanism the popover already ships.
+const SKILL_REENABLE_CONFIRMED = false;
 
 const CLAUDE_SL_COMPONENTS = ['model', 'context', 'cost', 'cwd', 'git-branch'];
 const CODEX_SL_COMPONENTS = [
@@ -852,6 +971,7 @@ function resolveProxyBase(proxy) {
 
 const { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord } = require('./proxy-util');
 const { parseAgentFrontmatter, buildAgentsArg, denyAgentRules } = require('./agents-util');
+const { parseSkillFrontmatter, buildSkillPlugin } = require('./skills-util');
 const PROXY_POLL_INTERVAL = 5000; // ms
 const PROXY_HTTP_TIMEOUT = 4000;  // ms
 const PROXY_PROBE_TTL = 60000;    // ms — re-confirm identity at most this often
@@ -1150,7 +1270,77 @@ class WirescopeSupervisor {
 }
 const wirescope = new WirescopeSupervisor();
 
-function setupClaudeHook(name, proxyBase = null, proxyAgent = null, denyBuiltins = [], disabledTools = []) {
+// Parse the current skill roster from a Claude session's transcript. The CLI
+// records the available-skills list as `attachment` entries of type
+// "skill_listing", each carrying a structured `names` array; the latest one
+// reflects what's loaded now. Returns [] when there's no transcript yet (a
+// fresh session) or no skill_listing recorded. This is clodex's STANDALONE
+// catalog source for the Skills popover — no proxy needed; wirescope only
+// enriches with the aggregate per-turn token cost (the `skills` composition
+// category). A skill turned off via skillOverrides vanishes from later
+// listings, so callers union this with the persisted disabled set.
+function parseSkillRoster(name) {
+  try {
+    const linkPath = path.join(REGISTRY_DIR, `${name}.jsonl`);
+    const real = fs.realpathSync(linkPath);
+    const lines = fs.readFileSync(real, 'utf8').split('\n');
+    let names = [];
+    for (const line of lines) {
+      if (!line || line.indexOf('skill_listing') === -1) continue;
+      let obj;
+      try { obj = JSON.parse(line); } catch { continue; }
+      const att = obj && obj.type === 'attachment' ? obj.attachment : null;
+      if (att && att.type === 'skill_listing' && Array.isArray(att.names)) {
+        names = att.names; // last one wins — reflects the current roster
+      }
+    }
+    return names;
+  } catch { return []; }
+}
+
+function readJsonSafe(p) {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
+}
+
+// Read the EFFECTIVE lower-layer skill state for a session's cwd by merging the
+// three editable settings layers the CLI loads BELOW our generated --settings
+// (layer 4), per-key later-wins: user (~/.claude/settings.json) < project
+// (<cwd>/.claude/settings.json) < local (<cwd>/.claude/settings.local.json).
+// Also probes the macOS managed-settings file for a policy lock on the skills
+// surface (strictPluginOnlyCustomization). This lets the popover render a skill
+// that is off in a lower layer as unchecked + disabled + labeled with its
+// provenance, instead of misleadingly showing it checked — and lets us avoid a
+// silent no-op re-enable clodex can't actually perform (see SKILL_REENABLE_
+// CONFIRMED). Pure file reads; standalone, no proxy. policy/MDM is read-only
+// from a UI's perspective and only the lock matters here.
+function readEffectiveSkillState(cwd) {
+  const layers = [
+    { src: 'global', file: path.join(os.homedir(), '.claude', 'settings.json') },
+    { src: 'project', file: cwd ? path.join(cwd, '.claude', 'settings.json') : null },
+    { src: 'local', file: cwd ? path.join(cwd, '.claude', 'settings.local.json') : null },
+  ];
+  const overrides = {}; // name -> { value:'off'|'on', source } — later layer wins
+  for (const { src, file } of layers) {
+    if (!file) continue;
+    const data = readJsonSafe(file);
+    const so = data && data.skillOverrides;
+    if (so && typeof so === 'object') {
+      for (const [k, v] of Object.entries(so)) {
+        if (v === 'off' || v === 'on') overrides[k] = { value: v, source: src };
+      }
+    }
+  }
+  let skillsLocked = false;
+  if (process.platform === 'darwin') {
+    const managed = readJsonSafe('/Library/Application Support/ClaudeCode/managed-settings.json');
+    const lock = managed && managed.strictPluginOnlyCustomization;
+    if (lock === true) skillsLocked = true;
+    else if (Array.isArray(lock) && lock.includes('skills')) skillsLocked = true;
+  }
+  return { overrides, skillsLocked };
+}
+
+function setupClaudeHook(name, proxyBase = null, proxyAgent = null, denyBuiltins = [], disabledTools = [], disabledSkills = []) {
   ensureDir(REGISTRY_DIR);
   const linkPath = path.join(REGISTRY_DIR, `${name}.jsonl`);
   const scriptPath = path.join(REGISTRY_DIR, `${name}-hook.sh`);
@@ -1222,6 +1412,15 @@ mv -f "$TMPLINK" "${linkPath}"
     ...(Array.isArray(disabledTools) ? disabledTools : []).filter((t) => toolSet.has(t)),
   ])];
   if (denyRules.length) settings.permissions = { deny: denyRules };
+  // Per-session skill gating. skillOverrides:{name:"off"} REMOVES the skill from
+  // the injected roster, reclaiming its per-turn tokens — distinct from a deny
+  // rule (Skill(name)), which only blocks invocation while still paying for the
+  // listing. Unlike tools there's no static catalog (skills are project/plugin-
+  // defined and discovered at runtime), so the persisted names are trusted as-is.
+  const skillsOff = [...new Set((Array.isArray(disabledSkills) ? disabledSkills : []).filter(Boolean))];
+  if (skillsOff.length) {
+    settings.skillOverrides = Object.fromEntries(skillsOff.map((s) => [s, 'off']));
+  }
   fs.writeFileSync(settingsPath, JSON.stringify(settings));
   return settingsPath;
 }
@@ -1641,7 +1840,7 @@ class SessionManager {
     }
   }
 
-  async create(name, type, cwd, extraArgs = [], resumeId = null, workspaceId = DEFAULT_WORKSPACE_ID, systemPromptBody = null, fork = false, proxy = null, agents = [], denyBuiltins = [], disabledTools = []) {
+  async create(name, type, cwd, extraArgs = [], resumeId = null, workspaceId = DEFAULT_WORKSPACE_ID, systemPromptBody = null, fork = false, proxy = null, agents = [], denyBuiltins = [], disabledTools = [], disabledSkills = [], injectSkills = []) {
     if (this.sessions.has(name)) {
       throw new Error(`Session "${name}" already exists`);
     }
@@ -1679,7 +1878,7 @@ class SessionManager {
           (a, i) => a === '--settings' && (args[i + 1] || '').startsWith('/tmp/wb-wrap/'));
         if (staleSettings !== -1) args.splice(staleSettings, 2);
         if (!args.includes('--settings')) {
-          const settingsPath = setupClaudeHook(name, proxyBase, proxyAgent, denyBuiltins, disabledTools);
+          const settingsPath = setupClaudeHook(name, proxyBase, proxyAgent, denyBuiltins, disabledTools, disabledSkills);
           args.push('--settings', settingsPath);
         }
         ensureDir(MSG_DIR);
@@ -1691,6 +1890,16 @@ class SessionManager {
         if (!args.includes('--agents')) {
           const agentsObj = buildAgentsArg(agents, agentLibrary.list());
           if (agentsObj) args.push('--agents', JSON.stringify(agentsObj));
+        }
+        // clodex-injected skills: scaffold the enabled library subset into a
+        // session-only plugin and load it via --plugin-dir. A plugin's skills/
+        // join the always-on roster — the only injection door the CLI gives for
+        // skills (no inline --skills flag). Writes only under ~/.clodex.
+        if (!args.includes('--plugin-dir')) {
+          const pluginDir = writeSkillPlugin(name, injectSkills);
+          if (pluginDir) args.push('--plugin-dir', pluginDir);
+        } else {
+          cleanupSkillPlugin(name);
         }
         if (resumeId && !args.includes('--resume') && !args.includes('-r')) {
           args.push('--resume', resumeId);
@@ -1816,6 +2025,8 @@ class SessionManager {
       agents: Array.isArray(agents) ? agents : [],
       denyBuiltins: Array.isArray(denyBuiltins) ? denyBuiltins : [],
       disabledTools: Array.isArray(disabledTools) ? disabledTools : [],
+      disabledSkills: Array.isArray(disabledSkills) ? disabledSkills : [],
+      injectSkills: Array.isArray(injectSkills) ? injectSkills : [],
     });
 
     // JSONL watcher for agent modes
@@ -1956,7 +2167,7 @@ class SessionManager {
     if (s.ctxWatcher) { try { s.ctxWatcher.close(); } catch {} }
     if (s.transport) s.transport.stop();
     if (s.agentType) registry.unregister(name);
-    if (s.agentType === 'claude') cleanupClaudeHook(name);
+    if (s.agentType === 'claude') { cleanupClaudeHook(name); cleanupSkillPlugin(name); }
     if (s.agentType === 'codex') cleanupCodexHook(name, s.cwd);
     this.sessions.delete(name);
   }
@@ -2382,36 +2593,41 @@ function refreshTrayMenu() {
 // ---------------------------------------------------------------------------
 
 function buildAgentsSubmenu() {
-  const agents = [...manager.sessions.values()].filter(s => s.type !== 'bash');
+  // The custom-subagent library (the reusable agent *types*), not running
+  // sessions — those already live in the sidebar. Each entry opens its editor.
+  const lib = agentLibrary.list();
   const items = [];
 
-  if (agents.length > 0) {
-    for (const s of agents) {
-      const ws = workspaces.get(s.workspaceId);
-      const wsLabel = ws ? (ws.name || ws.id) : s.workspaceId;
+  const openDrawer = (name) => {
+    const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+    if (win) win.webContents.send('request-open-agents-drawer', name || null);
+  };
+
+  if (lib.length > 0) {
+    for (const a of lib) {
+      const label = a.description ? `${a.name}  —  ${a.description}` : a.name;
       items.push({
-        label: `${s.name}  —  ${wsLabel}`,
-        click: () => {
-          let win = manager.windowForWorkspace(s.workspaceId);
-          if (!win) win = createWindow(s.workspaceId);
-          win.show();
-          win.focus();
-          win.webContents.send('request-switch-session', s.name);
-        },
+        // Menu labels don't wrap; keep long descriptions from blowing out width.
+        label: label.length > 60 ? label.slice(0, 57) + '…' : label,
+        click: () => openDrawer(a.name),
       });
     }
   } else {
-    items.push({ label: '(no agents running)', enabled: false });
+    items.push({ label: '(no agents in library)', enabled: false });
   }
 
   items.push(
     { type: 'separator' },
     {
-      label: 'Agent Types…',
-      click: () => {
-        const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
-        if (win) win.webContents.send('request-open-agents-drawer');
-      },
+      label: 'New Agent…',
+      accelerator: 'CmdOrCtrl+Shift+A',
+      // Sentinel (a colon is invalid in an agent name, so it can't collide)
+      // tells the renderer to open a blank editor rather than load a type.
+      click: () => openDrawer(':new'),
+    },
+    {
+      label: 'Manage Agent Types…',
+      click: () => openDrawer(null),
     },
     { type: 'separator' },
     {
@@ -2421,6 +2637,46 @@ function buildAgentsSubmenu() {
         const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
         if (win) win.webContents.send('request-open-ipc-log');
       },
+    }
+  );
+
+  return items;
+}
+
+// Parallel to buildAgentsSubmenu, over the skill-injection library. Each entry
+// opens its editor; the library skills are what a session can selectively
+// inject via --plugin-dir.
+function buildSkillsSubmenu() {
+  const lib = skillLibrary.list();
+  const items = [];
+
+  const openDrawer = (name) => {
+    const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+    if (win) win.webContents.send('request-open-skills-drawer', name || null);
+  };
+
+  if (lib.length > 0) {
+    for (const s of lib) {
+      const label = s.description ? `${s.name}  —  ${s.description}` : s.name;
+      items.push({
+        label: label.length > 60 ? label.slice(0, 57) + '…' : label,
+        click: () => openDrawer(s.name),
+      });
+    }
+  } else {
+    items.push({ label: '(no skills in library)', enabled: false });
+  }
+
+  items.push(
+    { type: 'separator' },
+    {
+      label: 'New Skill…',
+      accelerator: 'CmdOrCtrl+Shift+S',
+      click: () => openDrawer(':new'),
+    },
+    {
+      label: 'Manage Skill Library…',
+      click: () => openDrawer(null),
     }
   );
 
@@ -2497,6 +2753,10 @@ function buildAppMenu() {
     {
       label: 'Agents',
       submenu: buildAgentsSubmenu(),
+    },
+    {
+      label: 'Skills',
+      submenu: buildSkillsSubmenu(),
     },
     {
       label: 'Edit',
@@ -2739,12 +2999,12 @@ app.whenReady().then(() => {
 
   initTray();
 
-  ipcMain.handle('session:create', async (e, name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins, disabledTools) => {
+  ipcMain.handle('session:create', async (e, name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills) => {
     try {
       const workspaceId = workspaceOfSender(e);
       return {
         ok: true,
-        session: await manager.create(name, type, cwd, extraArgs, resumeId || null, workspaceId, systemPromptBody || null, !!fork, proxy ?? null, agents || [], denyBuiltins || [], disabledTools || []),
+        session: await manager.create(name, type, cwd, extraArgs, resumeId || null, workspaceId, systemPromptBody || null, !!fork, proxy ?? null, agents || [], denyBuiltins || [], disabledTools || [], disabledSkills || [], injectSkills || []),
       };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -2784,10 +3044,35 @@ app.whenReady().then(() => {
   ipcMain.handle('agents:list', () => agentLibrary.list());
   ipcMain.handle('agents:get', (_e, name) => agentLibrary.raw(name));
   ipcMain.handle('agents:save', (_e, name, content) => {
-    try { return { ok: true, agents: agentLibrary.save(name, content) }; }
-    catch (err) { return { ok: false, error: err.message }; }
+    try {
+      const agents = agentLibrary.save(name, content);
+      refreshAppMenu(); // Agents menu lists the library — keep it current.
+      return { ok: true, agents };
+    } catch (err) { return { ok: false, error: err.message }; }
   });
-  ipcMain.handle('agents:remove', (_e, name) => ({ ok: true, agents: agentLibrary.remove(name) }));
+  ipcMain.handle('agents:remove', (_e, name) => {
+    const agents = agentLibrary.remove(name);
+    refreshAppMenu();
+    return { ok: true, agents };
+  });
+
+  // Skill-injection library (~/.clodex/skills/*.md). Claude-only. Mirrors the
+  // agents handlers; the Skills app menu lists this library, so save/remove
+  // refresh the menu.
+  ipcMain.handle('skilllib:list', () => skillLibrary.list());
+  ipcMain.handle('skilllib:get', (_e, name) => skillLibrary.raw(name));
+  ipcMain.handle('skilllib:save', (_e, name, content) => {
+    try {
+      const skills = skillLibrary.save(name, content);
+      refreshAppMenu();
+      return { ok: true, skills };
+    } catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('skilllib:remove', (_e, name) => {
+    const skills = skillLibrary.remove(name);
+    refreshAppMenu();
+    return { ok: true, skills };
+  });
   ipcMain.handle('prompts:inject', (_e, name, body) => {
     const s = manager.sessions.get(name);
     if (!s) return { ok: false, error: 'Session not found' };
@@ -2866,6 +3151,8 @@ app.whenReady().then(() => {
       agents: entry.agents || [],
       denyBuiltins: entry.denyBuiltins || [],
       disabledTools: entry.disabledTools || [],
+      disabledSkills: entry.disabledSkills || [],
+      injectSkills: entry.injectSkills || [],
     } : { ok: false };
   });
   // Focused per-session tool gating: persist disabledTools only (leaves
@@ -2875,6 +3162,56 @@ app.whenReady().then(() => {
     if (!persistence.get(name)) return { ok: false, error: 'Session not found in persistence' };
     persistence.setDisabledTools(name, Array.isArray(disabledTools) ? disabledTools : []);
     return { ok: true };
+  });
+  // Focused per-session skill gating (mirror of setTools): persist disabledSkills
+  // only. Takes effect on next spawn via skillOverrides in the generated settings.
+  ipcMain.handle('session:setSkills', (_e, name, disabledSkills, injectSkills) => {
+    if (!persistence.get(name)) return { ok: false, error: 'Session not found in persistence' };
+    persistence.setDisabledSkills(name, Array.isArray(disabledSkills) ? disabledSkills : []);
+    // injectSkills is optional — only the popover's library section sends it.
+    if (injectSkills !== undefined) persistence.setInjectSkills(name, Array.isArray(injectSkills) ? injectSkills : []);
+    return { ok: true };
+  });
+  // Skill catalog for the Skills popover. Three sources unioned: the static
+  // CLAUDE_SKILLS seed (known built-ins — visible even when disabled in another
+  // settings source so they never hit the roster), the live roster parsed from
+  // the transcript (skill_listing attachments — catches plugin/cortex skills
+  // not in the seed), and the persisted disabled set (so an off skill stays
+  // re-enable-able even after it drops off the wire). Never empty for Claude.
+  ipcMain.handle('session:skillCatalog', (_e, name) => {
+    const entry = persistence.get(name);
+    const disabled = entry && Array.isArray(entry.disabledSkills) ? entry.disabledSkills : [];
+    const eff = readEffectiveSkillState(entry ? entry.cwd : null);
+    // Catalog unions the static seed, the live roster, clodex's own off list, and
+    // any name a lower layer mentions — so a skill that's off below (and thus
+    // absent from the roster) is still listed, just rendered disabled+labeled.
+    const names = [...new Set([
+      ...CLAUDE_SKILLS,
+      ...parseSkillRoster(name),
+      ...disabled,
+      ...Object.keys(eff.overrides),
+    ])].sort();
+    return {
+      ok: true,
+      names,
+      disabledSkills: disabled,        // clodex's own layer-4 off list
+      effective: eff.overrides,        // lower-layer state, per skill (value+source)
+      skillsLocked: eff.skillsLocked,  // managed-policy lock on the skills surface
+      canReenable: SKILL_REENABLE_CONFIRMED,
+      skillLib: skillLibrary.list(),   // library skills available to inject
+      injectSkills: entry && Array.isArray(entry.injectSkills) ? entry.injectSkills : [],
+    };
+  });
+  // Skill catalog for the NEW-SESSION dialog (no session/transcript yet, just a
+  // chosen cwd). Static seed + whatever a lower settings layer for that cwd
+  // already disables, with the same effective-state + provenance so a globally-
+  // off skill renders disabled+labeled here too. This is the CLEAN trim path:
+  // the skill roster is evaluated at conversation creation, so a fresh session
+  // applies skillOverrides immediately — no restart/clear dance.
+  ipcMain.handle('settings:skillCatalogFor', (_e, cwd) => {
+    const eff = readEffectiveSkillState(cwd || null);
+    const names = [...new Set([...CLAUDE_SKILLS, ...Object.keys(eff.overrides)])].sort();
+    return { ok: true, names, effective: eff.overrides, skillsLocked: eff.skillsLocked, canReenable: SKILL_REENABLE_CONFIRMED };
   });
 
   // kill() only sends the signal — removal from manager.sessions happens in
@@ -2890,16 +3227,20 @@ app.whenReady().then(() => {
     return !manager.sessions.has(name);
   }
 
-  ipcMain.handle('session:setArgs', async (e, name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins, disabledTools) => {
+  ipcMain.handle('session:setArgs', async (e, name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills) => {
     const beforeKill = persistence.get(name);
     const nextAgents = agents !== undefined ? (agents || []) : (beforeKill?.agents || []);
     const nextDeny = denyBuiltins !== undefined ? (denyBuiltins || []) : (beforeKill?.denyBuiltins || []);
     const nextTools = disabledTools !== undefined ? (disabledTools || []) : (beforeKill?.disabledTools || []);
+    const nextSkills = disabledSkills !== undefined ? (disabledSkills || []) : (beforeKill?.disabledSkills || []);
+    const nextInject = injectSkills !== undefined ? (injectSkills || []) : (beforeKill?.injectSkills || []);
     persistence.setExtraArgs(name, extraArgs);
     persistence.setProxy(name, proxy ?? null);
     persistence.setSystemPrompt(name, systemPrompt ?? null);
     persistence.setAgents(name, nextAgents, nextDeny);
     persistence.setDisabledTools(name, nextTools);
+    persistence.setDisabledSkills(name, nextSkills);
+    persistence.setInjectSkills(name, nextInject);
     if (!restart) return { ok: true, restarted: false };
     if (!beforeKill) return { ok: false, error: 'Session not found in persistence' };
     const wsId = workspaceOfSender(e);
@@ -2908,14 +3249,14 @@ app.whenReady().then(() => {
         await manager.kill(name);
         if (!await waitForSessionExit(name)) throw new Error('old process did not exit in time');
       }
-      await manager.create(name, beforeKill.type, beforeKill.cwd, extraArgs, beforeKill.sessionId || null, wsId, systemPrompt ?? null, false, proxy ?? null, nextAgents, nextDeny, nextTools);
+      await manager.create(name, beforeKill.type, beforeKill.cwd, extraArgs, beforeKill.sessionId || null, wsId, systemPrompt ?? null, false, proxy ?? null, nextAgents, nextDeny, nextTools, nextSkills, nextInject);
       if (beforeKill.label) persistence.setLabel(name, beforeKill.label);
       return { ok: true, restarted: true };
     } catch (err) {
       // kill() dropped the persistence entry and create() failed before
       // re-adding it. Put it back (with the edited settings) so the session
       // survives as a restorable entry instead of vanishing.
-      persistence.upsert({ ...beforeKill, extraArgs, proxy: proxy ?? null, systemPrompt: systemPrompt ?? null, agents: nextAgents, denyBuiltins: nextDeny, disabledTools: nextTools });
+      persistence.upsert({ ...beforeKill, extraArgs, proxy: proxy ?? null, systemPrompt: systemPrompt ?? null, agents: nextAgents, denyBuiltins: nextDeny, disabledTools: nextTools, disabledSkills: nextSkills, injectSkills: nextInject });
       return { ok: false, error: `${err.message} — session kept; it will respawn on next workspace open.` };
     }
   });
@@ -2923,16 +3264,22 @@ app.whenReady().then(() => {
   // Restart in place: kill the PTY and respawn with the persisted settings,
   // resuming the same conversation. Useful after a CLI upgrade, a global
   // preference change, or a wedged TUI.
-  ipcMain.handle('session:restart', async (e, name) => {
+  ipcMain.handle('session:restart', async (e, name, opts = {}) => {
     const entry = persistence.get(name);
     if (!entry) return { ok: false, error: 'Session not found in persistence' };
     const wsId = workspaceOfSender(e);
+    // A "fresh" restart starts a NEW conversation (no --resume). Required to apply
+    // a skill change: the skill roster is evaluated when a conversation is
+    // created, so --resume replays the roster frozen before the change (proven
+    // live — skillOverrides never lands on a resumed session). Costs the
+    // conversation history; the caller is responsible for warning the user.
+    const resumeId = opts && opts.fresh ? null : (entry.sessionId || null);
     try {
       if (manager.sessions.has(name)) {
         await manager.kill(name);
         if (!await waitForSessionExit(name)) throw new Error('old process did not exit in time');
       }
-      await manager.create(name, entry.type, entry.cwd, entry.extraArgs || [], entry.sessionId || null, wsId, entry.systemPrompt || null, false, entry.proxy ?? null, entry.agents || [], entry.denyBuiltins || [], entry.disabledTools || []);
+      await manager.create(name, entry.type, entry.cwd, entry.extraArgs || [], resumeId, wsId, entry.systemPrompt || null, false, entry.proxy ?? null, entry.agents || [], entry.denyBuiltins || [], entry.disabledTools || [], entry.disabledSkills || [], entry.injectSkills || []);
       if (entry.label) persistence.setLabel(name, entry.label);
       return { ok: true, restarted: true };
     } catch (err) {
@@ -3114,6 +3461,8 @@ app.whenReady().then(() => {
           entry.agents || [],
           entry.denyBuiltins || [],
           entry.disabledTools || [],
+          entry.disabledSkills || [],
+          entry.injectSkills || [],
         );
         restored.push({
           name: entry.name,
@@ -3160,6 +3509,8 @@ app.whenReady().then(() => {
         entry.agents || [],
         entry.denyBuiltins || [],
         entry.disabledTools || [],
+        entry.disabledSkills || [],
+        entry.injectSkills || [],
       );
       return { ok: true };
     } catch (err) {

@@ -482,12 +482,14 @@ html, body {
 #proxy-bar .px-hold:hover { border-color: var(--accent); }
 #proxy-bar .px-hold:disabled { opacity: 0.5; cursor: default; }
 
-/* Per-session Tools quick-access popover (anchored above the status bar). */
-#tools-popover {
+/* Per-session Tools / Skills quick-access popovers (anchored above the bar). */
+#tools-popover,
+#skills-popover {
   position: fixed;
   z-index: 50;
-  width: 340px;
-  max-height: 60vh;
+  width: 520px;
+  max-width: calc(100vw - 16px);
+  max-height: 70vh;
   display: flex;
   flex-direction: column;
   background: var(--sidebar-bg);
@@ -496,13 +498,60 @@ html, body {
   padding: 10px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
-#tools-popover.hidden { display: none; }
-#tools-popover .popover-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
-#tools-popover #popover-tools-list { overflow-y: auto; flex: 1; }
-#tools-popover .tools-popover-restart {
+#tools-popover.hidden, #skills-popover.hidden { display: none; }
+#tools-popover .popover-title,
+#skills-popover .popover-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+#tools-popover #popover-tools-list,
+#skills-popover #popover-skills-list { overflow-y: auto; flex: 1; }
+
+/* Lay the (short, single-word) tool/skill checklists out in two columns so the
+   popover stays wide-and-short instead of a tall scroll. */
+#popover-tools-list,
+#popover-skills-list,
+#popover-inject-skills-list,
+#input-tools-list,
+#input-skills-list,
+#input-inject-skills-list,
+#args-tools-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 18px;
+  align-content: start;
+}
+
+/* Sub-section heading inside a popover (e.g. the library-injection block). */
+.popover-subhead {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+/* Title bar holds an always-reachable close button. */
+.popover-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.popover-close {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.popover-close:hover { color: var(--text); }
+
+/* Context popover: composition (left) beside utilization (right). */
+.ctx-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 18px; }
+.ctx-col { min-width: 0; }
+#tools-popover .tools-popover-restart,
+#skills-popover .tools-popover-restart {
   display: flex; align-items: center; gap: 6px; margin: 8px 0 0;
 }
-#tools-popover .popover-actions {
+#tools-popover .popover-actions,
+#skills-popover .popover-actions {
   display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px;
 }
 
@@ -551,8 +600,9 @@ html, body {
 #ctx-popover {
   position: fixed;
   z-index: 50;
-  width: 320px;
-  max-height: 60vh;
+  width: 640px;
+  max-width: calc(100vw - 16px);
+  max-height: 70vh;
   overflow-y: auto;
   background: var(--sidebar-bg);
   border: 1px solid var(--accent);
@@ -691,7 +741,27 @@ html, body {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 24px;
-  width: 360px;
+  /* Two-column form: wide-and-short instead of one tall scrolling column that
+     overflows the window. Short fields pair up; wide rows (checklists, header,
+     actions) span both columns. */
+  width: 680px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 20px;
+  align-content: start;
+}
+
+/* Header, full-width checklist rows, and the action bar all span both columns. */
+#dialog h3,
+#dialog .dialog-actions,
+#dialog #agents-row,
+#dialog #tools-row,
+#dialog #skills-row,
+#dialog #inject-skills-row {
+  grid-column: 1 / -1;
 }
 
 #dialog h3 {
@@ -784,6 +854,78 @@ html, body {
 #btn-create {
   background: var(--accent);
   color: #fff;
+}
+
+/* Toast bubbles — stacked bottom-right, fade + slide in, auto-dismiss. Used
+   for transient heads-ups like a kept-warm cache about to go cold. */
+#toast-host {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 320px;
+  padding: 10px 12px;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0;
+  transform: translateX(12px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+/* Cache-cooldown warnings get the cold accent. */
+.toast-warm {
+  border-left-color: #7cc7ff;
+}
+
+.toast-clickable {
+  cursor: pointer;
+}
+
+.toast-clickable:hover {
+  border-color: var(--accent);
+}
+
+.toast-msg {
+  flex: 1;
+  min-width: 0;
+}
+
+.toast-close {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.toast-close:hover {
+  color: var(--text);
 }
 
 #btn-create:hover {
@@ -1023,7 +1165,7 @@ html, body {
 
 /* Agents library drawer (mirrors the prompts drawer) */
 
-#agents-drawer {
+#agents-drawer, #skills-drawer {
   position: fixed;
   top: 0;
   left: var(--sidebar-width);
@@ -1037,9 +1179,9 @@ html, body {
   box-shadow: 4px 0 20px rgba(0, 0, 0, 0.4);
 }
 
-#agents-drawer.hidden { display: none; }
+#agents-drawer.hidden, #skills-drawer.hidden { display: none; }
 
-#agents-header {
+#agents-header, #skills-header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1047,7 +1189,7 @@ html, body {
   border-bottom: 1px solid var(--border);
 }
 
-#agents-new {
+#agents-new, #skills-new {
   background: var(--accent);
   color: white;
   border: none;
@@ -1058,9 +1200,9 @@ html, body {
   font-weight: 500;
 }
 
-#agents-new:hover { opacity: 0.85; }
+#agents-new:hover, #skills-new:hover { opacity: 0.85; }
 
-#agents-close {
+#agents-close, #skills-close {
   background: transparent;
   border: none;
   color: var(--text-dim);
@@ -1072,18 +1214,18 @@ html, body {
   padding: 0;
 }
 
-#agents-close:hover {
+#agents-close:hover, #skills-close:hover {
   background: var(--sidebar-hover);
   color: var(--text);
 }
 
-#agents-list {
+#agents-list, #skills-list {
   flex: 1;
   overflow-y: auto;
   padding: 6px 8px;
 }
 
-#agents-empty {
+#agents-empty, #skills-empty {
   padding: 20px;
   text-align: center;
   color: var(--text-dim);
@@ -1091,7 +1233,7 @@ html, body {
   line-height: 1.5;
 }
 
-#agent-editor {
+#agent-editor, #skill-editor {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
@@ -1101,7 +1243,7 @@ html, body {
   z-index: 200;
 }
 
-#agent-editor.hidden { display: none; }
+#agent-editor.hidden, #skill-editor.hidden { display: none; }
 
 /* Agent enablement checklist in the create/edit dialogs */
 
@@ -1127,6 +1269,16 @@ html, body {
 
 .agent-check:last-child { margin-bottom: 0; }
 .agent-check input { margin: 2px 0 0; }
+
+/* A skill clodex can't toggle from its own settings layer (off in a lower
+   settings layer, or policy-locked) — shown checked-state honest but inert. */
+.agent-check.skill-readonly { opacity: 0.6; cursor: default; }
+.agent-check .skill-src {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-left: 4px;
+  font-style: italic;
+}
 
 .agent-deny {
   display: flex;

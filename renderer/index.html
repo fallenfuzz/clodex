@@ -86,6 +86,40 @@
       </div>
     </div>
   </div>
+
+  <!-- Skill library drawer -->
+  <div id="skills-drawer" class="hidden">
+    <div id="skills-header">
+      <span class="prompts-title">Skill Library</span>
+      <button id="skills-new" title="New skill" type="button">+ New</button>
+      <button id="skills-close" title="Close" type="button">×</button>
+    </div>
+    <div id="skills-list"></div>
+    <div id="skills-empty" class="hint">
+      No skills yet. Click <strong>+ New</strong> to define a custom skill.<br><br>
+      Stored as <code>SKILL.md</code> in <code>~/.clodex/skills/</code>. Add them per session in the New / Edit Session dialog (Claude only) — they inject via a session-only <code>--plugin-dir</code> and touch no repo.
+    </div>
+  </div>
+
+  <!-- Skill editor modal -->
+  <div id="skill-editor" class="hidden">
+    <div class="prompt-editor-box">
+      <h3 id="skill-editor-title">New Skill</h3>
+      <label>Name
+        <input type="text" id="skill-name" placeholder="e.g. deploy-runbook" spellcheck="false">
+      </label>
+      <label>Definition (SKILL.md — markdown + YAML frontmatter)
+        <textarea id="skill-content" rows="16" spellcheck="false"></textarea>
+      </label>
+      <span class="hint-text">Frontmatter needs a <code>description</code> (when the model should use the skill); the body is the instructions. <code>name</code> is forced to the Name field above. Injected skills ride every turn, so keep them lean.</span>
+      <div class="dialog-actions">
+        <button id="skill-delete" class="secondary" type="button" style="margin-right: auto;">Delete</button>
+        <button id="skill-cancel" class="secondary" type="button">Cancel</button>
+        <button id="skill-save" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+
   <div id="main">
     <div id="search-bar" class="hidden">
       <input type="text" id="search-input" placeholder="Find in terminal…">
@@ -100,7 +134,7 @@
       <span id="proxy-actions"></span>
     </div>
     <div id="tools-popover" class="hidden">
-      <div class="popover-title">Tools — <span id="tools-popover-name"></span></div>
+      <div class="popover-title"><span>Tools — <span id="tools-popover-name"></span></span><button type="button" class="popover-close" id="tools-popover-close" title="Close" aria-label="Close">&times;</button></div>
       <div id="popover-tools-list" class="agent-checklist"></div>
       <label class="tools-popover-restart">
         <input type="checkbox" id="tools-popover-restart">
@@ -111,8 +145,26 @@
         <button id="tools-popover-apply" type="button">Apply</button>
       </div>
     </div>
+    <div id="skills-popover" class="hidden">
+      <div class="popover-title"><span>Skills — <span id="skills-popover-name"></span></span><button type="button" class="popover-close" id="skills-popover-close" title="Close" aria-label="Close">&times;</button></div>
+      <div id="popover-skills-list" class="agent-checklist"></div>
+      <span class="hint-text">Unchecked skills are turned off for this session (<code>skillOverrides</code>), reclaiming their per-turn context. Skills disabled by a lower settings layer are shown locked, with their source.</span>
+      <div id="popover-inject-skills-section" style="display:none;">
+        <div class="popover-subhead">Inject from Skill Library</div>
+        <div id="popover-inject-skills-list" class="agent-checklist"></div>
+        <span class="hint-text">Checked library skills are injected into this session (via <code>--plugin-dir</code>). Like trimming, this only takes effect in a NEW conversation.</span>
+      </div>
+      <label class="tools-popover-restart">
+        <input type="checkbox" id="skills-popover-restart">
+        <span class="hint-text">Restart fresh now to apply. Skill changes only take effect in a NEW conversation, so this clears the current session's history. Leave unchecked to apply on the next fresh start.</span>
+      </label>
+      <div class="popover-actions">
+        <button id="skills-popover-cancel" class="secondary" type="button">Cancel</button>
+        <button id="skills-popover-apply" type="button">Apply</button>
+      </div>
+    </div>
     <div id="ctx-popover" class="hidden">
-      <div class="popover-title">Context — <span id="ctx-popover-name"></span></div>
+      <div class="popover-title"><span>Context — <span id="ctx-popover-name"></span></span><button type="button" class="popover-close" id="ctx-popover-close" title="Close" aria-label="Close">&times;</button></div>
       <div id="ctx-popover-body"></div>
     </div>
     <div id="empty-state">
@@ -180,6 +232,14 @@
       <label id="tools-row" style="display:none;">Tools
         <div id="input-tools-list" class="agent-checklist"></div>
         <span class="hint-text">Unchecked tools are denied for this session (<code>permissions.deny</code>). Any other tool can be denied by hand via <code>--disallowedTools</code> in Extra CLI args.</span>
+      </label>
+      <label id="skills-row" style="display:none;">Skills
+        <div id="input-skills-list" class="agent-checklist"></div>
+        <span class="hint-text">Unchecked skills are turned off (<code>skillOverrides</code>), reclaiming their per-turn tokens. Trimming here applies from the start — the skill roster is fixed when the conversation begins. Known built-ins only; project/plugin skills appear in the per-session list once running.</span>
+      </label>
+      <label id="inject-skills-row" style="display:none;">Custom skills
+        <div id="input-inject-skills-list" class="agent-checklist"></div>
+        <span class="hint-text">Inject skills from your <strong>Skill Library</strong> into this session (via a session-only <code>--plugin-dir</code>). They join the roster from the start and ride every turn — add only what this session needs.</span>
       </label>
       <label>Extra CLI args
         <input type="text" id="input-args" placeholder="(none)">
@@ -303,6 +363,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Transient bubble notifications (e.g. cache-cooldown warnings) -->
+  <div id="toast-host"></div>
 
   <script src="renderer.js"></script>
 </body>

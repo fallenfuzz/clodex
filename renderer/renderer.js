@@ -500,9 +500,12 @@ function applyTypeDefaults() {
   const supportsSystemPrompt = type === 'claude' || type === 'codex';
   systemPromptRow.style.display = supportsSystemPrompt ? '' : 'none';
   if (!supportsSystemPrompt) inputSystemPrompt.value = '';
-  // Custom subagents and per-session tool gating are Claude-only.
+  // Custom subagents and per-session tool/skill gating are Claude-only.
   agentsRow.style.display = type === 'claude' ? '' : 'none';
   toolsRow.style.display = type === 'claude' ? '' : 'none';
+  skillsRow.style.display = type === 'claude' ? '' : 'none';
+  injectSkillsRow.style.display = type === 'claude' ? '' : 'none';
+  if (type === 'claude') { refreshNewSessionSkills(); refreshNewSessionInjectSkills(); }
   const supportsResume = type === 'claude' || type === 'codex';
   resumeRow.style.display = supportsResume ? '' : 'none';
   if (!supportsResume) {
@@ -582,6 +585,55 @@ function collectAgentChecklist(container) {
 // never silently re-enables a tool the catalog dropped. ---
 const toolsRow = document.getElementById('tools-row');
 const inputToolsList = document.getElementById('input-tools-list');
+const skillsRow = document.getElementById('skills-row');
+const inputSkillsList = document.getElementById('input-skills-list');
+const injectSkillsRow = document.getElementById('inject-skills-row');
+const inputInjectSkillsList = document.getElementById('input-inject-skills-list');
+
+// Custom-skill injection checklist (opt-in: unchecked by default). Mirrors the
+// subagent checklist — checked names are scaffolded into a --plugin-dir at
+// spawn. The library is authored in the Skill Library drawer.
+let skillLibCache = [];
+function renderInjectChecklist(container, enabledSet) {
+  container.innerHTML = '';
+  if (!skillLibCache.length) {
+    container.innerHTML = '<span class="hint-text">No skills in library — add some via the 🧩 Skill Library (Skills menu).</span>';
+    return;
+  }
+  for (const s of skillLibCache) {
+    const row = document.createElement('label');
+    row.className = 'agent-check';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = s.name;
+    cb.checked = enabledSet.has(s.name);
+    const txt = document.createElement('span');
+    txt.innerHTML = `<strong>${esc(s.name)}</strong>${s.description ? ' — ' + esc(s.description) : ''}`;
+    row.appendChild(cb);
+    row.appendChild(txt);
+    container.appendChild(row);
+  }
+}
+function collectInjectChecklist(container) {
+  return Array.from(container.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+}
+async function refreshNewSessionInjectSkills(enabledSet = new Set()) {
+  if (inputType.value !== 'claude') return;
+  skillLibCache = (await window.api.listSkillLib()) || [];
+  renderInjectChecklist(inputInjectSkillsList, enabledSet);
+}
+
+// Populate the new-session Skills checklist for the currently-entered cwd. The
+// catalog (known built-ins + whatever a lower settings layer for that cwd
+// disables) and provenance both depend on cwd, so this re-runs when cwd changes.
+async function refreshNewSessionSkills() {
+  if (inputType.value !== 'claude') return;
+  const cwd = expandPath(inputCwd.value.trim()) || homeDir;
+  const res = await window.api.getSkillCatalogFor(cwd);
+  if (!res || !res.ok) { renderSkillChecklist(inputSkillsList, [], new Set()); return; }
+  renderSkillChecklist(inputSkillsList, res.names || [], new Set(),
+    res.effective || {}, { skillsLocked: res.skillsLocked, canReenable: res.canReenable });
+}
 let claudeToolsCache = [];
 
 function renderToolChecklist(container, disabledSet) {
@@ -613,6 +665,53 @@ function collectToolChecklist(container) {
   return Array.from(container.querySelectorAll('input[type="checkbox"]:not(:checked)')).map(cb => cb.value);
 }
 
+// Skills mirror tools. The catalog combines a static seed (CLAUDE_SKILLS), the
+// live transcript roster, clodex's own off list, and any skill a LOWER settings
+// layer mentions. A skill that's off in a lower layer (global/project/local
+// settings) or locked by managed policy is rendered unchecked + disabled +
+// labeled with provenance: clodex can't change it from its layer-4 file (a
+// lower-layer off can only be re-enabled if SKILL_REENABLE_CONFIRMED, a managed
+// lock never), so we show it honestly rather than as a silently-inert toggle.
+function renderSkillChecklist(container, names, disabledSet, effective, opts) {
+  effective = effective || {};
+  opts = opts || {};
+  const canReenable = !!opts.canReenable;
+  const skillsLocked = !!opts.skillsLocked;
+  container.innerHTML = '';
+  if (!names || !names.length) {
+    container.innerHTML = '<span class="hint-text">No skills detected yet — they appear once the session has run a turn.</span>';
+    return;
+  }
+  for (const name of names) {
+    const eff = effective[name];
+    const lowerOff = !!(eff && eff.value === 'off');
+    const clodexOff = disabledSet.has(name);
+    // Read-only when clodex's layer-4 write can't actually change it: a lower-
+    // layer off we can't re-enable yet, or a managed-policy lock.
+    const readonly = skillsLocked || (lowerOff && !canReenable);
+    const row = document.createElement('label');
+    row.className = 'agent-check' + (readonly ? ' skill-readonly' : '');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = name;
+    cb.checked = !clodexOff && !lowerOff;
+    if (readonly) cb.disabled = true;
+    const txt = document.createElement('span');
+    let note = '';
+    if (skillsLocked) note = ' <span class="skill-src">locked by policy</span>';
+    else if (lowerOff) note = ` <span class="skill-src">off via ${esc(eff.source)} settings</span>`;
+    txt.innerHTML = `<strong>${esc(name)}</strong>${note}`;
+    row.appendChild(cb);
+    row.appendChild(txt);
+    container.appendChild(row);
+  }
+}
+// Only collect toggleable rows: a disabled (read-only) checkbox is owned by a
+// lower layer / policy, not by clodex, so it never enters clodex's off list.
+function collectSkillChecklist(container) {
+  return Array.from(container.querySelectorAll('input[type="checkbox"]:not(:checked):not(:disabled)')).map(cb => cb.value);
+}
+
 async function openDialog() {
   sessionCounter++;
   inputName.value = `session-${sessionCounter}`;
@@ -642,6 +741,9 @@ async function openDialog() {
 }
 
 inputType.addEventListener('change', applyTypeDefaults);
+// cwd drives the skill catalog's provenance (which lower-layer settings apply),
+// so re-fetch when it changes.
+inputCwd.addEventListener('change', refreshNewSessionSkills);
 
 inputProxyMode.addEventListener('change', () => {
   inputProxyUrl.style.display = inputProxyMode.value === 'custom' ? '' : 'none';
@@ -731,11 +833,13 @@ async function doCreate() {
   const agents = type === 'claude' ? collectAgentChecklist(inputAgentsList) : [];
   const denyBuiltins = (type === 'claude' && inputDenyBuiltins.checked) ? ['general-purpose'] : [];
   const disabledTools = type === 'claude' ? collectToolChecklist(inputToolsList) : [];
+  const disabledSkills = type === 'claude' ? collectSkillChecklist(inputSkillsList) : [];
+  const injectSkills = type === 'claude' ? collectInjectChecklist(inputInjectSkillsList) : [];
 
   closeDialog();
 
   if (typeof proxy === 'string') window.api.setSettings({ proxyUrl: proxy }); // remember last used
-  const result = await window.api.createSession(name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins, disabledTools);
+  const result = await window.api.createSession(name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills);
   if (!result.ok) {
     console.error('Failed to create session:', result.error);
     alert(`Failed to create session: ${result.error || 'unknown error'}`);
@@ -753,7 +857,7 @@ document.getElementById('btn-create').addEventListener('click', doCreate);
 
 document.getElementById('btn-browse').addEventListener('click', async () => {
   const dir = await window.api.selectDirectory();
-  if (dir) inputCwd.value = dir;
+  if (dir) { inputCwd.value = dir; refreshNewSessionSkills(); }
 });
 
 // Enter to create (Escape no longer closes — only Cancel button does)
@@ -852,6 +956,7 @@ function renderSessionActions(holdHtml = '') {
   const btns = [];
   if (type === 'claude') {
     btns.push('<button class="px-action" data-act="tools" title="Enable/disable tools for this session">🛠 tools</button>');
+    btns.push('<button class="px-action" data-act="skills" title="Enable/disable skills for this session">🧩 skills</button>');
   }
   if (type === 'claude' || type === 'codex') {
     btns.push('<button class="px-action" data-act="edit" title="Edit session settings">⚙ edit</button>');
@@ -1040,11 +1145,75 @@ window.api.onSessionProxy((name, payload) => {
   if (name === activeSession) renderProxyBar();
 });
 
+// --- Toast bubbles -----------------------------------------------------------
+// Transient bottom-right notifications. Returns nothing; auto-dismisses unless
+// opts.sticky. Body text is set via textContent (never innerHTML) so a session
+// name can't inject markup.
+function showToast(msg, opts = {}) {
+  const host = document.getElementById('toast-host');
+  if (!host) return;
+  const el = document.createElement('div');
+  el.className = 'toast' + (opts.kind ? ' toast-' + opts.kind : '');
+  const body = document.createElement('span');
+  body.className = 'toast-msg';
+  body.textContent = msg;
+  const close = document.createElement('button');
+  close.className = 'toast-close';
+  close.title = 'Dismiss';
+  close.innerHTML = '&times;';
+  el.appendChild(body);
+  el.appendChild(close);
+  let done = false;
+  const dismiss = () => {
+    if (done) return; done = true;
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 220);
+  };
+  close.addEventListener('click', (e) => { e.stopPropagation(); dismiss(); });
+  // Clicking the body of a session-scoped toast jumps to that session.
+  if (opts.name) {
+    el.classList.add('toast-clickable');
+    el.addEventListener('click', () => { if (sessions.has(opts.name)) switchSession(opts.name); dismiss(); });
+  }
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  if (!opts.sticky) setTimeout(dismiss, opts.duration || 9000);
+  return dismiss;
+}
+
+// --- Cache-cooldown heads-up -------------------------------------------------
+// Warn once per warm episode when a session's prompt cache is ~5 min from cold.
+// Scoped to kept-warm holds (ttl_s > the warn horizon): a plain ~5-min Anthropic
+// cache has a lifetime no longer than the horizon, so a 5-min warning would fire
+// the instant it warms — useless and noisy. The badge already shows those.
+const WARM_WARN_S = 300;
+const warmWarned = new Set(); // names warned in the current warm episode
+
+function checkWarmthCooldown(name) {
+  const st = proxyState.get(name);
+  const p = st && st.payload;
+  if (!p || !p.linked || !p.warmth || p.warmth.state !== 'warm' || p.warmth.remaining_s == null) {
+    warmWarned.delete(name); return;
+  }
+  const ageMs = Date.now() - st.at;
+  if (ageMs > PROXY_POLL_MS * 4) return; // payload dead — don't warn on a stale projection
+  const ttl = p.warmth.ttl_s;
+  if (ttl != null && ttl <= WARM_WARN_S) { warmWarned.delete(name); return; } // not a kept-warm hold
+  const remaining = p.warmth.remaining_s - ageMs / 1000;
+  if (remaining > WARM_WARN_S) { warmWarned.delete(name); return; } // re-warmed / still plenty
+  if (remaining <= 0) { warmWarned.delete(name); return; }          // already cold — re-arm next episode
+  if (!warmWarned.has(name)) {
+    warmWarned.add(name);
+    const mins = Math.max(1, Math.round(remaining / 60));
+    showToast(`${name}: cache going cold in ~${mins} min`, { kind: 'warm', name });
+  }
+}
+
 // Tick live countdowns once a second: the active session's bar plus every
 // tab's warmth badge. Uses the light text-only update so keep-warm buttons
 // aren't rebuilt out from under the cursor.
 setInterval(() => {
-  for (const name of proxyState.keys()) applyWarmBadge(name);
+  for (const name of proxyState.keys()) { applyWarmBadge(name); checkWarmthCooldown(name); }
   tickProxyBar();
 }, 1000);
 
@@ -1063,6 +1232,7 @@ setInterval(() => {
     if (action && activeSession) {
       if (action.dataset.act === 'edit') openArgsDialog(activeSession);
       else if (action.dataset.act === 'tools') openToolsPopover(activeSession, action);
+      else if (action.dataset.act === 'skills') openSkillsPopover(activeSession, action);
       return;
     }
     const btn = e.target.closest('.px-hold');
@@ -1206,6 +1376,88 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !toolsPopover.classList.contains('hidden')) closeToolsPopover();
 });
 
+// --- Per-session Skills popover ------------------------------------------
+// Mirrors the tools popover, but writes skillOverrides:{name:"off"} (which
+// reclaims the per-turn roster tokens) instead of permissions.deny. The
+// catalog is the live transcript roster unioned with the disabled set
+// (session:skillCatalog), so a turned-off skill stays re-enable-able.
+const skillsPopover = document.getElementById('skills-popover');
+const skillsPopoverName = document.getElementById('skills-popover-name');
+const popoverSkillsList = document.getElementById('popover-skills-list');
+const popoverInjectSkillsSection = document.getElementById('popover-inject-skills-section');
+const popoverInjectSkillsList = document.getElementById('popover-inject-skills-list');
+const skillsPopoverRestart = document.getElementById('skills-popover-restart');
+
+function closeSkillsPopover() {
+  skillsPopover.classList.add('hidden');
+  skillsPopover.dataset.name = '';
+}
+
+async function openSkillsPopover(name, anchorBtn) {
+  const res = await window.api.getSkillCatalog(name);
+  if (!res || !res.ok) { alert('Session not found in persistence.'); return; }
+  renderSkillChecklist(popoverSkillsList, res.names || [], new Set(res.disabledSkills || []),
+    res.effective || {}, { skillsLocked: res.skillsLocked, canReenable: res.canReenable });
+  // Library-injection section: only shown when the library is non-empty.
+  skillLibCache = res.skillLib || [];
+  if (skillLibCache.length) {
+    renderInjectChecklist(popoverInjectSkillsList, new Set(res.injectSkills || []));
+    popoverInjectSkillsSection.style.display = '';
+  } else {
+    popoverInjectSkillsSection.style.display = 'none';
+  }
+  skillsPopoverRestart.checked = false;
+  skillsPopoverName.textContent = name;
+  skillsPopover.dataset.name = name;
+  skillsPopover.classList.remove('hidden');
+  const r = anchorBtn.getBoundingClientRect();
+  const w = skillsPopover.offsetWidth;
+  skillsPopover.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - w - 8))}px`;
+  skillsPopover.style.bottom = `${Math.max(8, window.innerHeight - r.top + 6)}px`;
+}
+
+document.getElementById('skills-popover-cancel').addEventListener('click', closeSkillsPopover);
+document.getElementById('skills-popover-apply').addEventListener('click', async () => {
+  const name = skillsPopover.dataset.name;
+  if (!name) return closeSkillsPopover();
+  const disabledSkills = collectSkillChecklist(popoverSkillsList);
+  // Only send injectSkills when the library section is shown; otherwise pass
+  // undefined so the handler preserves the persisted set (empty library != none).
+  const injectSkills = popoverInjectSkillsSection.style.display === 'none'
+    ? undefined : collectInjectChecklist(popoverInjectSkillsList);
+  const restart = skillsPopoverRestart.checked;
+  // Skill changes (trim or inject) only land in a NEW conversation (the roster
+  // is fixed at creation; --resume replays the old one), so confirm the
+  // history-clearing fresh restart before doing it.
+  if (restart && !confirm(`Apply skill changes to "${name}" now?\n\nThis starts a NEW conversation — the current session's history will be cleared. (Leave "Restart fresh" unchecked to apply on the next fresh start instead.)`)) return;
+  closeSkillsPopover();
+  const r = await window.api.setSessionSkills(name, disabledSkills, injectSkills);
+  if (!r || !r.ok) { alert(`Failed to update skills: ${r && r.error ? r.error : 'unknown error'}`); return; }
+  if (!restart) return;
+  // Fresh (non-resume) restart — the only way a skill change takes effect.
+  // Same re-attach dance as the tools popover restart path.
+  const item = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
+  const snapType = item ? item.querySelector('.session-type')?.textContent : null;
+  const snapCwd = item ? item.dataset.cwd : null;
+  const rr = await window.api.restartSession(name, { fresh: true });
+  if (!rr || !rr.ok) { alert(`Restart failed: ${rr && rr.error ? rr.error : 'unknown error'}`); return; }
+  if (snapType) {
+    createTerminal(name);
+    addSessionToSidebar(name, snapType, snapCwd, null);
+    switchSession(name);
+  }
+});
+document.addEventListener('mousedown', (e) => {
+  if (skillsPopover.classList.contains('hidden')) return;
+  if (skillsPopover.contains(e.target)) return;
+  if (e.target.closest('.px-action')) return;
+  if (e.target.closest('[data-act="manage-skills"]')) return; // ctx cross-link opens it
+  closeSkillsPopover();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !skillsPopover.classList.contains('hidden')) closeSkillsPopover();
+});
+
 // --- Context-breakdown popover -------------------------------------------
 // Opened from the ctx telemetry seg (only when wirescope advertises
 // context_view/context_composition). Pulls /_context for the live session and
@@ -1220,6 +1472,7 @@ const CTX_CAT_LABELS = {
   tools: 'Tools', system: 'System prompt', claudemd: 'CLAUDE.md',
   useremail: 'User email', user: 'User messages', assistant: 'Assistant',
   thinking: 'Thinking', tool_calls: 'Tool calls', tool_results: 'Tool results',
+  agents: 'Agents', skills: 'Skills',
 };
 // Unknown future categories collapse to "other" (forward-compatible per the
 // wirescope contract).
@@ -1263,27 +1516,33 @@ const UTIL_MIN_TURNS = 3;
 // Cap the unused trim-list; the rest collapse into a "+N more" summary.
 const UTIL_UNUSED_CAP = 12;
 
-// Renders the tool-utilization block for one agent line (the "did it pay off"
-// view). Mirrors the per-agent composition shape; '' when the agent carries no
-// utilization (Codex/openai lines, or a non-utilization proxy build).
-function renderUtilization(a) {
-  const u = a.utilization;
-  const t = a.tools;
-  if (!u || !t || !Array.isArray(t.per_tool)) return '';
+// Renders one utilization block (the "did it pay off" view) from a rollup +
+// deadweight-first per-item list. Shared by tools and skills — wirescope ships
+// both as the exact same shape ({evaluable_turns, loaded, used_distinct,
+// deadweight_tokens} + per-item {name, est_tokens, used}). '' when the agent
+// carries no utilization for this surface (Codex/openai lines, a non-utilization
+// proxy build, or a pre-context_skills proxy for skills).
+function renderUtilBlock(u, items, title) {
+  if (!u || !Array.isArray(items)) return '';
   const turns = u.evaluable_turns || 0;
-  const loaded = u.loaded != null ? u.loaded : (t.count || t.per_tool.length);
-  const usedDistinct = u.used_distinct != null ? u.used_distinct : t.per_tool.filter((x) => (x.used || 0) > 0).length;
+  const loaded = u.loaded != null ? u.loaded : items.length;
+  const usedDistinct = u.used_distinct != null ? u.used_distinct : items.filter((x) => (x.used || 0) > 0).length;
   const deadweight = u.deadweight_tokens || 0;
   const lowConf = turns < UTIL_MIN_TURNS;
   // "dead" is a verdict; only claim it once enough turns back it. Until then
   // the same tokens are merely "idle" — present but not yet proven wasted.
   const deadWord = lowConf ? 'idle' : 'dead';
 
-  const head = `<div class="ctx-util-head"><span>Tool utilization</span>` +
-    `<span class="ctx-util-stat">${loaded} loaded · ${usedDistinct} used` +
+  // Token figures are char-based estimates (≈chars/4, wirescope's basis); a real
+  // tokenizer (what the CLI's native /context shows) reads ~25% higher. The `~`
+  // prefix signals estimate; the tooltip explains the systematic direction so the
+  // gap vs native /context doesn't read as a mismatch.
+  const estHint = 'Char-based estimate (≈chars/4); a tokenizer reads ~25% higher.';
+  const head = `<div class="ctx-util-head"><span>${title}</span>` +
+    `<span class="ctx-util-stat" title="${estHint}">${loaded} loaded · ${usedDistinct} used` +
     (deadweight > 0 ? ` · <b>~${fmtTokens(deadweight)} ${deadWord}</b>` : '') + `</span></div>`;
 
-  // No tool-loading turn has actually run yet — nothing to judge.
+  // No loading turn has actually run yet — nothing to judge.
   if (turns === 0) {
     return `<div class="ctx-util">${head}` +
       `<div class="ctx-util-conf">No evaluable turns yet — run the session to see usage.</div></div>`;
@@ -1292,10 +1551,10 @@ function renderUtilization(a) {
     ? `<div class="ctx-util-conf">Only ${turns} turn${turns === 1 ? '' : 's'} evaluated — unused ≠ dead yet.</div>`
     : `<div class="ctx-util-conf">Over ${turns} turns.</div>`;
 
-  // per_tool arrives deadweight-first (used==0, then highest est_tokens); keep
+  // Items arrive deadweight-first (used==0, then highest est_tokens); keep
   // wirescope's order and just split the two groups.
-  const unused = t.per_tool.filter((pt) => (pt.used || 0) === 0);
-  const used = t.per_tool.filter((pt) => (pt.used || 0) > 0);
+  const unused = items.filter((pt) => (pt.used || 0) === 0);
+  const used = items.filter((pt) => (pt.used || 0) > 0);
 
   let body = '';
   if (unused.length) {
@@ -1318,6 +1577,14 @@ function renderUtilization(a) {
   }
   return `<div class="ctx-util">${head}${conf}${body}</div>`;
 }
+// Tool + skill utilization for one agent line. Mirror shapes (a.tools.per_tool +
+// a.utilization; a.skills.per_skill + a.skills_utilization), same renderer.
+function renderUtilization(a) {
+  return renderUtilBlock(a.utilization, a.tools && a.tools.per_tool, 'Tool utilization');
+}
+function renderSkillUtilization(a) {
+  return renderUtilBlock(a.skills_utilization, a.skills && a.skills.per_skill, 'Skill utilization');
+}
 
 async function openContextPopover(name, anchor) {
   ctxPopoverName.textContent = name;
@@ -1327,7 +1594,10 @@ async function openContextPopover(name, anchor) {
   placeCtxPopover(anchor);
   // Opt into the (heavier) utilization capture-scan only when the proxy
   // advertises it — otherwise this is byte-identical to the composition fetch.
-  const wantUtil = !!(proxyState.get(name)?.payload?.capabilities?.context_utilization);
+  // Skill usage rides the same &utilization=1 flag, so fetch it when either
+  // tool-utilization or the v0.4.14 skills roster is available.
+  const caps = proxyState.get(name)?.payload?.capabilities || {};
+  const wantUtil = !!(caps.context_utilization || caps.context_skills);
   const res = await window.api.getProxyContext(name, { utilization: wantUtil });
   // Bail if the popover was closed or retargeted while the fetch was in flight.
   if (ctxPopover.dataset.name !== name || ctxPopover.classList.contains('hidden')) return;
@@ -1345,8 +1615,14 @@ async function openContextPopover(name, anchor) {
   let html;
   if (withComp.length) {
     withComp.sort((a, b) => (a.line === 'main' ? -1 : b.line === 'main' ? 1 : 0));
-    // Per agent: composition (what's loaded) then utilization (did it pay off).
-    html = withComp.map((a) => renderCompositionLine(a) + renderUtilization(a)).join('');
+    // Two columns so the popover stays short: composition (what's loaded) on the
+    // left, tool + skill utilization (did it pay off) on the right. Falls back to
+    // a single column when there's no utilization (composition-only proxy).
+    const compCol = withComp.map(renderCompositionLine).join('');
+    const utilCol = withComp.map((a) => renderUtilization(a) + renderSkillUtilization(a)).join('');
+    html = utilCol.trim()
+      ? `<div class="ctx-cols"><div class="ctx-col">${compCol}</div><div class="ctx-col">${utilCol}</div></div>`
+      : compCol;
   } else {
     // context_view-only proxy: no composition, but the tools roster is there.
     const main = agents.find((a) => a.line === 'main') || agents[0];
@@ -1378,17 +1654,44 @@ async function openContextPopover(name, anchor) {
       : `Manage tools (${mainTools.count}) →`;
     html += `<span class="ctx-tools-link" data-act="manage-tools">${label}</span>`;
   }
+  // Cross-link to the skills manager. With the v0.4.14 per-skill roster
+  // (capabilities.context_skills) it becomes the trim lever — N unused skills +
+  // the deadweight tokens skillOverrides:off would reclaim, mirroring tools.
+  // Falls back to the aggregate composition category on a pre-context_skills
+  // proxy. The popover itself sources skill names standalone (transcript + seed).
+  const mainSkills = mainAgent?.skills;
+  if (sessionTypeOf(name) === 'claude') {
+    if (mainSkills && Array.isArray(mainSkills.per_skill)) {
+      const su = mainAgent.skills_utilization;
+      const conclusive = su && (su.evaluable_turns || 0) >= UTIL_MIN_TURNS;
+      const unusedCount = mainSkills.per_skill.filter((ps) => (ps.used || 0) === 0).length;
+      const label = (conclusive && unusedCount > 0)
+        ? `Trim ${unusedCount} unused skill${unusedCount === 1 ? '' : 's'}` +
+          (su.deadweight_tokens > 0 ? ` (~${fmtTokens(su.deadweight_tokens)})` : '') + ' →'
+        : `Manage skills (${mainSkills.count}) →`;
+      html += `<span class="ctx-tools-link" data-act="manage-skills">${label}</span>`;
+    } else {
+      const skillsCat = mainAgent?.composition?.by_category?.find((c) => c.category === 'skills');
+      if (skillsCat) {
+        html += `<span class="ctx-tools-link" data-act="manage-skills">Manage skills (~${fmtTokens(skillsCat.tokens)}/turn) →</span>`;
+      }
+    }
+  }
   ctxPopoverBody.innerHTML = html;
   placeCtxPopover(anchor);
 }
 
 ctxPopoverBody.addEventListener('click', (e) => {
-  if (!e.target.closest('[data-act="manage-tools"]')) return;
+  const toolsLink = e.target.closest('[data-act="manage-tools"]');
+  const skillsLink = e.target.closest('[data-act="manage-skills"]');
+  if (!toolsLink && !skillsLink) return;
   const name = ctxPopover.dataset.name;
   closeContextPopover();
-  // Anchor the tools popover to the live ctx seg (still visible in the bar).
+  // Anchor the target popover to the live ctx seg (still visible in the bar).
   const anchor = document.querySelector('#proxy-bar [data-act="ctx"]');
-  if (name && anchor) openToolsPopover(name, anchor);
+  if (!name || !anchor) return;
+  if (toolsLink) openToolsPopover(name, anchor);
+  else openSkillsPopover(name, anchor);
 });
 
 document.addEventListener('mousedown', (e) => {
@@ -1400,6 +1703,11 @@ document.addEventListener('mousedown', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !ctxPopover.classList.contains('hidden')) closeContextPopover();
 });
+// Always-reachable close buttons (a tall popover can put outside-click/Escape
+// out of a user's reach — the ✕ never moves).
+document.getElementById('tools-popover-close').addEventListener('click', closeToolsPopover);
+document.getElementById('skills-popover-close').addEventListener('click', closeSkillsPopover);
+document.getElementById('ctx-popover-close').addEventListener('click', closeContextPopover);
 
 window.api.onSessionMention((name, mtype /* 'dm'|'broadcast' */) => {
   const el = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
@@ -1698,7 +2006,7 @@ window.api.onUpdateAvailable((info) => showUpdateBanner(info));
 // Tray-triggered actions
 window.api.onRequestSwitchSession((name) => switchSession(name));
 window.api.onRequestOpenNewDialog(() => openDialog());
-window.api.onRequestOpenAgentsDrawer(() => openAgentsDrawer());
+window.api.onRequestOpenAgentsDrawer((name) => openAgentsDrawer(name));
 window.api.onRequestOpenPromptsDrawer(() => openPromptsDrawer());
 window.api.onRequestOpenIpcLog(() => {
   if (ipcLog.classList.contains('collapsed')) toggleIpcLog();
@@ -2150,9 +2458,13 @@ async function refreshAgentsList() {
   }
 }
 
-function openAgentsDrawer() {
+function openAgentsDrawer(name) {
   agentsDrawer.classList.remove('hidden');
   refreshAgentsList();
+  // Deep-link from the Agents menu: ':new' opens a blank editor, any other
+  // name jumps straight into that type's editor.
+  if (name === ':new') openAgentEditor(null);
+  else if (name) openAgentEditor({ name });
 }
 function closeAgentsDrawer() {
   agentsDrawer.classList.add('hidden');
@@ -2217,6 +2529,125 @@ agentDelete.addEventListener('click', async () => {
 agentNameInput.addEventListener('keydown', (e) => e.stopPropagation());
 agentContent.addEventListener('keydown', (e) => e.stopPropagation());
 agentNameInput.addEventListener('input', () => { agentNameInput.style.borderColor = ''; });
+
+// ---------------------------------------------------------------------------
+// Skill library — custom skills stored as ~/.clodex/skills/*.md, injected per
+// session via --plugin-dir. Mirrors the agents drawer.
+// ---------------------------------------------------------------------------
+
+const skillsDrawer = document.getElementById('skills-drawer');
+const skillsListEl = document.getElementById('skills-list');
+const skillsEmpty = document.getElementById('skills-empty');
+const skillEditor = document.getElementById('skill-editor');
+const skillEditorTitle = document.getElementById('skill-editor-title');
+const skillNameInput = document.getElementById('skill-name');
+const skillContent = document.getElementById('skill-content');
+const skillSave = document.getElementById('skill-save');
+const skillCancel = document.getElementById('skill-cancel');
+const skillDelete = document.getElementById('skill-delete');
+const skillsNew = document.getElementById('skills-new');
+const skillsClose = document.getElementById('skills-close');
+
+let editingSkillName = null;
+
+async function refreshSkillsLibList() {
+  const items = await window.api.listSkillLib();
+  skillLibCache = items || [];
+  skillsListEl.innerHTML = '';
+  if (!items || items.length === 0) {
+    skillsEmpty.style.display = '';
+    return;
+  }
+  skillsEmpty.style.display = 'none';
+  for (const s of items) {
+    const el = document.createElement('div');
+    el.className = 'prompt-item';
+    el.innerHTML = `
+      <div class="prompt-item-title">${esc(s.name)}</div>
+      <div class="prompt-item-preview">${esc(s.description || '(no description)')}</div>
+      <div class="prompt-item-actions">
+        <button data-action="edit">Edit</button>
+      </div>
+    `;
+    el.querySelector('[data-action="edit"]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      openSkillEditor(s);
+    });
+    el.addEventListener('click', () => openSkillEditor(s));
+    skillsListEl.appendChild(el);
+  }
+}
+
+function openSkillsDrawer(name) {
+  skillsDrawer.classList.remove('hidden');
+  refreshSkillsLibList();
+  if (name === ':new') openSkillEditor(null);
+  else if (name) openSkillEditor({ name });
+}
+function closeSkillsDrawer() {
+  skillsDrawer.classList.add('hidden');
+}
+
+async function openSkillEditor(skill = null) {
+  if (skill) {
+    editingSkillName = skill.name;
+    skillEditorTitle.textContent = 'Edit Skill';
+    skillNameInput.value = skill.name;
+    skillContent.value = (await window.api.getSkillLib(skill.name)) || '';
+    skillDelete.style.display = '';
+  } else {
+    editingSkillName = null;
+    skillEditorTitle.textContent = 'New Skill';
+    skillNameInput.value = '';
+    skillContent.value = '---\ndescription: When to use this skill — be specific so the model picks it at the right moment.\n---\nStep-by-step instructions for the model.';
+    skillDelete.style.display = 'none';
+  }
+  skillNameInput.style.borderColor = '';
+  skillEditor.classList.remove('hidden');
+  setTimeout(() => skillNameInput.focus(), 50);
+}
+function closeSkillEditor() {
+  skillEditor.classList.add('hidden');
+  editingSkillName = null;
+}
+
+skillsClose.addEventListener('click', closeSkillsDrawer);
+skillsNew.addEventListener('click', () => openSkillEditor(null));
+
+skillSave.addEventListener('click', async () => {
+  const name = skillNameInput.value.trim();
+  const content = skillContent.value;
+  if (!/^[a-zA-Z0-9._-]{1,64}$/.test(name)) {
+    skillNameInput.style.borderColor = '#e94560';
+    return;
+  }
+  const res = await window.api.saveSkillLib(name, content);
+  if (!res || !res.ok) {
+    alert(`Failed: ${res && res.error ? res.error : 'unknown error'}`);
+    return;
+  }
+  // Rename: a changed Name field writes a new file — drop the old one.
+  if (editingSkillName && editingSkillName !== name) {
+    await window.api.removeSkillLib(editingSkillName);
+  }
+  closeSkillEditor();
+  refreshSkillsLibList();
+});
+
+skillCancel.addEventListener('click', closeSkillEditor);
+skillDelete.addEventListener('click', async () => {
+  if (!editingSkillName) return;
+  if (!confirm(`Delete skill "${editingSkillName}"?`)) return;
+  await window.api.removeSkillLib(editingSkillName);
+  closeSkillEditor();
+  refreshSkillsLibList();
+});
+
+skillNameInput.addEventListener('keydown', (e) => e.stopPropagation());
+skillContent.addEventListener('keydown', (e) => e.stopPropagation());
+skillNameInput.addEventListener('input', () => { skillNameInput.style.borderColor = ''; });
+
+window.api.onRequestOpenSkillsDrawer((name) => openSkillsDrawer(name));
 
 // ---------------------------------------------------------------------------
 // Restore sessions on startup

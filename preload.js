@@ -1,8 +1,8 @@
 const { ipcRenderer } = require('electron');
 
 window.api = {
-  createSession: (name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins, disabledTools) =>
-    ipcRenderer.invoke('session:create', name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins, disabledTools),
+  createSession: (name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills) =>
+    ipcRenderer.invoke('session:create', name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills),
   listSessions: () =>
     ipcRenderer.invoke('session:list'),
   killSession: (name) =>
@@ -43,6 +43,15 @@ window.api = {
     ipcRenderer.invoke('agents:save', name, content),
   removeAgent: (name) =>
     ipcRenderer.invoke('agents:remove', name),
+
+  listSkillLib: () =>
+    ipcRenderer.invoke('skilllib:list'),
+  getSkillLib: (name) =>
+    ipcRenderer.invoke('skilllib:get', name),
+  saveSkillLib: (name, content) =>
+    ipcRenderer.invoke('skilllib:save', name, content),
+  removeSkillLib: (name) =>
+    ipcRenderer.invoke('skilllib:remove', name),
   checkForUpdate: () =>
     ipcRenderer.invoke('update:check'),
   getUpdateInfo: () =>
@@ -94,7 +103,9 @@ window.api = {
   onRequestOpenPreferences: (callback) =>
     ipcRenderer.on('request-open-preferences', () => callback()),
   onRequestOpenAgentsDrawer: (callback) =>
-    ipcRenderer.on('request-open-agents-drawer', () => callback()),
+    ipcRenderer.on('request-open-agents-drawer', (_e, name) => callback(name)),
+  onRequestOpenSkillsDrawer: (callback) =>
+    ipcRenderer.on('request-open-skills-drawer', (_e, name) => callback(name)),
   onRequestOpenPromptsDrawer: (callback) =>
     ipcRenderer.on('request-open-prompts-drawer', () => callback()),
   onRequestOpenIpcLog: (callback) =>
@@ -111,9 +122,12 @@ window.api = {
 
   // Session args
   getSessionArgs: (name) => ipcRenderer.invoke('session:getArgs', name),
-  setSessionArgs: (name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins, disabledTools) => ipcRenderer.invoke('session:setArgs', name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins, disabledTools),
-  restartSession: (name) => ipcRenderer.invoke('session:restart', name),
+  setSessionArgs: (name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills) => ipcRenderer.invoke('session:setArgs', name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills),
+  restartSession: (name, opts) => ipcRenderer.invoke('session:restart', name, opts),
   setSessionTools: (name, disabledTools) => ipcRenderer.invoke('session:setTools', name, disabledTools),
+  setSessionSkills: (name, disabledSkills, injectSkills) => ipcRenderer.invoke('session:setSkills', name, disabledSkills, injectSkills),
+  getSkillCatalog: (name) => ipcRenderer.invoke('session:skillCatalog', name),
+  getSkillCatalogFor: (cwd) => ipcRenderer.invoke('settings:skillCatalogFor', cwd),
 
   // Workspaces
   listWorkspaces: () => ipcRenderer.invoke('workspace:list'),
