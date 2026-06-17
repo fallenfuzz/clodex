@@ -90,6 +90,8 @@ window.api = {
     ipcRenderer.invoke('proxy:snapshot', name),
   getProxyContext: (name, opts) =>
     ipcRenderer.invoke('proxy:context', name, opts),
+  getProxyReport: (name, opts) =>
+    ipcRenderer.invoke('proxy:report', name, opts),
   proxyHold: (name, hours, force) =>
     ipcRenderer.invoke('proxy:hold', name, hours, force),
   onSessionMention: (callback) =>

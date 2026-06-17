@@ -2759,6 +2759,9 @@ function buildAppMenu() {
       submenu: buildSkillsSubmenu(),
     },
     {
+      // macOS wires Cmd+C/V/X/A through these roles via the responder chain —
+      // the menu must stay present and visible or clipboard shortcuts break in
+      // the terminal and dialog inputs. (Looks inapplicable, but it's load-bearing.)
       label: 'Edit',
       submenu: [
         { role: 'undo' },
@@ -3101,6 +3104,32 @@ app.whenReady().then(() => {
       // will render it (gated on the context_utilization capability).
       let q = `/_context?session=${encodeURIComponent(snap.sessionId)}`;
       if (opts && opts.utilization) q += '&utilization=1';
+      const r = await ProxyClient._getJson(s.proxyBase, q);
+      if (r.status !== 200 || !r.json) return { ok: false, error: `proxy returned ${r.status}` };
+      return { ok: true, data: r.json };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  });
+
+  // Fetch the on-demand per-session cost/efficiency report (wirescope /_report,
+  // report_version 1). Disk-based on the proxy side, but we still resolve the
+  // session_id from the live record and gate the caller on the
+  // capabilities.context_report flag. detail=1 reserves the (v1.1) per-turn
+  // series; harmless to pass against a v1 proxy that ignores it.
+  ipcMain.handle('proxy:report', async (_e, name, opts) => {
+    const s = manager.sessions.get(name);
+    if (!s || !s.proxyBase) return { ok: false, error: 'Session is not routed through a proxy' };
+    const snap = proxyPoller.snapshot(name);
+    if (!snap || !snap.linked || !snap.sessionId) {
+      return { ok: false, error: 'No live proxy session (unlinked)' };
+    }
+    if (snap.capabilities && snap.capabilities.context_report === false) {
+      return { ok: false, error: 'This proxy does not produce session reports' };
+    }
+    try {
+      let q = `/_report?session=${encodeURIComponent(snap.sessionId)}`;
+      if (opts && opts.detail) q += '&detail=1';
       const r = await ProxyClient._getJson(s.proxyBase, q);
       if (r.status !== 200 || !r.json) return { ok: false, error: `proxy returned ${r.status}` };
       return { ok: true, data: r.json };

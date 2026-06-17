@@ -1677,6 +1677,11 @@ async function openContextPopover(name, anchor) {
       }
     }
   }
+  // Full report → the deep, ground-truth cost/efficiency analysis (wirescope
+  // /_report, report_version 1). Capability-gated; opens the report modal.
+  if (caps.context_report) {
+    html += `<span class="ctx-tools-link" data-act="report">Full cost &amp; efficiency report →</span>`;
+  }
   ctxPopoverBody.innerHTML = html;
   placeCtxPopover(anchor);
 }
@@ -1684,12 +1689,15 @@ async function openContextPopover(name, anchor) {
 ctxPopoverBody.addEventListener('click', (e) => {
   const toolsLink = e.target.closest('[data-act="manage-tools"]');
   const skillsLink = e.target.closest('[data-act="manage-skills"]');
-  if (!toolsLink && !skillsLink) return;
+  const reportLink = e.target.closest('[data-act="report"]');
+  if (!toolsLink && !skillsLink && !reportLink) return;
   const name = ctxPopover.dataset.name;
   closeContextPopover();
+  if (!name) return;
+  if (reportLink) { openReportPanel(name); return; }
   // Anchor the target popover to the live ctx seg (still visible in the bar).
   const anchor = document.querySelector('#proxy-bar [data-act="ctx"]');
-  if (!name || !anchor) return;
+  if (!anchor) return;
   if (toolsLink) openToolsPopover(name, anchor);
   else openSkillsPopover(name, anchor);
 });
@@ -1708,6 +1716,217 @@ document.addEventListener('keydown', (e) => {
 document.getElementById('tools-popover-close').addEventListener('click', closeToolsPopover);
 document.getElementById('skills-popover-close').addEventListener('click', closeSkillsPopover);
 document.getElementById('ctx-popover-close').addEventListener('click', closeContextPopover);
+
+// ── Session report (wirescope /_report, report_version 1) ─────────────
+// wirescope owns every number (pricing, cache math, thresholds, verdict
+// score) — disk-based so it reads the full session capture, even on ended
+// sessions. We only turn its structured findings into prose and assert the
+// invariants it ships. Schema locked with wirescope; bump on report_version.
+const reportOverlay = document.getElementById('report-overlay');
+const reportNameEl = document.getElementById('report-name');
+const reportBody = document.getElementById('report-body');
+
+function closeReportPanel() { reportOverlay.classList.add('hidden'); reportOverlay.dataset.name = ''; }
+
+function fmtUsd(n) {
+  if (typeof n !== 'number' || !isFinite(n)) return '$0';
+  if (n >= 100) return '$' + n.toFixed(0);
+  if (n >= 1) return '$' + n.toFixed(2);
+  return '$' + n.toFixed(n >= 0.1 ? 3 : 4);
+}
+function fmtDur(s) {
+  if (!s) return '';
+  if (s >= 3600) return (s / 3600).toFixed(1) + 'h';
+  if (s >= 60) return Math.round(s / 60) + 'm';
+  return Math.round(s) + 's';
+}
+function shortTs(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso || '');
+  if (!m) return iso || '';
+  const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m[2] - 1] || m[2];
+  return `${mon} ${+m[3]} ${m[4]}:${m[5]}`;
+}
+
+// Stable colors shared by each stacked bar and its legend.
+const REP_BUCKET_COLOR = {
+  cache_read: '#61afef', cache_write_initial: '#56b6c2',
+  cache_write_rewrite: '#e5c07b', uncached_input: '#e06c75', output: '#98c379',
+};
+const REP_BUCKET_LABEL = {
+  cache_read: 'Cache read', cache_write_initial: 'Cache write (initial)',
+  cache_write_rewrite: 'Cache write (rewrite)', uncached_input: 'Uncached input',
+  output: 'Output',
+};
+const REP_CAT_COLOR = {
+  system: '#61afef', claudemd: '#e5c07b', useremail: '#c678dd',
+  skills: '#56b6c2', tools: '#98c379',
+};
+
+async function openReportPanel(name) {
+  reportNameEl.textContent = name;
+  reportOverlay.dataset.name = name;
+  reportBody.innerHTML = '<div class="rep-note">Analyzing session capture…</div>';
+  reportOverlay.classList.remove('hidden');
+  const res = await window.api.getProxyReport(name);
+  // Bail if the modal was closed/retargeted while the scan was in flight.
+  if (reportOverlay.dataset.name !== name || reportOverlay.classList.contains('hidden')) return;
+  if (!res || !res.ok) {
+    reportBody.innerHTML = `<div class="rep-note">${esc(res && res.error ? res.error : 'Report unavailable')}</div>`;
+    return;
+  }
+  try { reportBody.innerHTML = renderReport(res.data); }
+  catch (e) { reportBody.innerHTML = `<div class="rep-note">Could not render report: ${esc(String((e && e.message) || e))}</div>`; }
+}
+
+function renderReport(d) {
+  if (!d || d.report_version !== 1) {
+    return `<div class="rep-note">Unsupported report version${d ? ' (' + esc(String(d.report_version)) + ')' : ''}. Update Clodex.</div>`;
+  }
+  return [
+    renderVerdict(d),
+    renderCostDecomp(d.cost_decomposition),
+    renderTokenDecomp(d.token_decomposition),
+    renderFindings(d.findings || []),
+    renderInvariants(d),
+  ].join('');
+}
+
+function renderVerdict(d) {
+  const v = d.verdict || {};
+  const rating = v.rating || 'unknown';
+  const score = typeof v.score === 'number' ? v.score : '—';
+  const sc = d.scope || {};
+  const subs = (sc.agents || []).filter((a) => a.line === 'subagent');
+  const span = (sc.first_ts && sc.last_ts) ? ` · ${esc(shortTs(sc.first_ts))} → ${esc(shortTs(sc.last_ts))}` : '';
+  const scope = `${sc.requests || 0} requests · ${sc.turns || 0} turns` +
+    (subs.length ? ` · ${subs.length} subagent line${subs.length === 1 ? '' : 's'}` : '') +
+    (sc.models && sc.models.length ? ` · ${esc(sc.models.join(', '))}` : '') + span;
+  return `<div class="rep-verdict">` +
+    `<div class="rep-score rep-rating-${esc(rating)}"><span class="n">${score}</span><span class="l">${esc(rating)}</span></div>` +
+    `<div class="rep-verdict-text">` +
+    `<div class="rep-headline">${esc(v.headline || '')}</div>` +
+    `<div class="rep-reclaim">Reclaimable: <b>${fmtUsd(v.reclaimable_usd_total)}</b>` +
+    (typeof v.reclaimable_pct === 'number' ? ` (${v.reclaimable_pct}% of spend)` : '') +
+    (v.confidence ? ` · ${esc(v.confidence)} confidence` : '') + `</div></div></div>` +
+    `<div class="rep-scope">${scope}</div>`;
+}
+
+function renderCostDecomp(c) {
+  if (!c || !Array.isArray(c.by_bucket)) return '';
+  const total = c.total_usd || 0;
+  const bars = c.by_bucket.map((b) =>
+    `<i style="width:${Math.max(0.5, b.pct || 0)}%;background:${REP_BUCKET_COLOR[b.bucket] || '#888'}" ` +
+    `title="${esc(REP_BUCKET_LABEL[b.bucket] || b.bucket)} ${fmtUsd(b.usd)}"></i>`).join('');
+  const legend = c.by_bucket.map((b) =>
+    `<div class="rep-leg-row"><span class="rep-leg-sw" style="background:${REP_BUCKET_COLOR[b.bucket] || '#888'}"></span>` +
+    `<span class="rep-leg-name">${esc(REP_BUCKET_LABEL[b.bucket] || b.bucket)}</span>` +
+    `<span class="rep-leg-nums">${fmtUsd(b.usd)} · ${b.pct}%</span></div>`).join('');
+  // cache_misses is a localised drill-down of the cache_write_rewrite bucket
+  // (already counted in by_bucket per the schema invariant) — render as a
+  // sub-note, NEVER as an added segment.
+  let miss = '';
+  const m = c.cache_misses;
+  if (m && m.count > 0) {
+    const causes = Object.entries(m.by_cause || {}).map(([k, n]) => `${n} ${k.replace(/_/g, ' ')}`).join(', ');
+    const biggest = (m.events || []).slice().sort((a, b) => (b.usd || 0) - (a.usd || 0))[0];
+    const big = biggest && biggest.idle_gap_s
+      ? ` — biggest a ${fmtDur(biggest.idle_gap_s)} gap (${fmtUsd(biggest.usd)})` : '';
+    miss = `<div class="rep-sub">↳ <b>${m.count} cache miss${m.count === 1 ? '' : 'es'}</b> ` +
+      `(${fmtUsd(m.usd)}${m.where ? ', ' + esc(m.where) : ''})${causes ? ' — ' + esc(causes) : ''}${big}. ` +
+      `Re-wrote a preamble that had gone cold — keep-warm avoids it.</div>`;
+  }
+  return `<div class="rep-sec"><div class="rep-sec-head">Where the ${fmtUsd(total)} went</div>` +
+    `<div class="rep-stack">${bars}</div><div class="rep-legend">${legend}</div>${miss}</div>`;
+}
+
+function renderTokenDecomp(t) {
+  if (!t || !t.preamble) return '';
+  const p = t.preamble;
+  const per = p.tokens_per_turn || 0;
+  const cats = (p.by_category || []).filter((c) => (c.tokens_per_turn || 0) > 0);
+  const bars = cats.map((c) =>
+    `<i style="width:${Math.max(0.5, per ? (c.tokens_per_turn / per) * 100 : 0)}%;background:${REP_CAT_COLOR[c.category] || '#888'}" ` +
+    `title="${esc(ctxCatLabel(c.category))} ${fmtTokens(c.tokens_per_turn)}/turn"></i>`).join('');
+  const legend = cats.map((c) =>
+    `<div class="rep-leg-row"><span class="rep-leg-sw" style="background:${REP_CAT_COLOR[c.category] || '#888'}"></span>` +
+    `<span class="rep-leg-name">${esc(ctxCatLabel(c.category))}</span>` +
+    `<span class="rep-leg-nums">${fmtTokens(c.tokens_per_turn)}/turn</span></div>`).join('');
+  const unused = p.unused_tokens_per_turn || 0;
+  const sub = `<div class="rep-sub">${fmtTokens(per)}/turn re-sent ${p.turns_resent || 0}× = ` +
+    `${fmtTokens(p.total_resent_tokens || 0)} total` +
+    (unused ? ` · <b>${fmtTokens(unused)}/turn never used</b>` : '') +
+    (p.stable === false ? ' · estimate' : '') + `</div>`;
+  return `<div class="rep-sec"><div class="rep-sec-head">Your request preamble (reloaded every turn)</div>` +
+    `<div class="rep-stack">${bars}</div><div class="rep-legend">${legend}</div>${sub}</div>`;
+}
+
+function renderFindings(findings) {
+  if (!findings.length) return '';
+  const additive = findings.filter((f) => f.additive !== false);
+  const heuristic = findings.filter((f) => f.additive === false);
+  let html = `<div class="rep-sec"><div class="rep-sec-head">Recommendations</div>`;
+  html += additive.length
+    ? additive.map(renderFinding).join('')
+    : '<div class="rep-note">No reclaimable waste found — this session is lean.</div>';
+  if (heuristic.length) {
+    html += `<div class="rep-group collapsed">` +
+      `<div class="rep-group-head" data-act="rep-toggle">▸ ${heuristic.length} possible (heuristic, not scored)</div>` +
+      heuristic.map(renderFinding).join('') + `</div>`;
+  }
+  return html + `</div>`;
+}
+
+function renderFinding(f) {
+  const conf = f.confidence || 'medium';
+  const ev = f.evidence || {};
+  const meta = [];
+  if (f.reclaimable_tokens_per_turn) meta.push(`${fmtTokens(f.reclaimable_tokens_per_turn)}/turn`);
+  if (f.turns) meta.push(`over ${f.turns} turns`);
+  if (ev.loaded != null && ev.used != null) meta.push(`${ev.used}/${ev.loaded} used`);
+  return `<div class="rep-find${conf === 'low' ? ' low' : ''}">` +
+    `<div class="rep-find-top"><span class="rep-find-title">${esc(f.title || f.category || '')}</span>` +
+    (f.reclaimable_usd ? `<span class="rep-find-usd">${fmtUsd(f.reclaimable_usd)}</span>` : '') + `</div>` +
+    (f.detail ? `<div class="rep-find-detail">${esc(f.detail)}</div>` : '') +
+    (f.lever ? `<div class="rep-lever">${esc(f.lever)}</div>` : '') +
+    `<div class="rep-find-meta"><span class="rep-conf rep-conf-${esc(conf)}">${esc(conf)}</span>` +
+    meta.map((mm) => `<span>${esc(mm)}</span>`).join('') + `</div></div>`;
+}
+
+function renderInvariants(d) {
+  // wirescope guarantees these; we re-assert so a regression surfaces loudly
+  // rather than as silently contradictory numbers in the render.
+  const issues = [];
+  const c = d.cost_decomposition;
+  if (c && Array.isArray(c.by_bucket) && typeof (d.totals && d.totals.est_usd) === 'number') {
+    const sum = c.by_bucket.reduce((a, b) => a + (b.usd || 0), 0);
+    if (Math.abs(sum - d.totals.est_usd) > 0.01) issues.push('cost buckets don’t sum to total');
+  }
+  const t = d.token_decomposition && d.token_decomposition.preamble;
+  if (t && Array.isArray(d.findings) && t.unused_tokens_per_turn != null) {
+    // The preamble is the main line's; subagent deadweight has its own per-turn
+    // budget and must not count against it (schema invariant is main-scoped).
+    const dead = d.findings
+      .filter((f) => /^deadweight_/.test(f.category || '') && f.line === 'main')
+      .reduce((a, f) => a + (f.reclaimable_tokens_per_turn || 0), 0);
+    if (Math.abs(dead - t.unused_tokens_per_turn) > 1) issues.push('unused-preamble ≠ deadweight findings');
+  }
+  if (issues.length) return `<div class="rep-inv bad">⚠ Consistency check failed: ${esc(issues.join('; '))}</div>`;
+  return `<div class="rep-inv">Internally consistent · basis: ${esc((d.totals && d.totals.basis) || d.basis || 'on-disk capture')}</div>`;
+}
+
+document.getElementById('report-close').addEventListener('click', closeReportPanel);
+reportOverlay.addEventListener('mousedown', (e) => { if (e.target === reportOverlay) closeReportPanel(); });
+reportBody.addEventListener('click', (e) => {
+  const tog = e.target.closest('[data-act="rep-toggle"]');
+  if (!tog) return;
+  const g = tog.closest('.rep-group');
+  if (!g) return;
+  const collapsed = g.classList.toggle('collapsed');
+  tog.textContent = (collapsed ? '▸ ' : '▾ ') + tog.textContent.replace(/^[▸▾]\s*/, '');
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !reportOverlay.classList.contains('hidden')) closeReportPanel();
+});
 
 window.api.onSessionMention((name, mtype /* 'dm'|'broadcast' */) => {
   const el = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
