@@ -115,6 +115,9 @@ window.api = {
 
   // UI settings
   getSettings: () => ipcRenderer.invoke('settings:get'),
+  setTheme: (name) => ipcRenderer.invoke('theme:set', name),
+  onSetTheme: (callback) =>
+    ipcRenderer.on('set-theme', (_e, name) => callback(name)),
   setSettings: (partial) => ipcRenderer.invoke('settings:set', partial),
 
   // wirescope integration (phase-0)

@@ -574,7 +574,12 @@ const DEFAULT_UI_SETTINGS = {
   // start/stop. Empty dir = nothing to manage (detect-only).
   wirescopeDir: '',
   wirescopePort: 7800,
+  // UI theme key (see THEMES in renderer.js). Canonical copy lives here so the
+  // View > Theme menu can show the right radio; the renderer mirrors it to
+  // localStorage for instant pre-paint application.
+  theme: 'midnight',
 };
+const THEME_KEYS = ['midnight', 'claude', 'light'];
 
 const uiSettings = {
   _load() {
@@ -590,6 +595,7 @@ const uiSettings = {
         proxyUrl: typeof raw?.proxyUrl === 'string' ? raw.proxyUrl : DEFAULT_UI_SETTINGS.proxyUrl,
         wirescopeDir: typeof raw?.wirescopeDir === 'string' ? raw.wirescopeDir : DEFAULT_UI_SETTINGS.wirescopeDir,
         wirescopePort: Number.isInteger(raw?.wirescopePort) ? raw.wirescopePort : DEFAULT_UI_SETTINGS.wirescopePort,
+        theme: THEME_KEYS.includes(raw?.theme) ? raw.theme : DEFAULT_UI_SETTINGS.theme,
       };
     } catch { return DEFAULT_UI_SETTINGS; }
   },
@@ -606,6 +612,7 @@ const uiSettings = {
       proxyUrl: partial?.proxyUrl ?? cur.proxyUrl,
       wirescopeDir: partial?.wirescopeDir ?? cur.wirescopeDir,
       wirescopePort: partial?.wirescopePort ?? cur.wirescopePort,
+      theme: THEME_KEYS.includes(partial?.theme) ? partial.theme : cur.theme,
     };
     try {
       atomicWriteFileSync(UI_SETTINGS_FILE, JSON.stringify(next, null, 2));
@@ -2683,6 +2690,21 @@ function buildSkillsSubmenu() {
   return items;
 }
 
+// Theme change from anywhere (View menu or a renderer's Preferences picker):
+// persist the canonical copy, refresh the menu radios, and push to every
+// window so all open workspaces retint together. exceptWc skips the renderer
+// that already applied it locally (the Preferences picker), avoiding a needless
+// re-apply round-trip.
+function setUiTheme(name, exceptWc) {
+  if (!THEME_KEYS.includes(name)) return;
+  uiSettings.set({ theme: name });
+  refreshAppMenu();
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isDestroyed() || w.webContents === exceptWc) continue;
+    w.webContents.send('set-theme', name);
+  }
+}
+
 function buildAppMenu() {
   const isMac = process.platform === 'darwin';
   const template = [
@@ -2779,6 +2801,20 @@ function buildAppMenu() {
         { role: 'reload' },
         { role: 'forceReload' },
         { role: 'toggleDevTools' },
+        { type: 'separator' },
+        {
+          label: 'Theme',
+          submenu: [
+            { key: 'midnight', label: 'Midnight' },
+            { key: 'claude', label: 'Claude' },
+            { key: 'light', label: 'Light' },
+          ].map((t) => ({
+            label: t.label,
+            type: 'radio',
+            checked: uiSettings.get().theme === t.key,
+            click: () => setUiTheme(t.key),
+          })),
+        },
         { type: 'separator' },
         { role: 'togglefullscreen' },
       ],
@@ -3329,6 +3365,7 @@ app.whenReady().then(() => {
       proxyUrl: s.proxyUrl,
       wirescopeDir: s.wirescopeDir,
       wirescopePort: s.wirescopePort,
+      theme: s.theme,
     };
   });
   ipcMain.handle('settings:set', (_e, partial) => {
@@ -3336,6 +3373,10 @@ app.whenReady().then(() => {
     rebuildAllStatusScripts(manager);
     return next;
   });
+
+  // Theme set from a renderer's Preferences picker. The sender already applied
+  // it locally, so skip echoing back to it; sync the other windows + menu.
+  ipcMain.handle('theme:set', (e, name) => { setUiTheme(name, e.sender); });
 
   ipcMain.handle('wirescope:status', () => wirescope.status());
   ipcMain.handle('wirescope:start', () => wirescope.start());

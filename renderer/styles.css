@@ -4,6 +4,11 @@
   box-sizing: border-box;
 }
 
+/* Default theme = Midnight (the original navy). Alternate themes override
+   these custom properties via [data-theme]; the renderer also swaps each
+   xterm's ANSI palette (THEMES in renderer.js) so the terminal matches.
+   --warn/--error/--ok are the semantic accents (status bar + report) so a
+   light theme can darken them for contrast without touching every rule. */
 :root {
   --sidebar-width: 220px;
   --bg: #1a1a2e;
@@ -14,6 +19,39 @@
   --text: #eee;
   --text-dim: #8892a4;
   --border: #253253;
+  --warn: #e5c07b;
+  --error: #e06c75;
+  --ok: #98c379;
+}
+
+/* Claude — warm dark, Anthropic coral accent */
+[data-theme="claude"] {
+  --bg: #262624;
+  --sidebar-bg: #1f1e1d;
+  --sidebar-hover: #302e2b;
+  --active-bg: #3a3733;
+  --accent: #d97757;
+  --text: #f5f4ef;
+  --text-dim: #9b9690;
+  --border: #3a3733;
+  --warn: #d9a55b;
+  --error: #e0816b;
+  --ok: #a3b18a;
+}
+
+/* Light — Claude Code light: off-white, darkened accents for contrast */
+[data-theme="light"] {
+  --bg: #faf9f5;
+  --sidebar-bg: #f0eee6;
+  --sidebar-hover: #e8e5da;
+  --active-bg: #e0dcce;
+  --accent: #c15f3c;
+  --text: #1f1e1d;
+  --text-dim: #6b6862;
+  --border: #d6d2c4;
+  --warn: #9a6b1e;
+  --error: #c1442e;
+  --ok: #4f7a3a;
 }
 
 html, body {
@@ -459,8 +497,8 @@ html, body {
 #proxy-bar .px-refusal { color: var(--accent); }
 #proxy-bar .px-link { color: var(--text-dim); cursor: pointer; text-decoration: none; }
 #proxy-bar .px-link:hover { color: var(--text); text-decoration: underline; }
-#proxy-bar .px-ctx-warn { color: #e5c07b; }
-#proxy-bar .px-ctx-heavy { color: #e06c75; font-weight: 600; }
+#proxy-bar .px-ctx-warn { color: var(--warn); }
+#proxy-bar .px-ctx-heavy { color: var(--error); font-weight: 600; }
 #proxy-bar .px-hold-group {
   margin-left: auto;
   display: flex;
@@ -695,7 +733,7 @@ html, body {
 .rep-leg-name { color: var(--text); }
 .rep-leg-nums { margin-left: auto; color: var(--text-dim); }
 .rep-sub { font-size: 11px; color: var(--text-dim); margin: 6px 0 0 15px; }
-.rep-sub b { color: #e5c07b; font-weight: 600; }
+.rep-sub b { color: var(--warn); font-weight: 600; }
 
 /* Findings */
 .rep-find {
@@ -709,8 +747,8 @@ html, body {
 .rep-find-detail { font-size: 11px; color: var(--text-dim); margin: 4px 0 0; }
 .rep-find-meta { font-size: 10px; color: var(--text-dim); margin-top: 5px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .rep-conf { text-transform: uppercase; letter-spacing: 0.04em; }
-.rep-conf-high { color: #98c379; }
-.rep-conf-medium { color: #e5c07b; }
+.rep-conf-high { color: var(--ok); }
+.rep-conf-medium { color: var(--warn); }
 .rep-conf-low { color: var(--text-dim); }
 .rep-lever {
   display: inline-block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -724,7 +762,7 @@ html, body {
 .rep-group-head:hover { color: var(--text); }
 .rep-group.collapsed .rep-find { display: none; }
 .rep-inv { font-size: 10px; color: var(--text-dim); font-style: italic; margin-top: 14px; }
-.rep-inv.bad { color: #e06c75; font-style: normal; }
+.rep-inv.bad { color: var(--error); font-style: normal; }
 
 .terminal-wrapper {
   position: absolute;

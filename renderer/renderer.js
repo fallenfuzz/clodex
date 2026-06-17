@@ -9,6 +9,89 @@ const { SearchAddon } = require('@xterm/addon-search');
 const sessions = new Map(); // name -> { terminal, fitAddon, wrapperEl }
 let activeSession = null;
 
+// ---------------------------------------------------------------------------
+// Themes — chrome retints via CSS [data-theme]; each theme also carries an
+// xterm color object (incl. the 16-color ANSI palette) since the terminal's
+// palette lives in JS, not CSS. 'midnight' is the default (matches :root).
+// ---------------------------------------------------------------------------
+const THEMES = {
+  midnight: {
+    label: 'Midnight (default)',
+    xterm: {
+      background: '#1a1a2e', foreground: '#eee', cursor: '#e94560',
+      selectionBackground: '#3a4a6a',
+      black: '#1a1a2e', red: '#e94560', green: '#4ade80', yellow: '#fbbf24',
+      blue: '#60a5fa', magenta: '#c084fc', cyan: '#22d3ee', white: '#eee',
+      brightBlack: '#6b7689', brightRed: '#ff6b81', brightGreen: '#86efac',
+      brightYellow: '#fde047', brightBlue: '#93c5fd', brightMagenta: '#d8b4fe',
+      brightCyan: '#67e8f9', brightWhite: '#fff',
+    },
+  },
+  claude: {
+    label: 'Claude (warm dark)',
+    xterm: {
+      background: '#262624', foreground: '#f5f4ef', cursor: '#d97757',
+      selectionBackground: '#4a4641',
+      black: '#3a3733', red: '#e0816b', green: '#a3b18a', yellow: '#d9a55b',
+      blue: '#7da3c4', magenta: '#b08cba', cyan: '#6fb3b8', white: '#f5f4ef',
+      brightBlack: '#9b9690', brightRed: '#eb9a85', brightGreen: '#bcc7a6',
+      brightYellow: '#e6bd7c', brightBlue: '#9bbcd6', brightMagenta: '#c6a7ce',
+      brightCyan: '#8ec9cd', brightWhite: '#fffefb',
+    },
+  },
+  light: {
+    label: 'Light',
+    xterm: {
+      background: '#faf9f5', foreground: '#1f1e1d', cursor: '#c15f3c',
+      selectionBackground: '#d8e2ec',
+      black: '#1f1e1d', red: '#c1442e', green: '#4f7a3a', yellow: '#9a6b1e',
+      blue: '#2b6cb0', magenta: '#8a4f9e', cyan: '#2d8a8f', white: '#5c5852',
+      brightBlack: '#6b6862', brightRed: '#a8351f', brightGreen: '#3f6630',
+      brightYellow: '#855a14', brightBlue: '#225a96', brightMagenta: '#763f88',
+      brightCyan: '#247479', brightWhite: '#1f1e1d',
+    },
+  },
+};
+const THEME_DEFAULT = 'midnight';
+function themeName() {
+  const t = localStorage.getItem('clodex-theme');
+  return THEMES[t] ? t : THEME_DEFAULT;
+}
+function currentXtermTheme() { return THEMES[themeName()].xterm; }
+// Apply a theme: retint chrome (data-theme), persist, and live-swap every
+// open terminal's palette. Midnight clears the attr so :root wins.
+function applyTheme(name) {
+  if (!THEMES[name]) name = THEME_DEFAULT;
+  localStorage.setItem('clodex-theme', name);
+  if (name === THEME_DEFAULT) delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = name;
+  for (const s of sessions.values()) {
+    if (s.terminal) s.terminal.options.theme = THEMES[name].xterm;
+  }
+  const sel = document.getElementById('prefs-theme');
+  if (sel && sel.value !== name) sel.value = name; // keep the picker in sync
+}
+// Set the chrome attr before first paint (terminals read currentXtermTheme()
+// at creation, so they're correct without a re-swap).
+(function initTheme() {
+  const n = themeName();
+  if (n !== THEME_DEFAULT) document.documentElement.dataset.theme = n;
+})();
+// Populate the Preferences theme picker once; apply live on change.
+(function setupThemePicker() {
+  const sel = document.getElementById('prefs-theme');
+  if (!sel) return;
+  sel.innerHTML = Object.entries(THEMES)
+    .map(([k, t]) => `<option value="${k}">${t.label}</option>`).join('');
+  sel.value = themeName();
+  sel.addEventListener('change', () => { applyTheme(sel.value); window.api.setTheme(sel.value); });
+})();
+// Apply theme changes pushed from the View menu / other windows, and report
+// our persisted theme up to main so the menu radio + canonical settings match
+// the value we applied pre-paint (covers first run on this machine).
+window.api.onSetTheme((name) => applyTheme(name));
+try { window.api.setTheme(themeName()); } catch {}
+
 // DOM refs
 const sessionList = document.getElementById('session-list');
 const terminalContainer = document.getElementById('terminal-container');
@@ -379,20 +462,7 @@ function createTerminal(name) {
   const terminal = new Terminal({
     fontSize: 13,
     fontFamily: "'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace",
-    theme: {
-      background: '#1a1a2e',
-      foreground: '#eee',
-      cursor: '#e94560',
-      selectionBackground: '#3a4a6a',
-      black: '#1a1a2e',
-      red: '#e94560',
-      green: '#4ade80',
-      yellow: '#fbbf24',
-      blue: '#60a5fa',
-      magenta: '#c084fc',
-      cyan: '#22d3ee',
-      white: '#eee',
-    },
+    theme: currentXtermTheme(),
     cursorBlink: true,
     allowProposedApi: true,
   });
