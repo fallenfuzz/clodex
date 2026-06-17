@@ -1850,7 +1850,9 @@ async function openReportPanel(name) {
 
 function renderReport(d) {
   // Forward-compatible: render every field we understand, ignore the rest.
-  // v1 = no `waste` section (renderWaste degrades to ''); v2 adds it.
+  // v1 = no `waste` section (renderWaste degrades to ''); v2 adds it; v3 made
+  // carriage per-request; v4 scoped carriage waste to subagents (see
+  // renderFindings). Unknown-but-newer reports still render their known fields.
   if (!d || typeof d.report_version !== 'number' || d.report_version < 1) {
     return `<div class="rep-note">Unsupported report${d ? ' (version ' + esc(String(d.report_version)) + ')' : ''}. Update Clodex.</div>`;
   }
@@ -1869,6 +1871,9 @@ function renderReport(d) {
 // cost_decomposition ("where every dollar went"): this is the consolidated
 // headline that matches verdict.reclaimable_usd_total by construction. Compact
 // rollup here; the per-line levers live in the detailed findings below.
+// claudemd_carriage / useremail_carriage are subagent-scoped from v4 on (a
+// subagent's inherited context, reclaimable via omit-on-spawn). Main-line
+// carriage is informational, not waste — see renderFindings / renderInfoFinding.
 const WASTE_LABELS = {
   cold_cache: 'Cold cache (re-writes)',
   deadweight_tools: 'Unused tools',
@@ -1976,10 +1981,19 @@ function renderTokenDecomp(t) {
     `<div class="rep-stack">${bars}</div><div class="rep-legend">${legend}</div>${sub}</div>`;
 }
 
+// report_version 4 made claudemd/useremail carriage SUBAGENT-scoped: the
+// `*_carriage` waste types now only come from a subagent's inherited context
+// (reclaimable via omit-on-spawn). Main-line carriage instead surfaces as
+// informational `main_*_carriage` findings — additive:false, reclaimable_usd:0
+// — so the report no longer mislabels intentional main-agent CLAUDE.md as waste.
+const isMainCarriage = (f) => /^main_[a-z]+_carriage$/.test(f.category || '');
+
 function renderFindings(findings) {
   if (!findings.length) return '';
   const additive = findings.filter((f) => f.additive !== false);
-  const heuristic = findings.filter((f) => f.additive === false);
+  const nonAdditive = findings.filter((f) => f.additive === false);
+  const info = nonAdditive.filter(isMainCarriage);          // v4 informational
+  const heuristic = nonAdditive.filter((f) => !isMainCarriage(f));
   let html = `<div class="rep-sec"><div class="rep-sec-head">Recommendations</div>`;
   html += additive.length
     ? additive.map(renderFinding).join('')
@@ -1989,7 +2003,28 @@ function renderFindings(findings) {
       `<div class="rep-group-head" data-act="rep-toggle">▸ ${heuristic.length} possible (heuristic, not scored)</div>` +
       heuristic.map(renderFinding).join('') + `</div>`;
   }
+  if (info.length) {
+    html += `<div class="rep-group collapsed">` +
+      `<div class="rep-group-head" data-act="rep-toggle">▸ ${info.length} informational (main-line context, not reclaimable)</div>` +
+      info.map(renderInfoFinding).join('') + `</div>`;
+  }
   return html + `</div>`;
+}
+
+// v4 main-line carriage: factual, not waste. Render dimmed and with NO $ — and
+// deliberately do NOT surface reclaimable_tokens_per_request: on these findings
+// it carries the carried prefix size (e.g. 2237), not a saving, so the standard
+// renderFinding's "/req" meta would re-imply the very waste v4 stopped claiming.
+// The hypothetical evidence.carriage_usd_if_omittable is likewise not shown as $.
+function renderInfoFinding(f) {
+  const meta = [];
+  if (f.requests != null) meta.push(`over ${f.requests} request${f.requests === 1 ? '' : 's'}`);
+  return `<div class="rep-find low">` +
+    `<div class="rep-find-top"><span class="rep-find-title">${esc(f.title || f.category || '')}</span></div>` +
+    (f.detail ? `<div class="rep-find-detail">${esc(f.detail)}</div>` : '') +
+    (f.lever ? `<div class="rep-lever">${esc(f.lever)}</div>` : '') +
+    `<div class="rep-find-meta"><span class="rep-conf rep-conf-low">info</span>` +
+    meta.map((mm) => `<span>${esc(mm)}</span>`).join('') + `</div></div>`;
 }
 
 function renderFinding(f) {
