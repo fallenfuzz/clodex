@@ -1230,7 +1230,7 @@ function renderProxyBar() {
   if (p.refusals > 0) segs.push(`<span class="px-seg px-refusal">⚠ ${p.refusals}</span>`);
   if (p.base && p.sessionId) {
     const url = `${p.base}/_session?session=${encodeURIComponent(p.sessionId)}`;
-    segs.push(`<a class="px-seg px-link" data-url="${esc(url)}" title="Open this session's page on wirescope">🔍 wirescope</a>`);
+    segs.push(`<a class="px-seg px-link" data-url="${esc(url)}" title="Open this session's wirescope page in a clodex window (⌘-click for browser)">🔍 wirescope</a>`);
   }
 
   // Keep-warm control (only when the proxy advertises the capability): a single
@@ -1396,7 +1396,18 @@ setInterval(() => {
   if (!bar) return;
   bar.addEventListener('click', async (e) => {
     const link = e.target.closest('.px-link');
-    if (link && link.dataset.url) { e.preventDefault(); window.api.openExternal(link.dataset.url); return; }
+    if (link && link.dataset.url) {
+      e.preventDefault();
+      // Cmd/Ctrl-click escapes to the system browser (DevTools, tabs); a plain
+      // click opens the page in an in-app, theme-chromed wirescope window.
+      if (e.metaKey || e.ctrlKey) {
+        window.api.openExternal(link.dataset.url);
+      } else {
+        const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg');
+        window.api.openWirescope(link.dataset.url, bg);
+      }
+      return;
+    }
     const ctxSeg = e.target.closest('[data-act="ctx"]');
     if (ctxSeg && activeSession) { openContextPopover(activeSession, ctxSeg); return; }
     const costSeg = e.target.closest('[data-act="cost"]');
@@ -2128,7 +2139,7 @@ function svgCostChart(reqs, defs) {
 function renderCostTimeline(d, base, sid) {
   const s = d && d.series;
   const link = (base && sid)
-    ? `<span class="px-link-ext" data-url="${esc(base + '/_timeline?session=' + encodeURIComponent(sid))}">Open full dashboard →</span>`
+    ? `<span class="px-link-ext" data-url="${esc(base + '/_timeline?session=' + encodeURIComponent(sid))}" title="Open in a clodex window (⌘-click for browser)">Open full dashboard →</span>`
     : '';
   if (!s || !Array.isArray(s.requests) || !s.requests.length) {
     return `<div class="cost-note">No per-request cost series yet — give the session a turn or two.</div>${link}`;
@@ -2170,7 +2181,15 @@ async function openCostPopover(name, anchor) {
 
 costPopoverBody.addEventListener('click', (e) => {
   const ext = e.target.closest('[data-url]');
-  if (ext && ext.dataset.url) window.api.openExternal(ext.dataset.url);
+  if (!ext || !ext.dataset.url) return;
+  // Same as the bar's wirescope link: plain click → in-app theme-chromed
+  // window, ⌘/Ctrl-click → system browser.
+  if (e.metaKey || e.ctrlKey) {
+    window.api.openExternal(ext.dataset.url);
+  } else {
+    const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg');
+    window.api.openWirescope(ext.dataset.url, bg);
+  }
 });
 document.addEventListener('mousedown', (e) => {
   if (costPopover.classList.contains('hidden')) return;

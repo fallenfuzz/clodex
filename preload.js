@@ -120,6 +120,8 @@ window.api = {
     ipcRenderer.on('set-theme', (_e, name) => callback(name)),
   setSettings: (partial) => ipcRenderer.invoke('settings:set', partial),
 
+  openWirescope: (url, backgroundColor) => ipcRenderer.invoke('app:openWirescope', url, backgroundColor),
+
   // wirescope integration (phase-0)
   wirescopeStatus: () => ipcRenderer.invoke('wirescope:status'),
   wirescopeStart: () => ipcRenderer.invoke('wirescope:start'),

@@ -3068,6 +3068,39 @@ function createWindow(workspaceId = DEFAULT_WORKSPACE_ID) {
   return win;
 }
 
+// A single reusable window that renders a wirescope page (e.g. /_session) with
+// clodex-style chrome — "in the middle" between an inline popover and a system
+// browser tab. The page content is whatever wirescope serves; we only dress the
+// frame (a normal titled title bar so the mac traffic-lights don't float over
+// content + the caller's active theme bg) so it sits like a clodex window.
+// Hardened webPreferences: this loads REMOTE content, so it must
+// NOT inherit the main window's nodeIntegration/contextIsolation:false.
+let wirescopeWindow = null;
+function openWirescopeWindow(url, backgroundColor) {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return;
+  const bg = (typeof backgroundColor === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(backgroundColor.trim()))
+    ? backgroundColor.trim()
+    : '#1a1a2e';
+  if (wirescopeWindow && !wirescopeWindow.isDestroyed()) {
+    wirescopeWindow.setBackgroundColor(bg);
+    wirescopeWindow.loadURL(url);
+    wirescopeWindow.show();
+    wirescopeWindow.focus();
+    return;
+  }
+  wirescopeWindow = new BrowserWindow({
+    width: 1100,
+    height: 800,
+    minWidth: 600,
+    minHeight: 400,
+    backgroundColor: bg,
+    title: 'wirescope',
+    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+  });
+  wirescopeWindow.on('closed', () => { wirescopeWindow = null; });
+  wirescopeWindow.loadURL(url);
+}
+
 // Find the workspace ID that owns the renderer that sent an IPC event.
 function workspaceOfSender(e) {
   const win = BrowserWindow.fromWebContents(e.sender);
@@ -3254,6 +3287,13 @@ app.whenReady().then(() => {
   // http(s) only — never hand arbitrary schemes to the OS opener.
   ipcMain.handle('app:openExternal', (_e, url) => {
     if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
+  });
+
+  // Open a wirescope page in an in-app, clodex-chromed window instead of the
+  // system browser. backgroundColor is the caller's active theme `--bg` so the
+  // frame matches; the page content stays wirescope's own.
+  ipcMain.handle('app:openWirescope', (_e, url, backgroundColor) => {
+    openWirescopeWindow(url, backgroundColor);
   });
 
   // Arm/disarm a cache hold for a session. Writes are gated: the session must
