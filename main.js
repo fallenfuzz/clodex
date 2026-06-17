@@ -988,19 +988,23 @@ const { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord
 const { parseAgentFrontmatter, buildAgentsArg, denyAgentRules } = require('./agents-util');
 const { parseSkillFrontmatter, buildSkillPlugin } = require('./skills-util');
 const PROXY_POLL_INTERVAL = 5000; // ms
-const PROXY_HTTP_TIMEOUT = 4000;  // ms
+const PROXY_HTTP_TIMEOUT = 4000;  // ms — default; keeps polling/handshake snappy
+// Reports disk-scan the whole session on the proxy side, so they can take much
+// longer than a normal call on large/old sessions or slower machines. Give the
+// /_report fetch its own generous budget instead of the snappy default.
+const PROXY_REPORT_TIMEOUT = 20000; // ms
 const PROXY_PROBE_TTL = 60000;    // ms — re-confirm identity at most this often
 // /_identity product names we recognize. A set so the formerly-logproxy
 // rename (now wirescope, protocols.identity 2) stays trivial to extend.
 const PROXY_PRODUCTS = new Set(['wirescope']);
 
 const ProxyClient = {
-  _req(base, pathname, method = 'GET') {
+  _req(base, pathname, method = 'GET', timeout = PROXY_HTTP_TIMEOUT) {
     return new Promise((resolve, reject) => {
       let url;
       try { url = new URL(base + pathname); } catch (e) { return reject(e); }
       const lib = url.protocol === 'https:' ? https : http;
-      const req = lib.request(url, { method, timeout: PROXY_HTTP_TIMEOUT }, (res) => {
+      const req = lib.request(url, { method, timeout }, (res) => {
         let body = '';
         res.on('data', (d) => { body += d; });
         res.on('end', () => {
@@ -1014,7 +1018,7 @@ const ProxyClient = {
       req.end();
     });
   },
-  _getJson(base, pathname) { return this._req(base, pathname, 'GET'); },
+  _getJson(base, pathname, timeout) { return this._req(base, pathname, 'GET', timeout); },
 
   // Arm/disarm a cache hold. hours=0 disarms. The proxy may decline a cold
   // prefix (200 with armed:false, skipped:<state>) unless force=1. HTTP status
@@ -3238,7 +3242,7 @@ app.whenReady().then(() => {
     try {
       let q = `/_report?session=${encodeURIComponent(snap.sessionId)}`;
       if (opts && opts.detail) q += '&detail=1';
-      const r = await ProxyClient._getJson(s.proxyBase, q);
+      const r = await ProxyClient._getJson(s.proxyBase, q, PROXY_REPORT_TIMEOUT);
       if (r.status !== 200 || !r.json) return { ok: false, error: `proxy returned ${r.status}` };
       return { ok: true, data: r.json };
     } catch (e) {
