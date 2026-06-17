@@ -1849,16 +1849,48 @@ async function openReportPanel(name) {
 }
 
 function renderReport(d) {
-  if (!d || d.report_version !== 1) {
-    return `<div class="rep-note">Unsupported report version${d ? ' (' + esc(String(d.report_version)) + ')' : ''}. Update Clodex.</div>`;
+  // Forward-compatible: render every field we understand, ignore the rest.
+  // v1 = no `waste` section (renderWaste degrades to ''); v2 adds it.
+  if (!d || typeof d.report_version !== 'number' || d.report_version < 1) {
+    return `<div class="rep-note">Unsupported report${d ? ' (version ' + esc(String(d.report_version)) + ')' : ''}. Update Clodex.</div>`;
   }
   return [
     renderVerdict(d),
     renderCostDecomp(d.cost_decomposition),
+    renderWaste(d.waste),
     renderTokenDecomp(d.token_decomposition),
     renderFindings(d.findings || []),
     renderInvariants(d),
   ].join('');
+}
+
+// "What was avoidable" (report_version >= 2) — the reclaimable subset of cost,
+// aggregated by type, priced as the real net saving. Distinct question from
+// cost_decomposition ("where every dollar went"): this is the consolidated
+// headline that matches verdict.reclaimable_usd_total by construction. Compact
+// rollup here; the per-line levers live in the detailed findings below.
+const WASTE_LABELS = {
+  cold_cache: 'Cold cache (re-writes)',
+  deadweight_tools: 'Unused tools',
+  deadweight_skills: 'Unused skills',
+  claudemd_carriage: 'CLAUDE.md carried to subagents',
+  useremail_carriage: 'User email carried to subagents',
+};
+function renderWaste(w) {
+  if (!w || !Array.isArray(w.by_type) || !w.by_type.length) return '';
+  const rows = w.by_type.map((t) => {
+    const conf = t.confidence || 'medium';
+    const meta = [`<span class="rep-conf rep-conf-${esc(conf)}">${esc(conf)}</span>`];
+    if (t.items) meta.push(`<span>${t.items} item${t.items === 1 ? '' : 's'}</span>`);
+    if (t.tokens) meta.push(`<span>${fmtTokens(t.tokens)} tok</span>`);
+    return `<div class="rep-find"><div class="rep-find-top">` +
+      `<span class="rep-find-title">${esc(WASTE_LABELS[t.type] || t.type)}</span>` +
+      `<span class="rep-find-usd">${fmtUsd(t.usd)}</span></div>` +
+      `<div class="rep-find-meta">${meta.join('')}</div></div>`;
+  }).join('');
+  return `<div class="rep-sec"><div class="rep-sec-head">What was avoidable — ${fmtUsd(w.total_usd)}` +
+    (typeof w.pct_of_session === 'number' ? ` (${w.pct_of_session}% of session)` : '') +
+    `</div>${rows}</div>`;
 }
 
 function renderVerdict(d) {
@@ -1909,24 +1941,38 @@ function renderCostDecomp(c) {
     `<div class="rep-stack">${bars}</div><div class="rep-legend">${legend}</div>${miss}</div>`;
 }
 
+// report_version 3 renamed the carriage fields per-turn → per-request (the
+// prefix is re-sent on every wire request, not every human turn — and turns
+// now means genuine user prompts). Read the v3 name, fall back to the v2 name
+// so we render v2 and v3 proxies identically through the rollout.
+function vget(obj, v3key, v2key) {
+  if (!obj) return undefined;
+  return obj[v3key] != null ? obj[v3key] : obj[v2key];
+}
+
 function renderTokenDecomp(t) {
   if (!t || !t.preamble) return '';
   const p = t.preamble;
-  const per = p.tokens_per_turn || 0;
-  const cats = (p.by_category || []).filter((c) => (c.tokens_per_turn || 0) > 0);
+  const perReq = p.tokens_per_request != null; // v3 unit
+  const unit = perReq ? '/req' : '/turn';
+  const per = vget(p, 'tokens_per_request', 'tokens_per_turn') || 0;
+  const resent = vget(p, 'requests_resent', 'turns_resent') || 0;
+  const unused = vget(p, 'unused_tokens_per_request', 'unused_tokens_per_turn') || 0;
+  const cats = (p.by_category || [])
+    .map((c) => ({ category: c.category, v: vget(c, 'tokens_per_request', 'tokens_per_turn') || 0 }))
+    .filter((c) => c.v > 0);
   const bars = cats.map((c) =>
-    `<i style="width:${Math.max(0.5, per ? (c.tokens_per_turn / per) * 100 : 0)}%;background:${REP_CAT_COLOR[c.category] || '#888'}" ` +
-    `title="${esc(ctxCatLabel(c.category))} ${fmtTokens(c.tokens_per_turn)}/turn"></i>`).join('');
+    `<i style="width:${Math.max(0.5, per ? (c.v / per) * 100 : 0)}%;background:${REP_CAT_COLOR[c.category] || '#888'}" ` +
+    `title="${esc(ctxCatLabel(c.category))} ${fmtTokens(c.v)}${unit}"></i>`).join('');
   const legend = cats.map((c) =>
     `<div class="rep-leg-row"><span class="rep-leg-sw" style="background:${REP_CAT_COLOR[c.category] || '#888'}"></span>` +
     `<span class="rep-leg-name">${esc(ctxCatLabel(c.category))}</span>` +
-    `<span class="rep-leg-nums">${fmtTokens(c.tokens_per_turn)}/turn</span></div>`).join('');
-  const unused = p.unused_tokens_per_turn || 0;
-  const sub = `<div class="rep-sub">${fmtTokens(per)}/turn re-sent ${p.turns_resent || 0}× = ` +
+    `<span class="rep-leg-nums">${fmtTokens(c.v)}${unit}</span></div>`).join('');
+  const sub = `<div class="rep-sub">${fmtTokens(per)}${unit} re-sent ${resent}× = ` +
     `${fmtTokens(p.total_resent_tokens || 0)} total` +
-    (unused ? ` · <b>${fmtTokens(unused)}/turn never used</b>` : '') +
+    (unused ? ` · <b>${fmtTokens(unused)}${unit} never used</b>` : '') +
     (p.stable === false ? ' · estimate' : '') + `</div>`;
-  return `<div class="rep-sec"><div class="rep-sec-head">Your request preamble (reloaded every turn)</div>` +
+  return `<div class="rep-sec"><div class="rep-sec-head">Your request preamble (reloaded every ${perReq ? 'request' : 'turn'})</div>` +
     `<div class="rep-stack">${bars}</div><div class="rep-legend">${legend}</div>${sub}</div>`;
 }
 
@@ -1950,8 +1996,14 @@ function renderFinding(f) {
   const conf = f.confidence || 'medium';
   const ev = f.evidence || {};
   const meta = [];
-  if (f.reclaimable_tokens_per_turn) meta.push(`${fmtTokens(f.reclaimable_tokens_per_turn)}/turn`);
-  if (f.turns) meta.push(`over ${f.turns} turns`);
+  const reclaimPer = vget(f, 'reclaimable_tokens_per_request', 'reclaimable_tokens_per_turn');
+  if (reclaimPer) meta.push(`${fmtTokens(reclaimPer)}${f.reclaimable_tokens_per_request != null ? '/req' : '/turn'}`);
+  // v3 split the old per-finding `turns` count by type: requests (carriage),
+  // events (cache misses), occurrences (low-conf heuristics).
+  if (f.requests != null) meta.push(`over ${f.requests} requests`);
+  else if (f.events != null) meta.push(`${f.events} event${f.events === 1 ? '' : 's'}`);
+  else if (f.occurrences != null) meta.push(`${f.occurrences}×`);
+  else if (f.turns != null) meta.push(`over ${f.turns} turns`);
   if (ev.loaded != null && ev.used != null) meta.push(`${ev.used}/${ev.loaded} used`);
   return `<div class="rep-find${conf === 'low' ? ' low' : ''}">` +
     `<div class="rep-find-top"><span class="rep-find-title">${esc(f.title || f.category || '')}</span>` +
@@ -1972,13 +2024,20 @@ function renderInvariants(d) {
     if (Math.abs(sum - d.totals.est_usd) > 0.01) issues.push('cost buckets don’t sum to total');
   }
   const t = d.token_decomposition && d.token_decomposition.preamble;
-  if (t && Array.isArray(d.findings) && t.unused_tokens_per_turn != null) {
-    // The preamble is the main line's; subagent deadweight has its own per-turn
+  const unusedPer = vget(t, 'unused_tokens_per_request', 'unused_tokens_per_turn');
+  if (t && Array.isArray(d.findings) && unusedPer != null) {
+    // The preamble is the main line's; subagent deadweight has its own per-unit
     // budget and must not count against it (schema invariant is main-scoped).
+    // Same identity in v2 (_per_turn) and v3 (_per_request).
     const dead = d.findings
       .filter((f) => /^deadweight_/.test(f.category || '') && f.line === 'main')
-      .reduce((a, f) => a + (f.reclaimable_tokens_per_turn || 0), 0);
-    if (Math.abs(dead - t.unused_tokens_per_turn) > 1) issues.push('unused-preamble ≠ deadweight findings');
+      .reduce((a, f) => a + (vget(f, 'reclaimable_tokens_per_request', 'reclaimable_tokens_per_turn') || 0), 0);
+    if (Math.abs(dead - unusedPer) > 1) issues.push('unused-preamble ≠ deadweight findings');
+  }
+  // v2: the waste rollup is the reclaimable subset and must equal the verdict's
+  // headline number by construction.
+  if (d.waste && typeof d.waste.total_usd === 'number' && typeof (d.verdict && d.verdict.reclaimable_usd_total) === 'number') {
+    if (Math.abs(d.waste.total_usd - d.verdict.reclaimable_usd_total) > 0.01) issues.push('waste total ≠ verdict reclaimable');
   }
   if (issues.length) return `<div class="rep-inv bad">⚠ Consistency check failed: ${esc(issues.join('; '))}</div>`;
   return `<div class="rep-inv">Internally consistent · basis: ${esc((d.totals && d.totals.basis) || d.basis || 'on-disk capture')}</div>`;
