@@ -1057,6 +1057,7 @@ function renderSessionActions(holdHtml = '') {
   }
   if (type === 'claude' || type === 'codex') {
     btns.push('<button class="px-action" data-act="history" title="Past conversations — resume an earlier session">🕘 history</button>');
+    btns.push('<button class="px-action" data-act="reload" title="Hard restart: reload tools/skills/settings from disk in a fresh conversation (the CLI only reads them at launch — /clear and --resume don\'t). The current conversation stays in 🕘 history.">🔄 reload</button>');
     btns.push('<button class="px-action" data-act="edit" title="Edit session settings">⚙ edit</button>');
   }
   el.innerHTML = btns.join('') + (holdHtml || '');
@@ -1332,6 +1333,7 @@ setInterval(() => {
       else if (action.dataset.act === 'tools') openToolsPopover(activeSession, action);
       else if (action.dataset.act === 'skills') openSkillsPopover(activeSession, action);
       else if (action.dataset.act === 'history') openHistoryMenu(activeSession, action);
+      else if (action.dataset.act === 'reload') doHardRestart(activeSession);
       return;
     }
     const btn = e.target.closest('.px-hold');
@@ -1483,6 +1485,27 @@ document.addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && historyMenu) closeHistoryMenu();
 });
+
+// Hard restart: respawn the CLI in a FRESH conversation (no --resume). The CLI
+// snapshots its tool/skill/settings roster at process launch and rebuilds it
+// only when a new conversation is created — /clear and --resume both replay the
+// frozen roster — so this is the one action that picks up an edited settings.json
+// (re-enabled tools, skill changes, MCP, etc.). Not destructive: the prior
+// conversation is preserved on disk and stays resumable via the 🕘 history picker.
+async function doHardRestart(name) {
+  if (!confirm(
+    `Hard-restart "${name}"?\n\n` +
+    `Starts a fresh conversation so the CLI reloads tools, skills, and settings ` +
+    `from disk (a plain restart, --resume, or /clear keeps the old roster). ` +
+    `The current conversation isn't lost — it stays available under 🕘 history.`
+  )) return;
+  const el = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
+  const snapType = el ? el.querySelector('.session-type')?.textContent : null;
+  const snapCwd = el ? el.dataset.cwd : null;
+  const rr = await window.api.restartSession(name, { fresh: true });
+  if (!rr || !rr.ok) { alert(`Hard restart failed: ${rr && rr.error ? rr.error : 'unknown error'}`); return; }
+  if (snapType) { createTerminal(name); addSessionToSidebar(name, snapType, snapCwd, null); switchSession(name); }
+}
 
 // --- Tools quick-access popover ------------------------------------------
 // Opened from the status-bar "tools" icon. Reads the session's current
