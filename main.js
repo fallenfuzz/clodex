@@ -384,6 +384,45 @@ const prompts = {
 };
 
 // ---------------------------------------------------------------------------
+// Per-agent defaults — standing preferences keyed by agent NAME that outlive
+// any single session. Unlike sessions.json (whose entry a kill-from-UI
+// deletes), this store survives kill/recreate, so a strip level the user picks
+// in the bottom-bar menu becomes the default every FUTURE session of that name
+// is seeded with — applied only at (cold) session birth, never re-imposed on a
+// reload. Shape: { [name]: { strip: 1|2 } }, room to grow other per-agent prefs.
+// ---------------------------------------------------------------------------
+let AGENT_DEFAULTS_FILE = null;
+
+const agentDefaults = {
+  _load() {
+    try {
+      const obj = JSON.parse(fs.readFileSync(AGENT_DEFAULTS_FILE, 'utf-8'));
+      return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : {};
+    } catch { return {}; }
+  },
+  _save(map) {
+    try {
+      atomicWriteFileSync(AGENT_DEFAULTS_FILE, JSON.stringify(map, null, 2));
+    } catch (e) { console.error('agent-defaults save failed:', e); }
+  },
+  // Standing strip level for an agent name (0 if never set).
+  getStrip(name) {
+    const e = this._load()[name];
+    return (e && (e.strip === 1 || e.strip === 2)) ? e.strip : 0;
+  },
+  // Record the agent's standing strip level; level 0 clears it (and prunes the
+  // entry when no other prefs remain).
+  setStrip(name, level) {
+    const map = this._load();
+    const lvl = (level === 1 || level === 2) ? level : 0;
+    const e = map[name] || {};
+    if (lvl > 0) e.strip = lvl; else delete e.strip;
+    if (Object.keys(e).length) map[name] = e; else delete map[name];
+    this._save(map);
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Custom subagent library — user-authored agents as markdown-with-frontmatter
 // files under ~/.clodex/agents/. On-disk (not in a JSON blob) so they're
 // human-inspectable and portable into a project's .claude/agents or
@@ -3249,6 +3288,7 @@ app.whenReady().then(() => {
   PROMPTS_FILE = path.join(app.getPath('userData'), 'prompts.json');
   WORKSPACES_FILE = path.join(app.getPath('userData'), 'workspaces.json');
   UI_SETTINGS_FILE = path.join(app.getPath('userData'), 'ui-settings.json');
+  AGENT_DEFAULTS_FILE = path.join(app.getPath('userData'), 'agent-defaults.json');
 
   cleanupOldMessages();
   setInterval(cleanupOldMessages, MSG_CLEANUP_INTERVAL);
@@ -3268,7 +3308,10 @@ app.whenReady().then(() => {
       // asserts once the session links), so persist it onto the entry after
       // create() rather than threading it through the 15-param spawn path.
       // Set at creation = the cold-cache path: the first re-write is tiny.
-      if (stripLevel === 1 || stripLevel === 2) persistence.setStripLevel(name, stripLevel);
+      // An explicit dialog choice wins; otherwise seed from this agent name's
+      // standing default (set previously from the bottom-bar menu, kill-proof).
+      const seedStrip = (stripLevel === 1 || stripLevel === 2) ? stripLevel : agentDefaults.getStrip(name);
+      if (seedStrip === 1 || seedStrip === 2) persistence.setStripLevel(name, seedStrip);
       return { ok: true, session };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -3459,6 +3502,10 @@ app.whenReady().then(() => {
       return { ok: false, error: 'This proxy does not support tool-result stripping (level 2) yet' };
     }
     persistence.setStripLevel(name, lvl);
+    // A bottom-bar choice is also this agent name's standing default, so every
+    // future session of that name (even after a kill that drops the sessions.json
+    // entry) is seeded with it. Kill-proof; consulted only at session birth.
+    agentDefaults.setStrip(name, lvl);
     proxyPoller.noteStripAsserted(name, snap.sessionId, lvl);
     try {
       // Level >=1 strips prior thinking. (Level 2's tool-result strip rides a
@@ -3665,6 +3712,10 @@ app.whenReady().then(() => {
         if (!await waitForSessionExit(name)) throw new Error('old process did not exit in time');
       }
       await manager.create(name, beforeKill.type, beforeKill.cwd, extraArgs, beforeKill.sessionId || null, wsId, systemPrompt ?? null, false, proxy ?? null, nextAgents, nextDeny, nextTools, nextSkills, nextInject);
+      // kill() dropped the entry's stripLevel; re-assert the session's own level
+      // (see session:restart) so editing args doesn't reset stripping.
+      const argsLvl = stripLevelOf(beforeKill);
+      if (argsLvl >= 1) persistence.setStripLevel(name, argsLvl);
       if (beforeKill.label) persistence.setLabel(name, beforeKill.label);
       return { ok: true, restarted: true };
     } catch (err) {
@@ -3702,6 +3753,12 @@ app.whenReady().then(() => {
         if (!await waitForSessionExit(name)) throw new Error('old process did not exit in time');
       }
       await manager.create(name, entry.type, entry.cwd, entry.extraArgs || [], resumeId, wsId, entry.systemPrompt || null, false, entry.proxy ?? null, entry.agents || [], entry.denyBuiltins || [], entry.disabledTools || [], entry.disabledSkills || [], entry.injectSkills || []);
+      // kill() removed the persistence entry (incl. stripLevel) and create()
+      // re-wrote it from spawn args only — re-assert the session's OWN level so
+      // a restart doesn't silently turn stripping off. (Birth-time agentDefaults
+      // seeding lives in session:create; this preserves the actual level.)
+      const restartLvl = stripLevelOf(entry);
+      if (restartLvl >= 1) persistence.setStripLevel(name, restartLvl);
       if (entry.label) persistence.setLabel(name, entry.label);
       return { ok: true, restarted: true };
     } catch (err) {
