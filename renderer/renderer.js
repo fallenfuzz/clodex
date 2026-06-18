@@ -1154,6 +1154,10 @@ function renderProxyBar() {
   if (!p.linked) {
     tele.className = 'px-muted';
     tele.textContent = 'proxy: no live session for this agent';
+    // Keep the action controls present (disabled) instead of yanking them on
+    // every link blip — the persisted strip level + advertised caps still ride
+    // this payload, so the buttons show their saved state and re-enable on relink.
+    renderSessionActions(buildProxyExtras(p));
     return;
   }
 
@@ -1239,11 +1243,28 @@ function renderProxyBar() {
     segs.push(`<a class="px-seg px-link" data-url="${esc(url)}" title="Open this session's wirescope page in a clodex window (⌘-click for browser)">🔍 wirescope</a>`);
   }
 
-  // Keep-warm control (only when the proxy advertises the capability): a single
-  // fire button that opens a duration dropdown (1h/4h/8h, plus Stop when held).
+  tele.innerHTML = segs.join('<span class="px-sep">·</span>');
+  // Keep-warm + strip level live with the actions on the right, not the info column.
+  renderSessionActions(buildProxyExtras(p));
+}
+
+// The two live-action controls (keep-warm, strip level) that sit with the static
+// action buttons. Their VISIBILITY is gated only on the advertised capability +
+// persisted state — BOTH of which ride every poll payload, even when the proxy
+// link momentarily drops (the poller always sets base/capabilities/stripLevel;
+// only sessionId disappears while unlinked). So they render DISABLED rather than
+// vanishing when there's no live session to act on. Removing them from the DOM on
+// each link flicker was the "strip button keeps disappearing" bug — the strip
+// level is clodex-authoritative persisted state, so the button can always SHOW
+// the saved level; it only needs the live link to CHANGE it.
+function buildProxyExtras(p) {
+  const actionable = !!(p.linked && p.base && p.sessionId);
+
+  // Keep-warm: a single fire button that opens a duration dropdown (1h/4h/8h,
+  // plus Stop when held). Held/armed state is only known on a live record.
   let holdHtml = '';
   if (p.capabilities && p.capabilities.hold) {
-    if (p.hold) {
+    if (actionable && p.hold) {
       // `until` re-anchors to the last real turn, so this slides forward as the
       // session is used — it's "stays warm ~N more hours if idle", not a fixed
       // countdown. pingable=false → armed but waiting for the next turn to fire.
@@ -1254,30 +1275,31 @@ function renderProxyBar() {
       const label = pending ? '🔒 armed' : `🔒 held${remTxt}`;
       const tip = pending ? 'Armed — starts keeping warm after the next turn. Click to change or stop.' : 'Keeping cache warm. Click to change or stop.';
       holdHtml = `<button class="px-hold" data-act="warm-menu" data-held="1" title="${tip}">${label}</button>`;
-    } else {
+    } else if (actionable) {
       holdHtml = `<button class="px-hold" data-act="warm-menu" title="Keep prompt cache warm">🔥 keep warm</button>`;
+    } else {
+      holdHtml = `<button class="px-hold" disabled title="Keep prompt cache warm — waiting for a live proxy session">🔥 keep warm</button>`;
     }
   }
 
-  // Strip-level control (only when wirescope advertises the lever + the session
-  // is linked). A cumulative ladder opened via dropdown: 0 off · 1 strips prior-
-  // turn thinking · 2 also strips superseded tool results. The current turn is
-  // never touched; non-destructive (local transcript unchanged). clodex is
-  // authoritative — p.stripLevel is our persisted level, re-asserted on relink.
+  // Strip-level control (only when wirescope advertises the lever). A cumulative
+  // ladder opened via dropdown: 0 off · 1 strips prior-turn thinking · 2 also
+  // strips superseded tool results. The current turn is never touched;
+  // non-destructive. p.stripLevel is our persisted, authoritative level.
   let stripHtml = '';
   const stripCap = p.capabilities && p.capabilities.strip_thinking;
-  if (stripCap && stripCap.available && p.base && p.sessionId) {
+  if (stripCap && stripCap.available) {
     const lvl = typeof p.stripLevel === 'number' ? p.stripLevel : 0;
     const label = lvl === 0 ? '🧠 strip' : `🧠 strip L${lvl}`;
-    const tip = lvl === 0
-      ? 'Strip wasted re-read carriage from the wire to reclaim cost. Click to choose a level.'
-      : `Strip level ${lvl} active${lvl >= 2 ? ' (thinking + superseded tool results)' : ' (prior-turn thinking)'}. Click to change.`;
-    stripHtml = `<button class="px-action px-strip${lvl > 0 ? ' is-on' : ''}" data-act="strip-menu" data-level="${lvl}" title="${esc(tip)}">${label}</button>`;
+    const tip = !actionable
+      ? `Wire stripping${lvl > 0 ? ` — level ${lvl} saved` : ''}. Waiting for a live proxy session to change it.`
+      : (lvl === 0
+        ? 'Strip wasted re-read carriage from the wire to reclaim cost. Click to choose a level.'
+        : `Strip level ${lvl} active${lvl >= 2 ? ' (thinking + superseded tool results)' : ' (prior-turn thinking)'}. Click to change.`);
+    stripHtml = `<button class="px-action px-strip${lvl > 0 ? ' is-on' : ''}"${actionable ? '' : ' disabled'} data-act="strip-menu" data-level="${lvl}" title="${esc(tip)}">${label}</button>`;
   }
 
-  tele.innerHTML = segs.join('<span class="px-sep">·</span>');
-  // Keep-warm + strip level live with the actions on the right, not the info column.
-  renderSessionActions(stripHtml + holdHtml);
+  return stripHtml + holdHtml;
 }
 
 // Lightweight per-second update: refresh only the countdown text + staleness

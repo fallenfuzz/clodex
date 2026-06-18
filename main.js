@@ -1019,6 +1019,14 @@ const PROXY_HTTP_TIMEOUT = 4000;  // ms — default; keeps polling/handshake sna
 // /_report fetch its own generous budget instead of the snappy default.
 const PROXY_REPORT_TIMEOUT = 20000; // ms
 const PROXY_PROBE_TTL = 60000;    // ms — re-confirm identity at most this often
+// Link hysteresis: the proxy's /_status doesn't always list a session every tick
+// (idle between turns, count-token probe churn), so a single missing record would
+// otherwise flip the bar to "unlinked" and tear down the clickable cost/wirescope/
+// ctx affordances — they reappear next good tick, which reads as the links blinking
+// on and off. Tolerate misses for this long (clodex still knows the live sessionId
+// independently) before declaring a genuine unlink; the renderer dims the held-over
+// payload via its existing stale/dead aging in the meantime.
+const PROXY_LINK_GRACE = 20000;   // ms (~4 polls)
 // /_identity product names we recognize. A set so the formerly-logproxy
 // rename (now wirescope, protocols.identity 2) stays trivial to extend.
 const PROXY_PRODUCTS = new Set(['wirescope']);
@@ -1199,6 +1207,18 @@ class ProxyPoller {
           // in-memory and not trustworthy pre-relink). Surfaced for the bar menu.
           const level = stripLevelOf(persistence.get(s.name));
           payload.stripLevel = level;
+          // Link hysteresis: don't tear the bar down on a single missing record.
+          // If we were linked very recently, keep showing the last-good payload
+          // (the renderer ages it to stale/dead on its own) and skip this tick's
+          // strip re-assert — clodex still knows the live sessionId, so a held-over
+          // snapshot keeps the cost/wirescope/ctx links clickable and IPC fetches
+          // (proxy:hold, cost report) working through the blip.
+          if (!payload.linked) {
+            const prev = this.last.get(s.name);
+            if (prev && prev.linked && (Date.now() - (prev.ts || 0)) < PROXY_LINK_GRACE) {
+              continue; // transient miss — leave last-good in place, don't re-emit
+            }
+          }
           this.last.set(s.name, payload);
           this.manager._sendToSession(s.name, 'session-proxy', s.name, payload);
           // Re-assert the wire state on (re)link or when the live session id rolls
