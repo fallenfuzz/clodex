@@ -1249,14 +1249,19 @@ function renderProxyBar() {
 }
 
 // The two live-action controls (keep-warm, strip level) that sit with the static
-// action buttons. Their VISIBILITY is gated only on the advertised capability +
-// persisted state — BOTH of which ride every poll payload, even when the proxy
-// link momentarily drops (the poller always sets base/capabilities/stripLevel;
-// only sessionId disappears while unlinked). So they render DISABLED rather than
-// vanishing when there's no live session to act on. Removing them from the DOM on
-// each link flicker was the "strip button keeps disappearing" bug — the strip
-// level is clodex-authoritative persisted state, so the button can always SHOW
-// the saved level; it only needs the live link to CHANGE it.
+// action buttons. Their VISIBILITY is gated on the advertised capability +
+// persisted state; their ACTIONABILITY (enabled vs disabled) on the live link.
+// Two independent disappearance bugs had to be closed for the strip button:
+//   1. Link flicker — the button was being removed from the DOM whenever the
+//      proxy link blipped. Fixed by gating presence on capability+persisted
+//      stripLevel (which we always know) and only DISABLING on lost link.
+//   2. Capability flap — a failed/foreign/fallback probe returns capabilities
+//      WITHOUT strip_thinking, which used to retract the button for up to a probe
+//      cache TTL. strip_thinking.available is a STATIC property of a wirescope
+//      deployment, so main.js latches it permanently per base (ProxyPoller
+//      .stripCapBases) and a downgraded probe can no longer drop the cap.
+// Net: the button's presence is now a deployment property, never a per-tick
+// network fact; only its enabled state tracks the live link.
 function buildProxyExtras(p) {
   const actionable = !!(p.linked && p.base && p.sessionId);
 
