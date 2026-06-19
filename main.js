@@ -1145,15 +1145,18 @@ const ProxyClient = {
     return this._req(base, `/_hold?${qs.toString()}`, 'POST');
   },
 
-  // Set the per-session "strip prior thinking" override. mode 'on'/'off' sets an
-  // explicit override; 'clear' reverts to the proxy's global default. The setter
-  // is an in-memory write on the proxy (no turn, no credit), so it's cheap and
-  // idempotent — safe to re-fire on every relink. Body carries the resolved
-  // `effective` bool; branch on the body, not the HTTP status.
-  async stripThinking(base, sessionId, mode) {
+  // Set the per-session strip LEVEL override on /_strip. level 0 = clear (revert
+  // to the proxy's global default); 1 = strip prior thinking (`&on=1`); 2 =
+  // thinking + edit-acks + failed-call stubs (`&level=2`). One mechanism, three
+  // levels — there's no separate stale-tools endpoint. The setter is an in-memory
+  // write on the proxy (no turn, no credit), so it's cheap + idempotent — safe to
+  // re-fire on every relink. Body carries the resolved `effective`; branch on the
+  // body, not the HTTP status.
+  async stripThinking(base, sessionId, level) {
     const qs = new URLSearchParams({ session: sessionId });
-    if (mode === 'clear') qs.set('action', 'clear');
-    else qs.set('on', mode === 'on' ? '1' : '0');
+    if (level === 2) qs.set('level', '2');
+    else if (level === 1) qs.set('on', '1');
+    else qs.set('action', 'clear');
     return this._req(base, `/_strip?${qs.toString()}`, 'POST');
   },
 
@@ -1302,7 +1305,13 @@ class ProxyPoller {
             arr.push(r);
           }
         }
-        const stripCap = !!(probe.capabilities && probe.capabilities.strip_thinking && probe.capabilities.strip_thinking.available);
+        const stripThinkingCap = probe.capabilities && probe.capabilities.strip_thinking;
+        const stripCap = !!(stripThinkingCap && stripThinkingCap.available);
+        // Highest strip level this proxy serves: max_level when advertised (L2
+        // build), else L1. A persisted L2 on a pre-L2 proxy degrades to L1 on the
+        // wire (and auto-upgrades the moment the proxy advertises max_level:2).
+        const proxyMaxLevel = (stripThinkingCap && typeof stripThinkingCap.max_level === 'number')
+          ? stripThinkingCap.max_level : 1;
         for (const s of sess) {
           const payload = shapeProxyRecord(pickProxyRecord(byAgent.get(s.proxyAgent), s.sessionId), probe);
           payload.base = base; // poller context, not record shape — for the session-page link
@@ -1327,16 +1336,17 @@ class ProxyPoller {
           // Re-assert the wire state on (re)link or when the live session id rolls
           // (/clear mints a new id; a proxy restart surfaces as unlinked→linked).
           // Only level>=1 needs a push: level 0 == the global default (off), so
-          // a cleared-on-restart override already matches it. Level>=1 strips
-          // prior thinking; level 2's tool-result strip rides a separate
-          // wirescope endpoint, wired when that capability ships.
+          // a cleared-on-restart override already matches it. The asserted level
+          // is clamped to what this proxy serves (proxyMaxLevel), so a persisted
+          // L2 rides as L1 until the L2 build is live, then upgrades on its own.
           if (!payload.linked) {
             this.stripAsserted.delete(s.name);
           } else if (stripCap && payload.sessionId && level >= 1) {
+            const assertLevel = Math.min(level, proxyMaxLevel);
             const last = this.stripAsserted.get(s.name);
-            if (!last || last.sessionId !== payload.sessionId || last.level !== level) {
-              this.stripAsserted.set(s.name, { sessionId: payload.sessionId, level });
-              ProxyClient.stripThinking(base, payload.sessionId, 'on').catch(() => {
+            if (!last || last.sessionId !== payload.sessionId || last.level !== assertLevel) {
+              this.stripAsserted.set(s.name, { sessionId: payload.sessionId, level: assertLevel });
+              ProxyClient.stripThinking(base, payload.sessionId, assertLevel).catch(() => {
                 // Failed to push — forget so the next tick retries.
                 const cur = this.stripAsserted.get(s.name);
                 if (cur && cur.sessionId === payload.sessionId) this.stripAsserted.delete(s.name);
@@ -3548,8 +3558,10 @@ app.whenReady().then(() => {
       return { ok: false, error: 'This proxy does not support strip-thinking' };
     }
     let lvl = (level === 1 || level === 2) ? level : 0;
-    if (lvl === 2 && !(caps.strip_stale_tool_results && caps.strip_stale_tool_results.available)) {
-      return { ok: false, error: 'This proxy does not support tool-result stripping (level 2) yet' };
+    // L2 (edit-acks + failed-call stubs) folds into strip_thinking as a level —
+    // there is no separate capability. Gate on the advertised max_level.
+    if (lvl === 2 && !(cap.max_level >= 2)) {
+      return { ok: false, error: 'This proxy does not support level 2 stripping yet' };
     }
     persistence.setStripLevel(name, lvl);
     // A bottom-bar choice is also this agent name's standing default, so every
@@ -3558,9 +3570,9 @@ app.whenReady().then(() => {
     agentDefaults.setStrip(name, lvl);
     proxyPoller.noteStripAsserted(name, snap.sessionId, lvl);
     try {
-      // Level >=1 strips prior thinking. (Level 2's tool-result strip rides a
-      // separate wirescope endpoint, wired when that capability ships.)
-      const r = await ProxyClient.stripThinking(s.proxyBase, snap.sessionId, lvl >= 1 ? 'on' : 'clear');
+      // One /_strip mechanism, three levels: 0 clears, 1 strips thinking, 2 adds
+      // edit-acks + failed-call stubs on top.
+      const r = await ProxyClient.stripThinking(s.proxyBase, snap.sessionId, lvl);
       const j = r.json || {};
       return { ok: true, status: r.status, level: lvl, effective: !!j.effective, body: j };
     } catch (e) {

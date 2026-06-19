@@ -1315,7 +1315,7 @@ function buildProxyExtras(p) {
       ? `Wire stripping${lvl > 0 ? ` — level ${lvl} saved` : ''}. Waiting for a live proxy session to change it.`
       : (lvl === 0
         ? 'Strip wasted re-read carriage from the wire to reclaim cost. Click to choose a level.'
-        : `Strip level ${lvl} active${lvl >= 2 ? ' (thinking + superseded tool results)' : ' (prior-turn thinking)'}. Click to change.`);
+        : `Strip level ${lvl} active${lvl >= 2 ? ' (thinking + edit-acks + failed-call stubs)' : ' (prior-turn thinking)'}. Click to change.`);
     stripHtml = `<button class="px-action px-strip${lvl > 0 ? ' is-on' : ''}"${actionable ? '' : ' disabled'} data-act="strip-menu" data-level="${lvl}" title="${esc(tip)}">${label}</button>`;
   }
 
@@ -1567,22 +1567,23 @@ document.addEventListener('keydown', (e) => {
 
 // --- Strip-level dropdown ------------------------------------------------
 // The 🧠 strip button opens this. A cumulative ladder (each level a superset):
-// 0 off · 1 prior-turn thinking · 2 + superseded tool results. Level 2 is gated
-// on the (future) tool-strip capability — shown disabled until wirescope ships
-// it dark, then it lights up automatically. Mirrors the keep-warm menu.
+// 0 off · 1 prior-turn thinking · 2 + edit-acks/failed-call stubs. Level 2 is
+// gated on the proxy advertising strip_thinking.max_level>=2 — shown disabled
+// until the L2 build is live, then it lights up automatically. Mirrors keep-warm.
 let stripMenu = null;
 function closeStripMenu() { if (stripMenu) { stripMenu.remove(); stripMenu = null; } }
 
 const STRIP_LEVELS = [
   { lvl: 0, name: 'Off', desc: 'No stripping' },
   { lvl: 1, name: 'Level 1 — thinking', desc: 'Strip prior-turn reasoning (~30% off, no visible degradation)' },
-  { lvl: 2, name: 'Level 2 — + tool results', desc: 'Also drop superseded tool results' },
+  { lvl: 2, name: 'Level 2 — + edit-acks & failed calls', desc: 'Also collapse succeeded edit/write acks and stub failed tool calls (only reclaims while L1 is stripping)' },
 ];
 
 function openStripMenu(anchorBtn, currentLevel) {
   closeStripMenu();
   const caps = (activeSession && proxyState.get(activeSession)?.payload?.capabilities) || {};
-  const toolsAvail = !!(caps.strip_stale_tool_results && caps.strip_stale_tool_results.available);
+  // L2 folds into strip_thinking as a level; gate on the advertised max_level.
+  const toolsAvail = (caps.strip_thinking && caps.strip_thinking.max_level >= 2);
   stripMenu = document.createElement('div');
   stripMenu.className = 'warm-menu strip-menu';
   const items = ['<div class="warm-menu-label">Wire stripping level</div>'];
