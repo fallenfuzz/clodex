@@ -2227,15 +2227,39 @@ class SessionManager {
         }
         ensureDir(MSG_DIR);
         if (!args.includes(MSG_DIR)) args.push('--add-dir', MSG_DIR);
-        // Suppress the auto-injected claude.ai `claude_design` connector (and any
-        // other dynamic MCP) for these zero-MCP socket-IPC agents. `--strict-mcp-config`
-        // makes the CLI use only `--mcp-config` servers (we pass none) — wire-proven
-        // to drop the 20 design tools while leaving the base roster untouched. Honors
-        // an explicit user-passed flag and won't fight a real `--mcp-config`.
+        // Suppress the auto-injected claude.ai `claude_design` connector (20
+        // `mcp__claude_design__*` tools, ~4k tok/turn cache carriage) that the CLI
+        // injects with no honored global opt-out. Two mechanisms, and we prefer the
+        // surgical one: when this session is routed through a wirescope that strips
+        // `claude_design` on the wire (advertised via /_identity
+        // capabilities.strip_mcp.servers), the wire removes ONLY the design tools and
+        // keeps any real project/user MCP. So we fall back to `--strict-mcp-config`
+        // — which is all-or-nothing (it makes the CLI ignore ALL mcp config) — ONLY
+        // when no such wire will do it: unrouted, or routed to a proxy that doesn't
+        // advertise the strip (kill-switch / strip-off port). Reading the advertised
+        // FACT (not assuming routed => strips) keeps a strip-off port from regressing.
+        // This is self-sequencing: a pre-v0.6.13 wire advertises no strip_mcp, so the
+        // gate keeps pushing strict — byte-identical to the always-strict behavior —
+        // until the capable wire is deployed, then flips itself per port. Honors an
+        // explicit user flag and won't fight a real `--mcp-config`. Fail-open: if the
+        // proxy is momentarily DOWN at the spawn instant, probe is null and we push
+        // strict (degraded-but-functional, self-heals next restart) rather than block
+        // the spawn on proxy-up — a hiccup must never stop a session starting. The one
+        // case that feels it: an agent that has real MCPs AND spawns in the ms-window
+        // the proxy is down AND isn't restarted for a while. A comment, not a code path.
         if (uiSettings.get().disableClaudeDesignMcp
             && !args.includes('--strict-mcp-config')
             && !args.includes('--mcp-config')) {
-          args.push('--strict-mcp-config');
+          let wireStripsDesign = false;
+          if (proxyBase) {
+            try {
+              const probe = await ProxyClient.probe(proxyBase);
+              const servers = probe && probe.capabilities && probe.capabilities.strip_mcp
+                && probe.capabilities.strip_mcp.servers;
+              wireStripsDesign = Array.isArray(servers) && servers.includes('claude_design');
+            } catch {}
+          }
+          if (!wireStripsDesign) args.push('--strict-mcp-config');
         }
         // clodex-managed custom subagents: a session-only, priority-2 overlay
         // (above project/user .claude/agents) read from the ~/.clodex/agents
