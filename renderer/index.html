@@ -397,6 +397,14 @@
         <input type="text" id="prefs-proxy-url" placeholder="http://127.0.0.1:7800" spellcheck="false">
       </section>
       <section>
+        <h4>Claude MCP</h4>
+        <p class="hint-text">Claude Code auto-injects the built-in <code>claude_design</code> connector (~20 tools, ~4k tokens every turn) with no global opt-out. Clodex agents talk over the socket and use no MCP, so it is pure cache deadweight. Applied at spawn — restart a session to pick up changes.</p>
+        <label style="display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="prefs-disable-design-mcp" style="margin: 0;">
+          <span>Disable the built-in Claude Design MCP (<code>--strict-mcp-config</code>)</span>
+        </label>
+      </section>
+      <section>
         <h4>wirescope</h4>
         <p class="hint-text">Cost, context &amp; cache-warming telemetry. Point Clodex at a local <a href="#" id="ws-repo-link">wirescope</a> checkout and start it here. If one is already running on the port, Clodex adopts it instead of starting a second.</p>
         <p class="hint-text" style="margin-bottom: 2px;">Source directory</p>

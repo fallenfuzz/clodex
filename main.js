@@ -690,6 +690,17 @@ const DEFAULT_UI_SETTINGS = {
   // start/stop. Empty dir = nothing to manage (detect-only).
   wirescopeDir: '',
   wirescopePort: 7800,
+  // Built-in Claude Design MCP: the CLI auto-injects the claude.ai `claude_design`
+  // connector (20 `mcp__claude_design__*` tools, ~3.5k tok schema) on every launch
+  // for entitled accounts, and there is NO honored global opt-out — only a buried
+  // per-project `disabledMcpServers` in ~/.claude.json. clodex agents are socket-IPC
+  // and load zero MCP, so the design tools are pure deadweight (~4k tok/turn cache
+  // carriage) AND a restart-flap risk (the connector late-attaching shifts the tools
+  // segment hash and busts the whole downstream prefix). We kill it at spawn with
+  // `--strict-mcp-config`, which makes the CLI ignore ALL mcp config — safe here
+  // precisely because these agents use none. ON by default; turn off if you ever
+  // wire an MCP server into a clodex agent. Claude-only (Codex has no such connector).
+  disableClaudeDesignMcp: true,
   // UI theme key (see THEMES in renderer.js). Canonical copy lives here so the
   // View > Theme menu can show the right radio; the renderer mirrors it to
   // localStorage for instant pre-paint application.
@@ -711,6 +722,7 @@ const uiSettings = {
         proxyUrl: typeof raw?.proxyUrl === 'string' ? raw.proxyUrl : DEFAULT_UI_SETTINGS.proxyUrl,
         wirescopeDir: typeof raw?.wirescopeDir === 'string' ? raw.wirescopeDir : DEFAULT_UI_SETTINGS.wirescopeDir,
         wirescopePort: Number.isInteger(raw?.wirescopePort) ? raw.wirescopePort : DEFAULT_UI_SETTINGS.wirescopePort,
+        disableClaudeDesignMcp: typeof raw?.disableClaudeDesignMcp === 'boolean' ? raw.disableClaudeDesignMcp : DEFAULT_UI_SETTINGS.disableClaudeDesignMcp,
         theme: THEME_KEYS.includes(raw?.theme) ? raw.theme : DEFAULT_UI_SETTINGS.theme,
       };
     } catch { return DEFAULT_UI_SETTINGS; }
@@ -728,6 +740,7 @@ const uiSettings = {
       proxyUrl: partial?.proxyUrl ?? cur.proxyUrl,
       wirescopeDir: partial?.wirescopeDir ?? cur.wirescopeDir,
       wirescopePort: partial?.wirescopePort ?? cur.wirescopePort,
+      disableClaudeDesignMcp: partial?.disableClaudeDesignMcp ?? cur.disableClaudeDesignMcp,
       theme: THEME_KEYS.includes(partial?.theme) ? partial.theme : cur.theme,
     };
     try {
@@ -2214,6 +2227,16 @@ class SessionManager {
         }
         ensureDir(MSG_DIR);
         if (!args.includes(MSG_DIR)) args.push('--add-dir', MSG_DIR);
+        // Suppress the auto-injected claude.ai `claude_design` connector (and any
+        // other dynamic MCP) for these zero-MCP socket-IPC agents. `--strict-mcp-config`
+        // makes the CLI use only `--mcp-config` servers (we pass none) — wire-proven
+        // to drop the 20 design tools while leaving the base roster untouched. Honors
+        // an explicit user-passed flag and won't fight a real `--mcp-config`.
+        if (uiSettings.get().disableClaudeDesignMcp
+            && !args.includes('--strict-mcp-config')
+            && !args.includes('--mcp-config')) {
+          args.push('--strict-mcp-config');
+        }
         // clodex-managed custom subagents: a session-only, priority-2 overlay
         // (above project/user .claude/agents) read from the ~/.clodex/agents
         // library. Writes no file, touches no repo. The paired permissions.deny

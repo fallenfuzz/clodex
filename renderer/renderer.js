@@ -3332,6 +3332,7 @@ const prefsClaudeCmd = document.getElementById('prefs-claude-sl-cmd');
 const prefsCodexBox = document.getElementById('prefs-codex-components');
 const prefsProxyEnabled = document.getElementById('prefs-proxy-enabled');
 const prefsProxyUrl = document.getElementById('prefs-proxy-url');
+const prefsDisableDesignMcp = document.getElementById('prefs-disable-design-mcp');
 const prefsWsDir = document.getElementById('prefs-ws-dir');
 const prefsWsPort = document.getElementById('prefs-ws-port');
 const prefsToolsRow = document.getElementById('prefs-tools-row');
@@ -3419,6 +3420,7 @@ async function openPrefs() {
   renderPrefsCheckboxes(prefsCodexBox, s.codexComponents, s.statusline.codex, CODEX_LABELS);
   prefsProxyEnabled.checked = !!s.proxyEnabled;
   prefsProxyUrl.value = s.proxyUrl || 'http://127.0.0.1:7800';
+  prefsDisableDesignMcp.checked = s.disableClaudeDesignMcp !== false;
   prefsWsDir.value = s.wirescopeDir || '';
   prefsWsPort.value = s.wirescopePort || 7800;
   // Global default tool-deny set (cwd-independent, so no lower-layer provenance).
@@ -3489,6 +3491,7 @@ document.getElementById('btn-prefs-save').addEventListener('click', async () => 
     },
     proxyEnabled: prefsProxyEnabled.checked,
     proxyUrl: prefsProxyUrl.value.trim() || 'http://127.0.0.1:7800',
+    disableClaudeDesignMcp: prefsDisableDesignMcp.checked,
     wirescopeDir: prefsWsDir.value.trim(),
     wirescopePort: (() => { const p = parseInt(prefsWsPort.value, 10); return Number.isInteger(p) && p > 0 ? p : 7800; })(),
   });
