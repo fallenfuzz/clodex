@@ -117,6 +117,17 @@ function shapeProxyRecord(r, probe, now = Date.now()) {
       remaining_s: typeof w.remaining_s === 'number' ? w.remaining_s : null,
       ttl_s: typeof w.ttl_s === 'number' ? w.ttl_s : null,
     } : null,
+    // Proxy-truth strip config (wirescope v0.6.10+). The poller reconciles our
+    // persisted intent against `configuredLevel`/`source` here instead of
+    // fire-once asserting; `source` must be "override" for a level>=1 to be a
+    // durable, recorded intent (a coincidental global-default match isn't).
+    // null on pre-v0.6.10 proxies → poller skips assertion (degrades to off).
+    strip: r.strip ? {
+      configuredLevel: typeof r.strip.configured_level === 'number' ? r.strip.configured_level : null,
+      source: r.strip.source || null,
+      globalDefaultLevel: typeof r.strip.global_default_level === 'number' ? r.strip.global_default_level : 0,
+      ridersAvailable: r.strip.riders_available === true,
+    } : null,
     hold: r.hold || null,
     // Task/background subagents nested under this session (share its session_id
     // on the wire). Empty until a real subagent makes a wire turn. Sorted

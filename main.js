@@ -1110,6 +1110,9 @@ const PROXY_PROBE_TTL = 60000;    // ms — re-confirm identity at most this oft
 // independently) before declaring a genuine unlink; the renderer dims the held-over
 // payload via its existing stale/dead aging in the meantime.
 const PROXY_LINK_GRACE = 20000;   // ms (~4 polls)
+const PROXY_STRIP_REPOST_MS = 4000; // ms — debounce identical strip re-POSTs to at
+                                    // most once per poll cycle (~5s), so a genuine
+                                    // retry on the next tick is never suppressed
 // /_identity product names we recognize. A set so the formerly-logproxy
 // rename (now wirescope, protocols.identity 2) stays trivial to extend.
 const PROXY_PRODUCTS = new Set(['wirescope']);
@@ -1145,17 +1148,21 @@ const ProxyClient = {
     return this._req(base, `/_hold?${qs.toString()}`, 'POST');
   },
 
-  // Set the per-session strip LEVEL override on /_strip. level 0 = clear (revert
-  // to the proxy's global default); 1 = strip prior thinking (`&on=1`); 2 =
-  // thinking + edit-acks + failed-call stubs (`&level=2`). One mechanism, three
+  // Set the per-session strip LEVEL override on /_strip. level 0 = revert to the
+  // proxy's global default — via `action=clear` (drop the override) when that
+  // default is OFF, or an explicit `&level=0` override (explicitZero) to hold a
+  // session OFF when the global default is ON (clear would fall back to the
+  // on-default and the poller would flap). 1 = strip prior thinking (`&on=1`);
+  // 2 = thinking + edit-acks + failed-call stubs (`&level=2`). One mechanism, three
   // levels — there's no separate stale-tools endpoint. The setter is an in-memory
   // write on the proxy (no turn, no credit), so it's cheap + idempotent — safe to
   // re-fire on every relink. Body carries the resolved `effective`; branch on the
   // body, not the HTTP status.
-  async stripThinking(base, sessionId, level) {
+  async stripThinking(base, sessionId, level, explicitZero = false) {
     const qs = new URLSearchParams({ session: sessionId });
     if (level === 2) qs.set('level', '2');
     else if (level === 1) qs.set('on', '1');
+    else if (explicitZero) qs.set('level', '0');
     else qs.set('action', 'clear');
     return this._req(base, `/_strip?${qs.toString()}`, 'POST');
   },
@@ -1248,10 +1255,11 @@ class ProxyPoller {
   }
 
   // Keep the strip re-assert tracking in sync after an explicit level change
-  // (proxy:setStripLevel POSTs directly), so the next tick doesn't redundantly
-  // re-fire. level 0 → forget (the push reverted the wire to default).
+  // (proxy:setStripLevel POSTs directly), so the next tick's reconcile doesn't
+  // redundantly re-fire within the debounce window. Stamps `ts` for any level
+  // (incl. 0) so the recent-POST debounce covers a manual clear too.
   noteStripAsserted(name, sessionId, level) {
-    if ((level === 1 || level === 2) && sessionId) this.stripAsserted.set(name, { sessionId, level });
+    if (sessionId) this.stripAsserted.set(name, { sessionId, level, ts: Date.now() });
     else this.stripAsserted.delete(name);
   }
 
@@ -1351,20 +1359,36 @@ class ProxyPoller {
           }
           this.last.set(s.name, payload);
           this.manager._sendToSession(s.name, 'session-proxy', s.name, payload);
-          // Re-assert the wire state on (re)link or when the live session id rolls
-          // (/clear mints a new id; a proxy restart surfaces as unlinked→linked).
-          // Only level>=1 needs a push: level 0 == the global default (off), so
-          // a cleared-on-restart override already matches it. The asserted level
-          // is clamped to what this proxy serves (proxyMaxLevel), so a persisted
-          // L2 rides as L1 until the L2 build is live, then upgrades on its own.
+          // Reconcile the wire strip state against proxy TRUTH every tick rather
+          // than fire-once asserting. The old latch recorded "asserted" the moment
+          // a POST was dispatched and only retried on a REJECTED promise — so a
+          // silent-200, an id roll, or a single missed link left the override unset
+          // for the session's life (observed: clodex believed L2 while the proxy
+          // was L0 and shipped full thinking every turn). Now: re-POST exactly when
+          // the proxy's `configuredLevel`/`source` disagree with our persisted
+          // intent, and go quiet once they match. The asserted level is clamped to
+          // what this proxy serves (proxyMaxLevel) so a persisted L2 rides as L1 on
+          // a pre-L2 proxy and upgrades on its own. `payload.strip` is wirescope
+          // v0.6.10+ truth; absent on older proxies → skip (degrade to off).
           if (!payload.linked) {
             this.stripAsserted.delete(s.name);
-          } else if (stripCap && payload.sessionId && level >= 1) {
-            const assertLevel = Math.min(level, proxyMaxLevel);
+          } else if (stripCap && payload.sessionId && payload.strip) {
+            const desired = Math.min(level, proxyMaxLevel);
+            const ps = payload.strip;
+            // desired>=1 also requires an explicit override: a coincidental
+            // global-default match isn't a recorded, durable intent.
+            const mismatch = ps.configuredLevel !== desired
+              || (desired >= 1 && ps.source !== 'override');
             const last = this.stripAsserted.get(s.name);
-            if (!last || last.sessionId !== payload.sessionId || last.level !== assertLevel) {
-              this.stripAsserted.set(s.name, { sessionId: payload.sessionId, level: assertLevel });
-              ProxyClient.stripThinking(base, payload.sessionId, assertLevel).catch(() => {
+            const justPosted = last && last.sessionId === payload.sessionId
+              && last.level === desired && (Date.now() - (last.ts || 0)) < PROXY_STRIP_REPOST_MS;
+            if (mismatch && !justPosted) {
+              this.stripAsserted.set(s.name, { sessionId: payload.sessionId, level: desired, ts: Date.now() });
+              // desired 0: clear (drop the override → off default) normally, but
+              // POST an explicit 0-override when the global default is ON, else
+              // clear would fall back to that on-default and we'd flap every tick.
+              const explicitZero = desired === 0 && (ps.globalDefaultLevel || 0) >= 1;
+              ProxyClient.stripThinking(base, payload.sessionId, desired, explicitZero).catch(() => {
                 // Failed to push — forget so the next tick retries.
                 const cur = this.stripAsserted.get(s.name);
                 if (cur && cur.sessionId === payload.sessionId) this.stripAsserted.delete(s.name);
@@ -3612,8 +3636,10 @@ app.whenReady().then(() => {
     proxyPoller.noteStripAsserted(name, snap.sessionId, lvl);
     try {
       // One /_strip mechanism, three levels: 0 clears, 1 strips thinking, 2 adds
-      // edit-acks + failed-call stubs on top.
-      const r = await ProxyClient.stripThinking(s.proxyBase, snap.sessionId, lvl);
+      // edit-acks + failed-call stubs on top. At level 0, hold OFF with an explicit
+      // 0-override when the proxy's global default is ON (else a clear reverts to it).
+      const gd = (snap.strip && snap.strip.globalDefaultLevel) || 0;
+      const r = await ProxyClient.stripThinking(s.proxyBase, snap.sessionId, lvl, lvl === 0 && gd >= 1);
       const j = r.json || {};
       return { ok: true, status: r.status, level: lvl, effective: !!j.effective, body: j };
     } catch (e) {
