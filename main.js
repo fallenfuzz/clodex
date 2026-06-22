@@ -691,16 +691,19 @@ const DEFAULT_UI_SETTINGS = {
   wirescopeDir: '',
   wirescopePort: 7800,
   // Built-in Claude Design MCP: the CLI auto-injects the claude.ai `claude_design`
-  // connector (20 `mcp__claude_design__*` tools, ~3.5k tok schema) on every launch
-  // for entitled accounts, and there is NO honored global opt-out — only a buried
-  // per-project `disabledMcpServers` in ~/.claude.json. clodex agents are socket-IPC
-  // and load zero MCP, so the design tools are pure deadweight (~4k tok/turn cache
-  // carriage) AND a restart-flap risk (the connector late-attaching shifts the tools
-  // segment hash and busts the whole downstream prefix). We kill it at spawn with
-  // `--strict-mcp-config`, which makes the CLI ignore ALL mcp config — safe here
-  // precisely because these agents use none. ON by default; turn off if you ever
-  // wire an MCP server into a clodex agent. Claude-only (Codex has no such connector).
-  disableClaudeDesignMcp: true,
+  // connector (20 `mcp__claude_design__*` tools, ~4k tok/turn cache carriage) on
+  // every launch for entitled accounts, with no honored global opt-out. The PRIMARY
+  // fix is surgical and lives on the wire: a routed wirescope strips ONLY the design
+  // tools and keeps every real project/user MCP. This setting is just the no-proxy
+  // FALLBACK — `--strict-mcp-config`, which makes the CLI ignore ALL mcp config. That
+  // is a nuclear option: on an unrouted session sitting in a repo with a real
+  // `.mcp.json` it would silently drop those servers too, just to shed claude_design.
+  // So it is OFF by default — we don't impose the all-or-nothing flag on anyone who
+  // might have real MCPs. Turn it on only if you run unrouted clodex agents that use
+  // no MCP and want the ~4k/turn back without a proxy. Claude-only (Codex has no such
+  // connector). When routed through a strip-capable wire the gate ignores this entirely
+  // and lets the wire do the surgical strip regardless.
+  disableClaudeDesignMcp: false,
   // UI theme key (see THEMES in renderer.js). Canonical copy lives here so the
   // View > Theme menu can show the right radio; the renderer mirrors it to
   // localStorage for instant pre-paint application.
