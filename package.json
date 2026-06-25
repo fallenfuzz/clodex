@@ -4,7 +4,7 @@
   "description": "Visual multi-agent PTY manager for Claude and Codex CLIs",
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
+    "start": "ELECTRON_DISABLE_SECURITY_WARNINGS=true electron .",
     "test": "node --test",
     "postinstall": "node build/dev-rename-electron.js",
     "rebuild": "electron-rebuild",

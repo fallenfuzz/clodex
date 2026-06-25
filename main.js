@@ -3591,9 +3591,11 @@ function createWindow(workspaceId = DEFAULT_WORKSPACE_ID) {
     refreshTrayMenu();
   });
 
-  win.webContents.on('console-message', (_e, level, msg) => {
-    const labels = ['LOG', 'WARN', 'ERROR'];
-    console.log(`[RENDERER ${labels[level] || level}]`, msg);
+  // Electron 35 replaced the positional (event, level, message) args with a
+  // single event object; `level` is now a string ('info'|'warning'|'error'|
+  // 'debug'), not a numeric index.
+  win.webContents.on('console-message', (e) => {
+    console.log(`[RENDERER ${String(e.level).toUpperCase()}]`, e.message);
   });
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
