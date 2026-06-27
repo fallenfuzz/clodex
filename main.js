@@ -611,6 +611,85 @@ function readAppendBodies(stems) {
 }
 
 // ---------------------------------------------------------------------------
+// Agent memory store (spec §10 — the intent-driven MANAGEMENT layer). Each agent
+// has its own memories: discrete units as flat per-id files under
+// ~/.clodex/library/memory/<agent>/<id>.md (DB overkill at this scale; same
+// human-inspectable on-disk idiom as the prompt/agent/skill libraries). A unit
+// is YAML-ish frontmatter (id, scope, learned_at, source) + the unit text body.
+//
+// This is the MANAGEMENT path (list/remember/recall via intent), distinct from
+// the priced in-turn RETRIEVAL path (memory-as-tool-call, Part 2 — gated on
+// wirescope). Mechanism-only per settled-position #1: empty until an agent or
+// the user authors units. `last_referenced_at` is deliberately NOT written here
+// — that's wirescope's decay clock (W1), and an intent-recall is UX, not a
+// priced reference, so writing it would corrupt the decay signal.
+// ---------------------------------------------------------------------------
+
+const MEMORY_DIR = path.join(REGISTRY_DIR, 'library', 'memory');
+const MEMORY_AGENT_RE = /^[a-zA-Z0-9._-]{1,64}$/; // mirrors session name rule
+
+function serializeMemoryUnit(meta, body) {
+  const lines = ['---'];
+  for (const k of ['id', 'scope', 'learned_at', 'source']) {
+    lines.push(`${k}: ${meta[k] != null ? String(meta[k]) : ''}`);
+  }
+  lines.push('---', '', String(body ?? '').trim(), '');
+  return lines.join('\n');
+}
+
+function parseMemoryUnit(raw) {
+  const m = String(raw).match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!m) return { meta: {}, body: String(raw).trim() };
+  const meta = {};
+  for (const line of m[1].split('\n')) {
+    const kv = line.match(/^(\w+):\s?(.*)$/);
+    if (kv) meta[kv[1]] = kv[2];
+  }
+  return { meta, body: (m[2] || '').trim() };
+}
+
+const memoryStore = {
+  _dir(agent) { return path.join(MEMORY_DIR, agent); },
+  _file(agent, id) { return path.join(this._dir(agent), `${id}.md`); },
+  list(agent) {
+    if (!MEMORY_AGENT_RE.test(agent || '')) return [];
+    let files;
+    try { files = fs.readdirSync(this._dir(agent)); }
+    catch { return []; }
+    const out = [];
+    for (const f of files) {
+      if (!f.endsWith('.md')) continue;
+      try {
+        const { meta, body } = parseMemoryUnit(fs.readFileSync(path.join(this._dir(agent), f), 'utf-8'));
+        out.push({ id: meta.id || f.replace(/\.md$/, ''), scope: meta.scope || '', learned_at: meta.learned_at || '', source: meta.source || '', body });
+      } catch { /* skip garbled */ }
+    }
+    return out.sort((a, b) => String(a.learned_at).localeCompare(String(b.learned_at)));
+  },
+  remember(agent, { scope = '', text, source = '' }) {
+    if (!MEMORY_AGENT_RE.test(agent || '')) throw new Error(`invalid agent name: ${agent}`);
+    const body = String(text ?? '').trim();
+    if (!body) throw new Error('empty memory text');
+    ensureDir(this._dir(agent));
+    const id = `mem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const meta = { id, scope: String(scope || '').trim(), learned_at: new Date().toISOString(), source: source || agent };
+    fs.writeFileSync(this._file(agent, id), serializeMemoryUnit(meta, body), { mode: 0o600 });
+    return { id, ...meta, body };
+  },
+  // Resolve a recall arg: exact id first, else a case-insensitive substring
+  // match against scope+body (first by learned_at). Returns the unit or null.
+  recall(agent, arg) {
+    const units = this.list(agent);
+    const q = String(arg || '').trim();
+    if (!q) return null;
+    const exact = units.find(u => u.id === q);
+    if (exact) return exact;
+    const ql = q.toLowerCase();
+    return units.find(u => (u.scope + '\n' + u.body).toLowerCase().includes(ql)) || null;
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Per-agent defaults — standing preferences keyed by agent NAME that outlive
 // any single session. Unlike sessions.json (whose entry a kill-from-UI
 // deletes), this store survives kill/recreate, so a strip level the user picks
@@ -1038,6 +1117,12 @@ function parseIntent(rawLine) {
   const ctxMatch = cleaned.match(/^\[agent:context\s+(\S+)\]\s*$/);
   if (ctxMatch) return { type: 'context', sub: ctxMatch[1].toLowerCase() };
 
+  // `memory` = the memory-management set (list|remember|recall). Carries a body
+  // (the unit text for remember; the id/query for recall; empty for list) —
+  // captured like dm, including multi-line bodies (see _scanJsonlText).
+  const memMatch = cleaned.match(/^\[agent:memory\s+(\S+)\]\s*(.*)/s);
+  if (memMatch) return { type: 'memory', sub: memMatch[1].toLowerCase(), body: memMatch[2] };
+
   return null;
 }
 
@@ -1184,12 +1269,15 @@ Write an intent line in your response text. Intents are the ONLY channel that re
   [agent:context compact]          Compact your own context window (manage it yourself when no operator is present)
   [agent:context clear]            Clear your own history, keeping the session (heavier than compact — drops the conversation)
   [agent:context reload]           Cold-restart your own session (drops history; adopts edited config like your system prompt — rare, nuclear)
+  [agent:memory list]                  List your own saved memories
+  [agent:memory remember] <text>       Save a memory unit (text after the bracket; optional leading scope=<tag>); persists across sessions
+  [agent:memory recall] <id|query>     Surface a saved memory back into your input (by id, or a text match)
 
 Replies arrive later as separate labeled "[agent:from SENDER]" messages in your input.
 
 RULES:
 - An intent must start at column 1 on its own line. Indented or inline intents are ignored (that is how you quote one safely); a literal intent at column 1 can be escaped with a backslash: \\\\[agent:...]
-- The body of a dm runs from its intent line until the next [agent:...] line at column 1, or the end of your reply — whichever comes first. You may emit several intents in one reply (each on its own line, in order); a dm body stops where the next intent begins instead of swallowing it. Put anything meant for your user ABOVE the intents.
+- The body of a dm (or [agent:memory remember]) runs from its intent line until the next [agent:...] line at column 1, or the end of your reply — whichever comes first. You may emit several intents in one reply (each on its own line, in order); a body stops where the next intent begins instead of swallowing it. Put anything meant for your user ABOVE the intents.
 - Messages are plain text, max 64KB.`;
 
 // Build Claude's two prompt channels. The APPEND channel (returned as `append`,
@@ -2971,7 +3059,8 @@ class SessionManager {
       // body instead of being swallowed, so an agent can emit several intents
       // in one turn. An escaped \[agent:…] line is literal text, not a
       // boundary, so it stays part of the body.
-      if (intent.type === 'dm') {
+      // dm and `memory remember` carry a free-text body that may span lines.
+      if (intent.type === 'dm' || (intent.type === 'memory' && intent.sub === 'remember')) {
         const body = [];
         while (i < lines.length) {
           const next = parseIntent(lines[i]);
@@ -3044,7 +3133,58 @@ class SessionManager {
         this._handleContextIntent(session, intent.sub);
         break;
       }
+      case 'memory': {
+        // Agent self-managing its own clodex memories (spec §10). Agent sessions
+        // only — keyed by the agent's session name.
+        if (!session || !session.agentType) break;
+        this._handleMemoryIntent(session, intent.sub, intent.body || '');
+        break;
+      }
     }
+  }
+
+  // Memory MANAGEMENT intents (spec §10): list / remember / recall, keyed by the
+  // agent's own name. Replies/recalls land back in the agent's own input — list
+  // and confirmations via _injectText (a short [agent:memory] line), recall via
+  // _deliverMessage so a large unit rides the spill channel and never busts msg0
+  // (snapshot, costs a turn — same semantics as any tail push, §2.2).
+  _handleMemoryIntent(session, sub, body) {
+    const agent = session.name;
+    if (sub === 'list') {
+      const units = memoryStore.list(agent);
+      const summary = units.length
+        ? units.map(u => `• ${u.id}${u.scope ? ` [${u.scope}]` : ''}: ${u.body.split('\n')[0].slice(0, 60)}`).join('\n')
+        : '(no memories yet)';
+      this._injectText(session, `[agent:memory] ${units.length} unit(s):\n${summary}`);
+      return;
+    }
+    if (sub === 'remember') {
+      // Optional leading `scope=<token>`; the rest is the unit text.
+      let scope = '';
+      let text = body.trim();
+      const sm = text.match(/^scope=(\S+)\s+([\s\S]+)$/);
+      if (sm) { scope = sm[1]; text = sm[2]; }
+      try {
+        const unit = memoryStore.remember(agent, { scope, text, source: agent });
+        this._injectText(session, `[agent:memory] remembered ${unit.id}${scope ? ` [${scope}]` : ''}`);
+      } catch (e) {
+        this._injectText(session, `[agent:memory] could not remember: ${e.message}`);
+      }
+      return;
+    }
+    if (sub === 'recall') {
+      const unit = memoryStore.recall(agent, body);
+      if (!unit) {
+        this._injectText(session, `[agent:memory] no match for "${body.trim().slice(0, 60)}"`);
+        return;
+      }
+      // Surface as a tail message (spill if large) — the spec-prescribed recall
+      // channel (§10). A neutral 'memory' sender so the delivered label reads
+      // "[agent:from memory] (mem-id scope) …", not as a message from itself.
+      this._deliverMessage(agent, 'memory', `(${unit.id}${unit.scope ? ` ${unit.scope}` : ''})\n${unit.body}`, 'memory');
+      return;
+    }
+    this._injectText(session, `[agent:memory] unknown sub-command "${sub}" (use list|remember|recall)`);
   }
 
   // The CLI slash command each context sub-command maps to, per session type.
