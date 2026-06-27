@@ -1031,6 +1031,13 @@ function parseIntent(rawLine) {
 
   if (/^\[agent:name\]\s*$/.test(cleaned)) return { type: 'name' };
 
+  // Grouped-grammar self/system intents (spec §12): one top-level verb per
+  // CATEGORY, dispatched on a sub-command — keeps the namespace small and the
+  // IPC_PROMPT lean (one documented line per category, not per operation).
+  // `context` = the context-lifecycle set (compact|clear|reload).
+  const ctxMatch = cleaned.match(/^\[agent:context\s+(\S+)\]\s*$/);
+  if (ctxMatch) return { type: 'context', sub: ctxMatch[1].toLowerCase() };
+
   return null;
 }
 
@@ -1174,6 +1181,7 @@ Write an intent line in your response text. Intents are the ONLY channel that re
   [agent:dm TARGET] message body   Direct message to TARGET
   [agent:who]                      List online peers
   [agent:name]                     Your own wrapper name
+  [agent:context compact]          Compact your own context window (manage it yourself when no operator is present)
 
 Replies arrive later as separate labeled "[agent:from SENDER]" messages in your input.
 
@@ -3026,7 +3034,50 @@ class SessionManager {
         if (session) this._injectText(session, `[agent:name] ${senderName}`);
         break;
       }
+      case 'context': {
+        // Self-directed context-lifecycle control (operator-independence): an
+        // agent can't self-inject a slash command, but clodex owns the PTY write
+        // and can do it on the agent's behalf. Only agent sessions; bash can't.
+        if (!session || !session.agentType) break;
+        this._handleContextIntent(session, intent.sub);
+        break;
+      }
     }
+  }
+
+  // The CLI slash command each context sub-command maps to, per session type.
+  // Claude is confirmed; Codex's TUI slash set differs by version, so it's an
+  // explicit (best-effort) branch rather than a shared hardcode — an unknown
+  // command degrades to a harmless "unknown command" line in the TUI, never a
+  // broken session. `reload` is NOT a slash command (handled separately).
+  static CONTEXT_COMMANDS = {
+    claude: { compact: '/compact', clear: '/clear' },
+    codex: { compact: '/compact', clear: '/clear' },
+  };
+
+  _handleContextIntent(session, sub) {
+    if (sub === 'reload') {
+      // Tier 3: not a slash injection — a fresh respawn (resumeId omitted) to
+      // force a cold boot that re-adopts changed static config + re-includes the
+      // durable briefing. Built separately (deferred teardown + UI reattach).
+      console.warn(`[agent:context reload] from ${session.name}: not yet implemented`);
+      this._broadcast('ipc-message', {
+        type: 'context', from: session.name, to: session.name, body: 'context reload (not yet implemented)',
+      });
+      return;
+    }
+    const map = SessionManager.CONTEXT_COMMANDS[session.type];
+    const cmd = map && map[sub];
+    if (!cmd) {
+      console.warn(`[agent:context ${sub}] from ${session.name}: unsupported for type ${session.type}`);
+      return;
+    }
+    // Inject the literal slash command as a turn — same PTY-write path as any
+    // other injection (_injectText defers the Enter off the death window).
+    this._injectText(session, cmd);
+    this._broadcast('ipc-message', {
+      type: 'context', from: session.name, to: session.name, body: `context ${sub} → ${cmd}`,
+    });
   }
 
   // --- Message delivery ---
