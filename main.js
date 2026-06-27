@@ -1182,6 +1182,7 @@ Write an intent line in your response text. Intents are the ONLY channel that re
   [agent:who]                      List online peers
   [agent:name]                     Your own wrapper name
   [agent:context compact]          Compact your own context window (manage it yourself when no operator is present)
+  [agent:context clear]            Clear your own history, keeping the session (heavier than compact — drops the conversation)
 
 Replies arrive later as separate labeled "[agent:from SENDER]" messages in your input.
 
