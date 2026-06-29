@@ -184,6 +184,10 @@ const TURN_COMPLETE_TIMEOUT = 1000; // ms
 const LONG_TEXT_THRESHOLD = 200;
 const LONG_TEXT_DELAY = 1000;
 const SHORT_TEXT_DELAY = 50;
+// After the compact-summary entry lands, wait this long before injecting the
+// self-compact continuation turn — lets the CLI finish settling its post-compact
+// prompt so the injected turn isn't swallowed by the in-progress redraw.
+const COMPACT_CONTINUATION_DELAY = 1500;
 
 // Crash-safe file write: same-dir temp → fsync contents → atomic rename →
 // fsync the parent dir. A power loss or interrupted write leaves the previous
@@ -1113,9 +1117,15 @@ function parseIntent(rawLine) {
   // Grouped-grammar self/system intents (spec §12): one top-level verb per
   // CATEGORY, dispatched on a sub-command — keeps the namespace small and the
   // IPC_PROMPT lean (one documented line per category, not per operation).
-  // `context` = the context-lifecycle set (compact|clear|reload).
-  const ctxMatch = cleaned.match(/^\[agent:context\s+(\S+)\]\s*$/);
-  if (ctxMatch) return { type: 'context', sub: ctxMatch[1].toLowerCase() };
+  // `context` = the context-lifecycle set (compact|clear|reload). compact (and,
+  // later, reload) may carry an OPTIONAL continuation/handoff body after the
+  // bracket — native /compact parks waiting for input, so a self-fired compact
+  // injects this body afterwards to keep working (clear ignores any body). The
+  // col-1 `^` anchor still rejects backticked/inline mentions; only a genuinely
+  // bare emission reaches here, so allowing trailing text doesn't weaken the
+  // guardrail. Body capture (incl. multi-line) is in _scanJsonlText, like dm.
+  const ctxMatch = cleaned.match(/^\[agent:context\s+(\S+)\]\s*(.*)/s);
+  if (ctxMatch) return { type: 'context', sub: ctxMatch[1].toLowerCase(), body: ctxMatch[2] };
 
   // `memory` = the memory-management set (list|remember|recall). Carries a body
   // (the unit text for remember; the id/query for recall; empty for list) —
@@ -1285,7 +1295,7 @@ Write an intent line in your response text. Intents are the ONLY channel that re
   [agent:dm TARGET] message body   Direct message to TARGET
   [agent:who]                      List online peers
   [agent:name]                     Your own wrapper name
-  [agent:context compact]          Compact your own context window (manage it yourself when no operator is present)
+  [agent:context compact]          Compact your own context window (manage it yourself when no operator is present). Optionally follow with text on the same line / following lines — it's injected as your first turn AFTER the compact so you keep working instead of stalling; omit it and you'll get a generic "continue your task" nudge.
   [agent:context clear]            Clear your own history, keeping the session (heavier than compact — drops the conversation)
   [agent:context reload]           Cold-restart your own session (drops history; adopts edited config like your system prompt — rare, nuclear)
   [agent:memory list]                  List your own saved memories
@@ -1299,6 +1309,13 @@ RULES:
 - An intent must start at column 1 on its own line. Indented or inline intents are ignored (that is how you quote one safely); a literal intent at column 1 can be escaped with a backslash: \\\\[agent:...]
 - The body of a dm (or [agent:memory remember]) runs from its intent line until the next [agent:...] line at column 1, or the end of your reply — whichever comes first. You may emit several intents in one reply (each on its own line, in order); a body stops where the next intent begins instead of swallowing it. Put anything meant for your user ABOVE the intents.
 - Messages are plain text, max 64KB.`;
+
+// Injected as the first turn after a self-fired [agent:context compact] once the
+// compact-summary lands, when the agent supplied no continuation body of its own.
+// Generic on purpose — the summarized conversation is fully present post-compact,
+// so even a bare nudge resumes against real context.
+const DEFAULT_COMPACT_CONTINUATION =
+  'Your context was just compacted. Review the summary above and continue with your current task.';
 
 // Build Claude's two prompt channels. The APPEND channel (returned as `append`,
 // written to a generated file → --append-system-prompt-file) always leads with
@@ -2395,11 +2412,12 @@ function extractText(obj) {
 }
 
 class JsonlWatcher {
-  constructor(name, onText, onSessionId, onActivity) {
+  constructor(name, onText, onSessionId, onActivity, onCompactSummary) {
     this._name = name;
     this._onText = onText;
     this._onSessionId = onSessionId || (() => {});
     this._onActivity = onActivity || (() => {});
+    this._onCompactSummary = onCompactSummary || (() => {});
     this._stopped = false;
     this._timer = null;
     this._fd = null;
@@ -2492,6 +2510,17 @@ class JsonlWatcher {
       if (!trimmed) continue;
       let obj;
       try { obj = JSON.parse(trimmed); } catch { continue; }
+
+      // Compact boundary: Claude writes a user entry with isCompactSummary:true
+      // when /compact finishes (in-place, same sessionId, appended to this same
+      // transcript). It's the clean trigger for the compact-continuation nudge —
+      // by the time it lands the summarized conversation is back and the CLI is
+      // ready for input. Flush any pending turn first, then signal.
+      if (obj.isCompactSummary === true) {
+        if (this._pendingText) this._flushPending();
+        try { this._onCompactSummary(); } catch {}
+        continue;
+      }
 
       const text = extractText(obj);
       if (text) {
@@ -2919,6 +2948,21 @@ class SessionManager {
             } catch {}
           }
         },
+        () => {
+          // Compact summary landed. If this compact was self-fired via
+          // [agent:context compact], a continuation was stashed — inject it now
+          // as the first post-compact turn so the agent keeps working instead of
+          // parking. One-shot: clear the stash so a later manual /compact (no
+          // stash) never replays it. Defer so the inject lands after the summary
+          // write fully settles in the PTY.
+          const cont = session._compactContinuation;
+          if (cont) {
+            session._compactContinuation = null;
+            setTimeout(() => {
+              if (!session._dead) this._injectText(session, cont);
+            }, COMPACT_CONTINUATION_DELAY);
+          }
+        },
       );
       session.watcher.start();
     }
@@ -3079,8 +3123,12 @@ class SessionManager {
       // body instead of being swallowed, so an agent can emit several intents
       // in one turn. An escaped \[agent:…] line is literal text, not a
       // boundary, so it stays part of the body.
-      // dm and `memory remember` carry a free-text body that may span lines.
-      if (intent.type === 'dm' || (intent.type === 'memory' && intent.sub === 'remember')) {
+      // dm and `memory remember` carry a free-text body that may span lines;
+      // `context compact` (and, later, reload) carry an optional continuation
+      // body with the same multi-line capture semantics.
+      if (intent.type === 'dm'
+        || (intent.type === 'memory' && intent.sub === 'remember')
+        || (intent.type === 'context' && (intent.sub === 'compact' || intent.sub === 'reload'))) {
         const body = [];
         while (i < lines.length) {
           const next = parseIntent(lines[i]);
@@ -3150,7 +3198,7 @@ class SessionManager {
         // agent can't self-inject a slash command, but clodex owns the PTY write
         // and can do it on the agent's behalf. Only agent sessions; bash can't.
         if (!session || !session.agentType) break;
-        this._handleContextIntent(session, intent.sub);
+        this._handleContextIntent(session, intent.sub, intent.body || '');
         break;
       }
       case 'memory': {
@@ -3291,7 +3339,7 @@ class SessionManager {
     codex: { compact: '/compact', clear: '/clear' },
   };
 
-  _handleContextIntent(session, sub) {
+  _handleContextIntent(session, sub, body = '') {
     if (sub === 'reload') {
       // Tier 3 (rare nuclear option): not a slash injection — a fresh respawn
       // with resumeId OMITTED to force a cold boot. Its real purpose is adopting
@@ -3354,6 +3402,18 @@ class SessionManager {
     if (!cmd) {
       console.warn(`[agent:context ${sub}] from ${session.name}: unsupported for type ${session.type}`);
       return;
+    }
+    // Native /compact compacts then PARKS waiting for input (verified from the
+    // transcript: nothing fires between the compact-summary entry and the next
+    // injected turn). So for a SELF-FIRED compact, stash a continuation to inject
+    // once the summary lands — without it an operator-independent agent compacts
+    // and stalls forever. The flag is set ONLY on this intent path, so a human's
+    // manual /compact (local command) never triggers a nudge. The actual inject
+    // is driven by the JsonlWatcher's onCompactSummary callback (the clean
+    // trigger — the summarized conversation is back and ready by then).
+    if (sub === 'compact') {
+      const cont = (body && body.trim()) ? body.trim() : DEFAULT_COMPACT_CONTINUATION;
+      session._compactContinuation = cont;
     }
     // Inject the literal slash command as a turn — same PTY-write path as any
     // other injection (_injectText defers the Enter off the death window).
