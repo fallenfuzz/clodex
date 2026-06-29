@@ -188,6 +188,10 @@ const SHORT_TEXT_DELAY = 50;
 // self-compact continuation turn — lets the CLI finish settling its post-compact
 // prompt so the injected turn isn't swallowed by the in-progress redraw.
 const COMPACT_CONTINUATION_DELAY = 1500;
+// After a reloaded session first reports a sessionId (CLI booted), wait this long
+// before injecting the handoff — a cold boot's input loop settles slower than a
+// post-compact redraw, so give it more room than COMPACT_CONTINUATION_DELAY.
+const RELOAD_CONTINUATION_DELAY = 2500;
 
 // Crash-safe file write: same-dir temp → fsync contents → atomic rename →
 // fsync the parent dir. A power loss or interrupted write leaves the previous
@@ -1297,7 +1301,7 @@ Write an intent line in your response text. Intents are the ONLY channel that re
   [agent:name]                     Your own wrapper name
   [agent:context compact]          Compact your own context window (manage it yourself when no operator is present). Optionally follow with text on the same line / following lines — it's injected as your first turn AFTER the compact so you keep working instead of stalling; omit it and you'll get a generic "continue your task" nudge.
   [agent:context clear]            Clear your own history, keeping the session (heavier than compact — drops the conversation)
-  [agent:context reload]           Cold-restart your own session (drops history; adopts edited config like your system prompt — rare, nuclear)
+  [agent:context reload] <handoff> Cold-restart your own session (drops ALL history; adopts edited config like your system prompt — rare, nuclear). The handoff body is REQUIRED: it's the only thing your fresh self will know, injected as turn-one — brief it on what you were doing and what to do next. A reload with no body is refused.
   [agent:memory list]                  List your own saved memories
   [agent:memory remember] <text>       Save a memory unit (text after the bracket; optional leading scope=<tag>); persists across sessions
   [agent:memory recall] <id|query>     Surface a saved memory back into your input (by id, or a text match)
@@ -3351,6 +3355,21 @@ class SessionManager {
       const name = session.name;
       const entry = persistence.get(name);
       if (!entry) return;
+      // Reload-handoff: a cold boot is AMNESIAC, so the handoff body is MANDATORY
+      // — it's the previous self's briefing, injected as turn-one in the fresh
+      // process. Without it the agent reloads and cold-parks forever. Reject
+      // BEFORE killing anything, so a body-less reload leaves the live session
+      // fully intact (mandatory means mandatory; refusing is the safe failure).
+      const handoff = (body || '').trim();
+      if (!handoff) {
+        this._injectText(session,
+          '[agent:context] reload needs a handoff body — '
+          + 'reload drops all history, so the fresh process only knows what you '
+          + 'pass it. Re-fire as `[agent:context reload] <briefing for your next '
+          + 'self: what you were doing, what to do next>`. Reload aborted; '
+          + 'this session is untouched.');
+        return;
+      }
       this._broadcast('ipc-message', {
         type: 'context', from: name, to: name, body: 'context reload → fresh restart',
       });
@@ -3390,6 +3409,14 @@ class SessionManager {
           this._sendToSession(name, 'session:context-action', {
             action: 'reattach', name, type: entry.type, cwd: entry.cwd,
           });
+          // Inject the mandatory handoff as turn-one once the FRESH process is
+          // listening. reattach (above) is a UI signal fired immediately after
+          // create() — too early; the new CLI's input loop isn't up yet. The
+          // real readiness gate is the new watcher reporting a sessionId (cold
+          // boot mints one when the SessionStart hook repoints the symlink =
+          // CLI booted). _injectReloadHandoff polls for it, then settles + injects.
+          const fresh = this.sessions.get(name);
+          if (fresh) this._injectReloadHandoff(fresh, handoff);
         } catch (err) {
           console.error(`[agent:context reload] ${name} failed:`, err.message);
           persistence.upsert(entry); // never let a failed respawn eat the entry
@@ -3421,6 +3448,28 @@ class SessionManager {
     this._broadcast('ipc-message', {
       type: 'context', from: session.name, to: session.name, body: `context ${sub} → ${cmd}`,
     });
+  }
+
+  // Inject a reloaded session's mandatory handoff body as turn-one, once the
+  // FRESH process is actually listening. Same-process restart, so the body rides
+  // a closure variable across kill→create — no disk needed. Readiness gate: a
+  // cold boot (resumeId=null) starts with session.sessionId=null; the new
+  // JsonlWatcher sets it when the SessionStart hook repoints the symlink, which
+  // means the CLI has booted. Poll for that, then a settle delay so the input
+  // loop is up, then inject. If the session dies or never reports a sessionId
+  // (timeout), bail rather than inject blind into a half-dead PTY.
+  async _injectReloadHandoff(session, handoff, timeoutMs = 30000) {
+    const start = Date.now();
+    while (!session.sessionId) {
+      if (session._dead) return;
+      if (Date.now() - start > timeoutMs) {
+        console.error(`[agent:context reload] ${session.name}: fresh session never reported a sessionId; handoff not injected`);
+        return;
+      }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    await new Promise(r => setTimeout(r, RELOAD_CONTINUATION_DELAY));
+    if (!session._dead) this._injectText(session, handoff);
   }
 
   // --- Message delivery ---
