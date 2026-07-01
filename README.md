@@ -47,7 +47,7 @@ This removes macOS's quarantine flag, which is added to anything downloaded from
 
 ## Requirements
 
-- macOS 10.12+
+- Apple Silicon Mac (M1 or later), macOS 12 (Monterey) or later (Intel: build from source, also macOS 12+)
 - [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) (`claude` in PATH) — for Claude sessions
 - [Codex CLI](https://github.com/openai/codex) (`codex` in PATH) — for Codex sessions
 
