@@ -72,26 +72,76 @@ test('flat cache_creation total is used when the TTL split is absent', () => {
   assert.strictEqual(wt.payload('alice').context.inputTokens, 60);
 });
 
-test('diffPoll: cost delta pct + warmth verdict, deduped across identical ticks', () => {
+test('diffPoll: epoch baseline — persisted poll totals vs zero-start wire ledger compare as increments', () => {
   const logs = [];
   const wt = new WireTelemetry({
     warmth: warmthStub({ 'sid-1': { found: true, warm: true, remaining_s: 200, ttl_s: 300 } }),
     log: (r) => logs.push(r),
   });
-  wt.noteTurn(mainTurn({ sessionTotals: { requests: 10, est_usd: 0.13, turns: 2, refusals: 0 } }));
-  const poll = { linked: true, sessionId: 'sid-1', cost: { usd: 0.1301, requests: 10 }, turns: 2, refusals: 0, context: { inputTokens: 40600 }, warmth: { state: 'warm' } };
-  wt.diffPoll('alice', poll);
-  wt.diffPoll('alice', poll); // identical → deduped
-  assert.strictEqual(logs.length, 1);
-  const d = logs[0];
-  assert.strictEqual(d.type, 'wire-telemetry-diff');
+  // Wire came up mid-session: wire ledger at 1 request / $0.02; poll carries
+  // the persisted lifetime totals ($113.98 / 392 — the live 14:38 shape).
+  wt.noteTurn(mainTurn({ sessionTotals: { requests: 1, est_usd: 0.02, turns: 1, refusals: 0 } }));
+  const poll = (usd, req, turns) => ({
+    linked: true, sessionId: 'sid-1', cost: { usd, requests: req }, turns,
+    refusals: 0, context: { inputTokens: 40600 }, warmth: { state: 'warm' },
+  });
+  wt.diffPoll('alice', poll(113.98, 392, 50));
+  const first = logs[0];
+  assert.ok(first.baselined);                         // epoch anchor tick
+  assert.strictEqual(first.cost.poll_inc, 0);         // increments start at 0…
+  assert.strictEqual(first.cost.wire_inc, 0);
+  assert.strictEqual(first.cost.delta_pct, undefined); // …so no bogus 100%
+  // Both sides advance by the same turn: increments agree.
+  wt.noteTurn(mainTurn({ sessionTotals: { requests: 2, est_usd: 0.05, turns: 2, refusals: 0 } }));
+  wt.diffPoll('alice', poll(114.01, 393, 51));
+  const d = logs[1];
+  assert.strictEqual(d.baselined, undefined);
+  assert.strictEqual(d.cost.poll_inc, 0.03);
+  assert.strictEqual(d.cost.wire_inc, 0.03);
+  assert.strictEqual(d.cost.delta_pct, 0);
+  assert.deepStrictEqual(d.requests, { poll_inc: 1, wire_inc: 1 });
+  assert.deepStrictEqual(d.turns, { poll_inc: 1, wire_inc: 1 });
   assert.ok(d.session_match);
-  assert.ok(d.cost.delta_pct < 1);   // reviewer condition shape
-  assert.ok(d.warmth.match);         // reviewer condition shape
-  // a moved value logs again
-  wt.noteTurn(mainTurn({ sessionTotals: { requests: 11, est_usd: 0.14, turns: 3, refusals: 0 } }));
-  wt.diffPoll('alice', poll);
+  assert.ok(d.warmth.match);
+  // dedupe still holds on an unchanged tick
+  wt.diffPoll('alice', poll(114.01, 393, 51));
   assert.strictEqual(logs.length, 2);
+});
+
+test('diffPoll: session rotation on either side re-baselines', () => {
+  const logs = [];
+  const wt = new WireTelemetry({ log: (r) => logs.push(r) });
+  wt.noteTurn(mainTurn({ sessionTotals: { requests: 1, est_usd: 0.02, turns: 1, refusals: 0 } }));
+  const poll = { linked: true, sessionId: 'sid-1', cost: { usd: 10, requests: 100 }, turns: 9, refusals: 0, context: {}, warmth: null };
+  wt.diffPoll('alice', poll);
+  assert.ok(logs[0].baselined);
+  // /clear rotates the wire-side session → fresh epoch, not a giant negative increment
+  wt.noteTurn(mainTurn({ sessionId: 'sid-2', sessionTotals: { requests: 1, est_usd: 0.01, turns: 1, refusals: 0 } }));
+  wt.diffPoll('alice', { ...poll, sessionId: 'sid-2', cost: { usd: 10.01, requests: 101 } });
+  const d = logs[1];
+  assert.ok(d.baselined);
+  assert.strictEqual(d.cost.poll_inc, 0);
+  assert.strictEqual(d.cost.wire_inc, 0);
+});
+
+test('diffPoll: warmth pending (no wire stamp yet) is not a mismatch', () => {
+  const logs = [];
+  const wt = new WireTelemetry({ warmth: warmthStub({}), log: (r) => logs.push(r) });
+  wt.noteTurn(mainTurn());
+  wt.diffPoll('alice', { linked: true, sessionId: 'sid-1', cost: { usd: 1, requests: 1 }, turns: 1, refusals: 0, context: {}, warmth: { state: 'warm' } });
+  assert.deepStrictEqual(logs[0].warmth, { poll: 'warm', wire: null, pending: true });
+});
+
+test('diffPoll: pre-main-line wire (no sessionId) logs wire_seen only — no false mismatches', () => {
+  const logs = [];
+  const wt = new WireTelemetry({ log: (r) => logs.push(r) });
+  // Only a side-call seen so far: totals exist but no main-line identity.
+  wt.noteTurn(mainTurn({ sideCall: true, sessionTotals: { requests: 1, est_usd: 0.001, turns: 0, refusals: 0 } }));
+  wt.diffPoll('alice', { linked: true, sessionId: 'sid-1', cost: { usd: 5, requests: 50 }, turns: 5, refusals: 0, context: {}, warmth: { state: 'warm' } });
+  assert.strictEqual(logs.length, 1);
+  assert.strictEqual(logs[0].wire_seen, true);
+  assert.strictEqual(logs[0].session_match, undefined); // gated, not false
+  assert.strictEqual(logs[0].cost, undefined);
 });
 
 test('diffPoll: unlinked/null poll is silent; unseen agent logs wire_seen:false', () => {

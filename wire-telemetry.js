@@ -35,12 +35,30 @@
 
 const { isSubagentRole } = require('./wire/role');
 
+// The four cumulative totals subject to epoch baselining (see diffPoll).
+function snapCumulative(p) {
+  return {
+    cost: p.cost && typeof p.cost.usd === 'number' ? p.cost.usd : null,
+    requests: p.cost && typeof p.cost.requests === 'number' ? p.cost.requests : null,
+    turns: typeof p.turns === 'number' ? p.turns : null,
+    refusals: typeof p.refusals === 'number' ? p.refusals : 0,
+  };
+}
+
+// Increment since baseline; null when either endpoint is unobservable.
+// round6 mirrors billing.js — increments of two round6 values stay exact.
+function inc(now, base) {
+  if (now == null || base == null) return null;
+  return Math.round((now - base) * 1e6) / 1e6;
+}
+
 class WireTelemetry {
   constructor({ warmth = null, log = () => {} } = {}) {
     this._warmth = warmth;
     this._log = log;
     this._agents = new Map();   // name -> { sessionId, model, totals, inputTokens, ts }
     this._lastDiff = new Map(); // name -> JSON of last logged diff (dedupe)
+    this._baseline = new Map(); // name -> co-observation epoch base (see diffPoll)
   }
 
   // Wire listener body. Never throws.
@@ -103,29 +121,63 @@ class WireTelemetry {
   // Called by ProxyPoller right after it emits the live payload. Logs one
   // wire-telemetry-diff record per material change (consecutive identical
   // diffs are deduped — the poller ticks every 5s, the log shouldn't).
+  //
+  // EPOCH BASELINE (live finding, first shadow run 2026-07-02): the poll
+  // side reports wirescope's PERSISTED session-lifetime totals while the
+  // in-process wire's ledger starts at zero on app restart — compared raw,
+  // every restarted session reads delta_pct:100 forever and the 1% cutover
+  // condition is unsatisfiable by construction. So cumulative fields
+  // (cost/requests/turns/refusals) are baselined per (agent, poll-session,
+  // wire-session) at the first tick both sides are observable, and the
+  // record compares INCREMENTS since that tick — the co-observed window is
+  // the only stretch where both ledgers saw the same traffic. A session
+  // rotation on either side re-baselines (rec.baselined marks those ticks;
+  // increments are trivially 0 — readouts skip them). input_tokens is
+  // last-turn state, not cumulative: compared raw, no baseline.
   diffPoll(name, poll) {
     try {
       if (!poll || !poll.linked) return; // nothing to compare against
       const wire = this.payload(name);
       const rec = { type: 'wire-telemetry-diff', agent: name, wire_seen: !!wire };
-      if (wire) {
-        rec.session_match = !!poll.sessionId && poll.sessionId === wire.sessionId;
-        const pUsd = poll.cost && typeof poll.cost.usd === 'number' ? poll.cost.usd : null;
-        const wUsd = wire.cost && typeof wire.cost.usd === 'number' ? wire.cost.usd : null;
-        rec.cost = { poll: pUsd, wire: wUsd };
-        if (pUsd != null && wUsd != null && pUsd > 0) {
-          rec.cost.delta_pct = Math.round(Math.abs(wUsd - pUsd) / pUsd * 10000) / 100;
+      // Gate on the wire having seen a MAIN-LINE turn (sessionId set): before
+      // that, identity/warmth are structurally unknowable (nothing stamped
+      // since the wire came up) and would read as false mismatches.
+      if (wire && wire.sessionId) {
+        let b = this._baseline.get(name);
+        if (!b || b.pollSession !== poll.sessionId || b.wireSession !== wire.sessionId) {
+          b = {
+            pollSession: poll.sessionId, wireSession: wire.sessionId,
+            poll: snapCumulative(poll), wire: snapCumulative(wire),
+          };
+          this._baseline.set(name, b);
+          // Anchor record: which epoch this baseline binds. Also keeps a
+          // re-baseline (session rotation) from deduping against the previous
+          // anchor — increments are 0 on both, only the ids differ.
+          rec.baselined = true;
+          rec.sessions = { poll: poll.sessionId || null, wire: wire.sessionId };
         }
-        rec.requests = { poll: poll.cost ? poll.cost.requests : null, wire: wire.cost.requests };
-        rec.turns = { poll: poll.turns, wire: wire.turns };
-        rec.refusals = { poll: poll.refusals, wire: wire.refusals };
+        rec.session_match = !!poll.sessionId && poll.sessionId === wire.sessionId;
+        const pNow = snapCumulative(poll);
+        const wNow = snapCumulative(wire);
+        for (const f of ['cost', 'requests', 'turns', 'refusals']) {
+          const pInc = inc(pNow[f], b.poll[f]);
+          const wInc = inc(wNow[f], b.wire[f]);
+          rec[f] = { poll_inc: pInc, wire_inc: wInc };
+          if (f === 'cost' && pInc != null && wInc != null && pInc > 0) {
+            rec.cost.delta_pct = Math.round(Math.abs(wInc - pInc) / pInc * 10000) / 100;
+          }
+        }
         rec.input_tokens = {
           poll: poll.context ? poll.context.inputTokens : null,
           wire: wire.context.inputTokens,
         };
         const pWarm = poll.warmth ? poll.warmth.state : null;
         const wWarm = wire.warmth ? wire.warmth.state : null;
-        rec.warmth = { poll: pWarm, wire: wWarm, match: pWarm === wWarm };
+        // No wire stamp yet (first cache-confirmed turn since wire-up still
+        // pending) → pending, not a mismatch; self-heals on the next turn.
+        rec.warmth = wWarm == null
+          ? { poll: pWarm, wire: null, pending: true }
+          : { poll: pWarm, wire: wWarm, match: pWarm === wWarm };
       }
       const key = JSON.stringify(rec);
       if (this._lastDiff.get(name) === key) return;
@@ -138,7 +190,9 @@ class WireTelemetry {
   prune(liveNames) {
     try {
       for (const name of this._agents.keys()) {
-        if (!liveNames.has(name)) { this._agents.delete(name); this._lastDiff.delete(name); }
+        if (!liveNames.has(name)) {
+          this._agents.delete(name); this._lastDiff.delete(name); this._baseline.delete(name);
+        }
       }
     } catch { /* never breaks the tick */ }
   }
