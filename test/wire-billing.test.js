@@ -21,6 +21,11 @@ test('priceFor: longest prefix wins (opus-4-8 must not hit legacy opus-4)', () =
   assert.equal(priceFor('claude-opus-4-8-20260115').in, 5.0);
   assert.equal(priceFor('claude-opus-4-1-20250805').in, 15.0); // legacy pricing
   assert.equal(priceFor('claude-fable-5').in, 10.0);
+  // sonnet-5 INTRO rate (through 2026-08-31; wirescope msg-88121-2);
+  // sonnet-4.x must still fall through to the sonnet-4 entry.
+  assert.equal(priceFor('claude-sonnet-5').in, 2.0);
+  assert.equal(priceFor('claude-sonnet-5-20260601').cache_read, 0.20);
+  assert.equal(priceFor('claude-sonnet-4-5-20250929').in, 3.0);
   assert.equal(priceFor('unknown-model'), null);
   assert.equal(priceFor(null), null);
   assert.equal(priceFor('gpt-5.4-mini', PRICES_OPENAI).out, 4.5);

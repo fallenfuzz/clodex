@@ -27,6 +27,11 @@
 // NOTE: opus REPRICED at 4.5 — $15/$75 is 4.0/4.1 ONLY; 4.5+ is $5/$25.
 const PRICES = {
   'claude-fable-5':  { in: 10.0, out: 50.0, cache_write_5m: 12.5,  cache_write_1h: 20.0, cache_read: 1.00 },
+  // ⚠️ FLIP ON 2026-09-01 (lock-step with proxylab billing.py — same
+  // commit day, or the golden gate breaks on the cutover): sonnet-5 intro
+  // pricing ends 2026-08-31; standard = in 3.0, out 15.0, w5m 3.75,
+  // w1h 6.0, read 0.30. Date-aware schedule (option 2) planned before then.
+  'claude-sonnet-5': { in: 2.0,  out: 10.0, cache_write_5m: 2.50,  cache_write_1h: 4.0,  cache_read: 0.20 },
   'claude-opus-4-5': { in: 5.0,  out: 25.0, cache_write_5m: 6.25,  cache_write_1h: 10.0, cache_read: 0.50 },
   'claude-opus-4-6': { in: 5.0,  out: 25.0, cache_write_5m: 6.25,  cache_write_1h: 10.0, cache_read: 0.50 },
   'claude-opus-4-7': { in: 5.0,  out: 25.0, cache_write_5m: 6.25,  cache_write_1h: 10.0, cache_read: 0.50 },
