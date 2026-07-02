@@ -202,13 +202,17 @@ const TURN_COMPLETE_TIMEOUT = 1000; // ms
 // its role via per-agent upstream chaining. Default OFF: zero behavior
 // change without the env flag.
 const WIRE_SHADOW = process.env.CLODEX_WIRE_SHADOW === '1';
-// W2 cutover preview: overlay the wire-carried telemetry fields (cost/turns/
+// W2 telemetry cutover: overlay the wire-carried fields (cost/turns/
 // refusals/inputTokens/warmth + hold ownership) onto each poll payload before
 // it reaches the renderer (WireTelemetry.overlay). Requires WIRE_SHADOW (the
 // wire must be up). The shadow diff keeps comparing the RAW poll record, so
-// validation evidence stays honest while the overlay is live. Default OFF
-// until the live-shadow readout passes the reviewer gate (CLODEUX-PLAN.md).
-const WIRE_TELEMETRY_LIVE = process.env.CLODEX_WIRE_TELEMETRY === '1';
+// validation evidence stays honest while the overlay is live. Defaults ON
+// wherever the wire is up — the live-shadow readout passed the reviewer gate
+// (0% worst cost delta, 47/47 warmth, CLODEUX-PLAN.md 2026-07-02 evening);
+// CLODEX_WIRE_TELEMETRY=0 is the explicit revert to poll-only display.
+const WIRE_TELEMETRY_LIVE = process.env.CLODEX_WIRE_TELEMETRY != null
+  ? process.env.CLODEX_WIRE_TELEMETRY === '1'
+  : WIRE_SHADOW;
 const LONG_TEXT_THRESHOLD = 200;
 const LONG_TEXT_DELAY = 1000;
 const SHORT_TEXT_DELAY = 50;
