@@ -1048,15 +1048,16 @@ const DEFAULT_UI_SETTINGS = {
   // the opt-out; missing python3 degrades to unrouted sessions, no breakage.
   // Users who saved prefs before the flip keep their persisted choice.
   proxyEnabled: true,
-  // 7801, NOT wirescope's conventional 7800: a standalone wirescope on this
-  // machine (e.g. serving another agentic system) owns 7800, and Clodex's
-  // managed instance must neither adopt it nor mix ledgers with it. Users
-  // with persisted settings keep whatever they chose.
-  proxyUrl: 'http://127.0.0.1:7801',
+  // 7800 — wirescope's conventional port, ON PURPOSE (revisited 2026-07-03):
+  // since the managed instance detaches and survives GUI restarts it is a
+  // machine-level service, so OTHER agentic systems on this machine sharing
+  // it is a feature, not contamination. Detect-first adoption still means an
+  // already-running 7800 wins and we never double-spawn.
+  proxyUrl: 'http://127.0.0.1:7800',
   // wirescope source override: empty = the vendored copy bundled with Clodex;
   // a power user can point at their own checkout (settings-file-only, no UI).
   wirescopeDir: '',
-  wirescopePort: 7801,
+  wirescopePort: 7800,
   // Cold-resume compaction: when a parked session is resumed (GUI relaunch =
   // cold by construction), ask wirescope to BAKE its transcript down to the
   // safe-to-drop set before --resume. The re-cache is unavoidable on a cold
@@ -2090,13 +2091,13 @@ class WirescopeSupervisor {
       const u = new URL(s.proxyUrl);
       const port = parseInt(u.port || (u.protocol === 'https:' ? '443' : '80'), 10);
       return (u.hostname === '127.0.0.1' || u.hostname === 'localhost')
-        && port === (s.wirescopePort || 7801);
+        && port === (s.wirescopePort || 7800);
     } catch { return false; }
   }
 
   async status() {
     const s = uiSettings.get();
-    const port = s.wirescopePort || 7801;
+    const port = s.wirescopePort || 7800;
     const base = this._base(port);
     const src = this._source();
     const probe = await ProxyClient.probe(base).catch(() => null);
@@ -2130,7 +2131,7 @@ class WirescopeSupervisor {
   // spawning a duplicate. Spawn errors surface asynchronously via status().
   async start() {
     const s = uiSettings.get();
-    const port = s.wirescopePort || 7801;
+    const port = s.wirescopePort || 7800;
     const base = this._base(port);
 
     // Detect-first: already serving here? Reattach if it's our survivor from
@@ -2177,7 +2178,7 @@ class WirescopeSupervisor {
     try {
       const rec = JSON.parse(fs.readFileSync(this._pidFile(), 'utf8'));
       const s = uiSettings.get();
-      if (!rec || !rec.pid || rec.port !== (s.wirescopePort || 7801)) return null;
+      if (!rec || !rec.pid || rec.port !== (s.wirescopePort || 7800)) return null;
       process.kill(rec.pid, 0); // throws if gone
       return rec.pid;
     } catch { return null; }
