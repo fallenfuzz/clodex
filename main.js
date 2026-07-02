@@ -1048,11 +1048,15 @@ const DEFAULT_UI_SETTINGS = {
   // the opt-out; missing python3 degrades to unrouted sessions, no breakage.
   // Users who saved prefs before the flip keep their persisted choice.
   proxyEnabled: true,
-  proxyUrl: 'http://127.0.0.1:7800',
+  // 7801, NOT wirescope's conventional 7800: a standalone wirescope on this
+  // machine (e.g. serving another agentic system) owns 7800, and Clodex's
+  // managed instance must neither adopt it nor mix ledgers with it. Users
+  // with persisted settings keep whatever they chose.
+  proxyUrl: 'http://127.0.0.1:7801',
   // wirescope source override: empty = the vendored copy bundled with Clodex;
   // a power user can point at their own checkout (settings-file-only, no UI).
   wirescopeDir: '',
-  wirescopePort: 7800,
+  wirescopePort: 7801,
   // Cold-resume compaction: when a parked session is resumed (GUI relaunch =
   // cold by construction), ask wirescope to BAKE its transcript down to the
   // safe-to-drop set before --resume. The re-cache is unavoidable on a cold
@@ -2086,17 +2090,20 @@ class WirescopeSupervisor {
       const u = new URL(s.proxyUrl);
       const port = parseInt(u.port || (u.protocol === 'https:' ? '443' : '80'), 10);
       return (u.hostname === '127.0.0.1' || u.hostname === 'localhost')
-        && port === (s.wirescopePort || 7800);
+        && port === (s.wirescopePort || 7801);
     } catch { return false; }
   }
 
   async status() {
     const s = uiSettings.get();
-    const port = s.wirescopePort || 7800;
+    const port = s.wirescopePort || 7801;
     const base = this._base(port);
     const src = this._source();
     const probe = await ProxyClient.probe(base).catch(() => null);
-    const alive = !!(this.child && this.child.exitCode === null && !this.child.killed);
+    // "Ours" = the child of this launch, or a surviving instance from a
+    // previous launch (pidfile) — both count as managed, not external.
+    const alive = !!(this.child && this.child.exitCode === null && !this.child.killed)
+      || !!this._survivorPid();
 
     let state;
     if (probe) state = alive ? 'managed' : 'external';
@@ -2123,14 +2130,16 @@ class WirescopeSupervisor {
   // spawning a duplicate. Spawn errors surface asynchronously via status().
   async start() {
     const s = uiSettings.get();
-    const port = s.wirescopePort || 7800;
+    const port = s.wirescopePort || 7801;
     const base = this._base(port);
 
-    // Detect-first: already serving here? adopt, don't spawn.
+    // Detect-first: already serving here? Reattach if it's our survivor from
+    // a previous launch, adopt if it's someone else's — never spawn a second.
     const probe = await ProxyClient.probe(base).catch(() => null);
     if (probe) {
       this.lastError = null;
-      return { ok: true, state: 'external', adopted: true };
+      const ours = !!this._survivorPid();
+      return { ok: true, state: ours ? 'managed' : 'external', adopted: !ours };
     }
     if (this.child && this.child.exitCode === null) {
       return { ok: true, state: 'starting' };
@@ -2156,14 +2165,45 @@ class WirescopeSupervisor {
     return { ok: true, state: 'installing' };
   }
 
+  _pidFile() { return path.join(app.getPath('userData'), 'wirescope', 'wirescope.pid'); }
+  _logFile() { return path.join(this._dirs().logDir, 'uvicorn.log'); }
+
+  // The pid of a still-running managed instance from a PREVIOUS app launch.
+  // Guarded by port match: a pidfile for a different port is stale config,
+  // not our instance (pid-reuse misfire is accepted as a local-tool risk —
+  // the exposure is one SIGTERM to a same-uid process recorded in our own
+  // pidfile).
+  _survivorPid() {
+    try {
+      const rec = JSON.parse(fs.readFileSync(this._pidFile(), 'utf8'));
+      const s = uiSettings.get();
+      if (!rec || !rec.pid || rec.port !== (s.wirescopePort || 7801)) return null;
+      process.kill(rec.pid, 0); // throws if gone
+      return rec.pid;
+    } catch { return null; }
+  }
+
+  _logTail() {
+    try {
+      const buf = fs.readFileSync(this._logFile(), 'utf8');
+      return buf.trim().split('\n').slice(-3).join(' ').slice(-300);
+    } catch { return ''; }
+  }
+
   // Spawn uvicorn from the resolved source with the venv's python.
+  // DETACHED + stderr-to-logfile + pidfile: the managed instance deliberately
+  // OUTLIVES the GUI, so the warmth ledger and prefix caches keep continuity
+  // across app restarts; the next launch re-recognizes it via the pidfile and
+  // the Traffic optimization toggle can still stop it. Nothing may tie its
+  // stdio to the Electron process — parent exit would break the pipe under it.
   // PYTHONDONTWRITEBYTECODE: a packaged vendored copy lives inside the signed
   // .app bundle — __pycache__ writes there would invalidate the code signature.
   _spawn(python, dir, port) {
     const { logDir, warmthDb } = this._dirs();
     try { fs.mkdirSync(logDir, { recursive: true }); } catch {}
+    let logFd = 'ignore';
+    try { logFd = fs.openSync(this._logFile(), 'a'); } catch {}
 
-    this._stderr = '';
     const child = spawn(python,
       ['-m', 'uvicorn', 'logproxy:app', '--host', '127.0.0.1', '--port', String(port)],
       {
@@ -2173,35 +2213,45 @@ class WirescopeSupervisor {
           PORT: String(port), LOG_DIR: logDir, WARMTH_DB: warmthDb,
           PYTHONDONTWRITEBYTECODE: '1',
         },
-        stdio: ['ignore', 'ignore', 'pipe'],
+        detached: true,
+        stdio: ['ignore', logFd, logFd],
       });
+    if (logFd !== 'ignore') { try { fs.closeSync(logFd); } catch {} }
 
     this.child = child;
     this.startedPort = port;
-    if (child.stderr) {
-      child.stderr.on('data', (d) => {
-        this._stderr = (this._stderr + d.toString()).slice(-2000);
-      });
-    }
+    try {
+      fs.writeFileSync(this._pidFile(), JSON.stringify({ pid: child.pid, port }));
+    } catch {}
     child.on('error', (e) => {
       this.lastError = `wirescope failed to start: ${e.message}`;
       if (this.child === child) { this.child = null; this.startedPort = null; }
     });
     child.on('exit', (code, signal) => {
       if (this.child === child) { this.child = null; this.startedPort = null; }
+      try { fs.unlinkSync(this._pidFile()); } catch {}
       if (code && code !== 0) {
-        const tail = this._stderr.trim().split('\n').slice(-3).join(' ').slice(-300);
+        const tail = this._logTail();
         this.lastError = `wirescope exited (code ${code})${tail ? ': ' + tail : ''}`;
       } else if (signal && signal !== 'SIGTERM') {
         this.lastError = `wirescope terminated (${signal})`;
       }
     });
+    child.unref();
   }
 
-  // Stop ONLY a Clodex-managed child — never an adopted/external instance.
+  // Stop a Clodex-managed instance — the live child of this launch, or a
+  // survivor from a previous one (via pidfile). Never an adopted/external
+  // instance: those have no pidfile of ours.
   stop() {
     if (this.child && this.child.exitCode === null) {
       try { this.child.kill('SIGTERM'); } catch {}
+    } else {
+      const pid = this._survivorPid();
+      if (pid) {
+        try { process.kill(pid, 'SIGTERM'); } catch {}
+        try { fs.unlinkSync(this._pidFile()); } catch {}
+      }
     }
     this.child = null;
     this.startedPort = null;
@@ -3538,7 +3588,10 @@ class SessionManager {
       // native layer; unguarded on quit it aborts the app with SIGABRT.
       try { s.pty.kill(); } catch {}
     }
-    wirescope.stop(); // only stops a Clodex-managed instance, never an adopted one
+    // Deliberately NOT stopping the managed wirescope: it detaches at spawn
+    // and outlives the GUI so warmth/cache continuity survives app restarts.
+    // The next launch reattaches via its pidfile; the Traffic optimization
+    // toggle (settings:set → stop()) is how it actually goes down.
   }
 
   _cleanup(name) {

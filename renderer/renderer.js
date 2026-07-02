@@ -125,7 +125,7 @@ function proxyValueFromControls(modeSel, urlInput) {
 
 function setProxyControls(modeSel, urlInput, proxy, rememberedUrl) {
   modeSel.value = proxy === false ? 'off' : (typeof proxy === 'string' ? 'custom' : '');
-  urlInput.value = typeof proxy === 'string' ? proxy : (rememberedUrl || 'http://127.0.0.1:7800');
+  urlInput.value = typeof proxy === 'string' ? proxy : (rememberedUrl || 'http://127.0.0.1:7801');
   urlInput.style.display = modeSel.value === 'custom' ? '' : 'none';
 }
 
