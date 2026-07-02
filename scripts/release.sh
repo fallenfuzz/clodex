@@ -46,6 +46,12 @@ if [ -n "$(git status --porcelain)" ]; then
   die "working tree is dirty — commit or stash before releasing"
 fi
 
+# Runtime-split smoke: import + exercise wire/ under the ELECTRON binary.
+# node --test can't see BoringSSL gaps (the blake2b512 incident, 3297835);
+# this is the only preflight step that runs in the runtime we actually ship.
+step "Electron runtime smoke (wire/)"
+node scripts/electron-smoke.js || die "electron smoke failed — wire/ uses something Electron's runtime lacks"
+
 PREV_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
 echo "previous tag: ${PREV_TAG:-<none>}"
 
