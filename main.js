@@ -195,6 +195,13 @@ const MSG_MAX_AGE = 1800;
 const MSG_CLEANUP_INTERVAL = 5 * 60 * 1000; // ms
 const POLL_INTERVAL = 250; // ms
 const TURN_COMPLETE_TIMEOUT = 1000; // ms
+// Phase W1 shadow mode (CLODEUX-PLAN.md): route claude sessions through the
+// in-process wire tee (wire/proxy.js) and diff wire-observed intents against
+// the JSONL path into ~/.clodex/wire-shadow.jsonl. Observation only — the
+// JSONL watcher remains the live intent path; an external wirescope keeps
+// its role via per-agent upstream chaining. Default OFF: zero behavior
+// change without the env flag.
+const WIRE_SHADOW = process.env.CLODEX_WIRE_SHADOW === '1';
 const LONG_TEXT_THRESHOLD = 200;
 const LONG_TEXT_DELAY = 1000;
 const SHORT_TEXT_DELAY = 50;
@@ -1171,6 +1178,16 @@ function parseIntent(rawLine) {
   }
 
   return null;
+}
+
+// Stable identity of one intent occurrence for the wire-vs-jsonl shadow
+// differ (both paths see the same assistant text, so the same intent hashes
+// to the same key on both sides). Body capped so a huge dm doesn't bloat
+// the shadow log's keys.
+function shadowIntentKey(agent, intent) {
+  const head = intent.sub || intent.target || intent.name || '';
+  const body = (intent.body || '').trim().slice(0, 200);
+  return `${agent}|${intent.type}|${head}|${body}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2166,7 +2183,7 @@ function readSessionMeta(file) {
   return { title, first, last, turns };
 }
 
-function setupClaudeHook(name, proxyBase = null, proxyAgent = null, denyBuiltins = [], disabledTools = [], disabledSkills = []) {
+function setupClaudeHook(name, proxyBase = null, proxyAgent = null, denyBuiltins = [], disabledTools = [], disabledSkills = [], wireBase = null) {
   ensureDir(REGISTRY_DIR);
   const linkPath = path.join(REGISTRY_DIR, `${name}.jsonl`);
   const scriptPath = path.join(REGISTRY_DIR, `${name}-hook.sh`);
@@ -2218,7 +2235,12 @@ mv -f "$TMPLINK" "${linkPath}"
   // project's .claude/settings.json, so this wins even in repos that set
   // their own ANTHROPIC_BASE_URL. /agent/<name>/ is the proxy's per-agent
   // addressing scheme (session name = agent name).
-  if (proxyBase) {
+  // wireBase (shadow mode) wins: the in-process tee sits in front, and when
+  // the session also has an external proxy the tee chains to it upstream —
+  // the external proxy still sees its own /agent/<proxyAgent>/ route.
+  if (wireBase) {
+    settings.env = { ANTHROPIC_BASE_URL: `${wireBase}/anthropic` };
+  } else if (proxyBase) {
     settings.env = { ANTHROPIC_BASE_URL: `${proxyBase}/agent/${proxyAgent || name}/anthropic` };
   }
   // permissions.deny serves two features:
@@ -2615,6 +2637,57 @@ class SessionManager {
   constructor() {
     this.sessions = new Map();
     this.windows = new Map(); // workspaceId -> BrowserWindow
+    this._wire = null;       // in-process tee (WIRE_SHADOW only in W1)
+    this._shadow = null;     // wire-vs-jsonl intent differ
+  }
+
+  // --- In-process wire tee (Phase W1, shadow mode) ---
+
+  // Lazy singleton: first claude spawn under WIRE_SHADOW brings the tee up.
+  // Ephemeral port, per-agent tokens. Everything observed goes to the
+  // shadow log; the JSONL path stays the live intent authority.
+  async _ensureWire() {
+    if (this._wire) return this._wire;
+    const { WireProxy } = require('./wire/proxy');
+    const { isSubagentRole } = require('./wire/role');
+    const { ShadowDiff } = require('./wire/shadow');
+    const wire = new WireProxy({ requireTokens: true });
+    await wire.listen();
+    this._shadow = new ShadowDiff((rec) => this._shadowLog(rec));
+    wire.on('turn.completed', (t) => {
+      try {
+        if (t.sideCall || isSubagentRole(t.role)) return; // main line only
+        const intents = this._extractIntents(t.text);
+        this._shadowLog({
+          type: 'wire-turn', agent: t.agent, sessionId: t.sessionId,
+          role: t.role, reqId: t.reqId, textLen: t.text.length,
+          intents: intents.length,
+        });
+        for (const intent of intents) {
+          this._shadow.record('wire', shadowIntentKey(t.agent, intent), {
+            agent: t.agent, sessionId: t.sessionId, intentType: intent.type,
+            reqId: t.reqId,
+          });
+        }
+      } catch (e) {
+        this._shadowLog({ type: 'wire-observer-error', error: e.message });
+      }
+    });
+    wire.on('session', (ev) => this._shadowLog({ type: 'wire-session', ...ev }));
+    wire.on('proxy-error', (ev) => this._shadowLog({ type: 'wire-error', ...ev }));
+    this._shadowLog({ type: 'wire-up', port: wire.port });
+    this._wire = wire;
+    return wire;
+  }
+
+  _shadowLog(rec) {
+    try {
+      fs.appendFile(
+        path.join(REGISTRY_DIR, 'wire-shadow.jsonl'),
+        JSON.stringify({ ts: Date.now(), ...rec }) + '\n',
+        () => {},
+      );
+    } catch { /* shadow only — never surfaces */ }
   }
 
   // --- Window <-> workspace registration ---
@@ -2722,8 +2795,27 @@ class SessionManager {
         const staleSettings = args.findIndex(
           (a, i) => a === '--settings' && (args[i + 1] || '').startsWith('/tmp/wb-wrap/'));
         if (staleSettings !== -1) args.splice(staleSettings, 2);
+        // Shadow mode: register the agent with the in-process wire BEFORE
+        // the PTY exists (spawn-bound identity — the wire is never blind to
+        // this agent), chaining to the external proxy when one is set. A
+        // wire failure falls back to the normal path: a tee must never
+        // block a session from starting.
+        let wireBase = null;
+        if (WIRE_SHADOW) {
+          try {
+            const wire = await this._ensureWire();
+            wireBase = wire.registerAgent(name, {
+              sessionId: resumeId || null,
+              upstreams: proxyBase
+                ? { anthropic: `${proxyBase}/agent/${proxyAgent || name}/anthropic` }
+                : null,
+            });
+          } catch (e) {
+            console.error('wire shadow unavailable, spawning unshadowed:', e.message);
+          }
+        }
         if (!args.includes('--settings')) {
-          const settingsPath = setupClaudeHook(name, proxyBase, proxyAgent, denyBuiltins, disabledTools, disabledSkills);
+          const settingsPath = setupClaudeHook(name, proxyBase, proxyAgent, denyBuiltins, disabledTools, disabledSkills, wireBase);
           args.push('--settings', settingsPath);
         }
         ensureDir(MSG_DIR);
@@ -3100,6 +3192,7 @@ class SessionManager {
   _cleanup(name) {
     const s = this.sessions.get(name);
     if (!s) return;
+    if (this._wire) { try { this._wire.unregisterAgent(name); } catch {} }
     if (s.watcher) s.watcher.stop();
     if (s.ctxWatcher) { try { s.ctxWatcher.close(); } catch {} }
     if (s.transport) s.transport.stop();
@@ -3125,7 +3218,11 @@ class SessionManager {
 
   // --- JSONL text scanning (agent mode) ---
 
-  _scanJsonlText(text, senderName) {
+  // Parse a flushed turn's text into its intent list. Shared by the live
+  // JSONL path (which handles each) and the wire shadow observer (which
+  // only records) — one grammar, one body-capture rule, two callers.
+  _extractIntents(text) {
+    const intents = [];
     const lines = text.split('\n');
     let i = 0;
     while (i < lines.length) {
@@ -3161,6 +3258,22 @@ class SessionManager {
         }
       }
 
+      intents.push(intent);
+    }
+    return intents;
+  }
+
+  _scanJsonlText(text, senderName) {
+    for (const intent of this._extractIntents(text)) {
+      if (WIRE_SHADOW && this._shadow) {
+        try {
+          const s = this.sessions.get(senderName);
+          this._shadow.record('jsonl', shadowIntentKey(senderName, intent), {
+            agent: senderName, sessionId: (s && s.sessionId) || null,
+            intentType: intent.type,
+          });
+        } catch { /* shadow only */ }
+      }
       this._handleIntent(senderName, intent);
     }
   }

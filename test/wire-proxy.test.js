@@ -286,6 +286,30 @@ test('registerAgent pre-binds a resumed session id', async () => {
   up.server.close();
 });
 
+test('per-agent upstream override chains through an external proxy base', async () => {
+  const up = await startFakeUpstream();
+  const proxy = new WireProxy({
+    requireTokens: true,
+    upstreams: { anthropic: 'http://127.0.0.1:1' }, // default must NOT be hit
+  });
+  await proxy.listen();
+
+  const baseUrl = proxy.registerAgent('tester', {
+    upstreams: { anthropic: `http://127.0.0.1:${up.port}/agent/clodex-tester-abc/anthropic` },
+  });
+
+  const token = baseUrl.split('/').pop();
+  const res = await request(proxy.port, `/agent/tester/${token}/anthropic/v1/messages`, REQUEST_BODY);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.toString('utf8'), SSE_BODY);
+  // The external proxy saw its own per-agent route shape, untouched body.
+  assert.equal(up.seen.requests[0].url, '/agent/clodex-tester-abc/anthropic/v1/messages');
+  assert.equal(up.seen.requests[0].body, REQUEST_BODY);
+
+  await proxy.close();
+  up.server.close();
+});
+
 test('malformed SSE degrades to no turn, session unbroken', async () => {
   // Upstream streams garbage that is not valid SSE JSON — the client must
   // still receive the exact bytes; the observer just sees nothing.

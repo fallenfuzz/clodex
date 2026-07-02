@@ -170,6 +170,7 @@ class WireProxy extends EventEmitter {
     this.requireTokens = !!opts.requireTokens;
     this._tokens = new Map(); // agent name → token
     this._agentSessions = new Map(); // agent name → last main-line sessionId
+    this._agentUpstreams = new Map(); // agent name → { provider: baseUrl } overrides
     this._roles = new RoleClassifier();
     this.stats = {
       startedAt: Date.now(),
@@ -210,8 +211,13 @@ class WireProxy extends EventEmitter {
   // resume can pre-bind the known sessionId so the proxy never has an
   // unbound agent. The binding then tracks the CLI's declared identity
   // ('session' fires only on change — first sight or /clear rotation).
+  // opts.upstreams: per-agent { provider: baseUrl } overrides — the
+  // chaining mechanism: a session already routed through an external
+  // wirescope keeps that path (upstream = the wirescope agent base) while
+  // the in-process wire observes in front. Same bytes end-to-end.
   registerAgent(name, opts = {}) {
     if (opts.sessionId) this._agentSessions.set(name, opts.sessionId);
+    if (opts.upstreams) this._agentUpstreams.set(name, { ...opts.upstreams });
     if (this.requireTokens) {
       const token = crypto.randomBytes(16).toString('hex');
       this._tokens.set(name, token);
@@ -222,6 +228,7 @@ class WireProxy extends EventEmitter {
 
   unregisterAgent(name) {
     this._tokens.delete(name);
+    this._agentUpstreams.delete(name);
     const sid = this._agentSessions.get(name);
     if (sid) this._roles.forgetSession(sid);
     this._agentSessions.delete(name);
@@ -279,7 +286,8 @@ class WireProxy extends EventEmitter {
     }
 
     const { provider, upstreamPath } = inferProvider(rest);
-    const upstreamBase = this.upstreams[provider];
+    const agentUp = this._agentUpstreams.get(agent);
+    const upstreamBase = (agentUp && agentUp[provider]) || this.upstreams[provider];
     const chatgptMode = provider === 'openai' && isChatgptBackend(upstreamBase);
 
     // chatgpt backend has no platform-style model list; stub codex's
