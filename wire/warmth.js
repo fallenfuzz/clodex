@@ -34,14 +34,19 @@
 //
 // HASH DEVIATION (deliberate, documented): Python uses
 // blake2b(digest_size=20); digest_size is a blake2 PARAMETER, not a
-// truncation, and Node's OpenSSL exposes only blake2b512 — equal output is
-// impossible without vendoring a JS blake2b (zero-dep rule says no). We
-// use blake2b512 truncated to 20 bytes. Canonical JSON also differs on
+// truncation, so equal output is impossible without vendoring a JS blake2b
+// (zero-dep rule says no). We use sha512 truncated to 20 bytes — NOT
+// blake2b512: Node's OpenSSL exposes it but Electron's BoringSSL does NOT
+// ("Digest method not supported"), and the first live shadow run
+// (2026-07-02) had every observer die on it — tee-failure on every request,
+// zero receipts/stamps, while node-run tests and corpus gates stayed green.
+// The digest must exist in BOTH runtimes. Canonical JSON also differs on
 // Python-only spellings (1.0 vs 1 — JSON.parse collapses them). Warmth
 // only needs INTERNAL consistency: same request bytes → same hash,
 // turn-over-turn, across app restarts. The golden gate therefore compares
 // STATE-FOR-STATE verdicts + hash equivalence classes against proxylab,
-// never raw hashes.
+// never raw hashes. (The digest swap orphans pre-swap wire-warmth.sqlite
+// rows; expiry-as-GC absorbs that as one cold read per prefix, by design.)
 
 const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
@@ -124,8 +129,11 @@ function sysToolsFingerprint(obj) {
   return Buffer.from([obj.model || '', names.join(','), stableSysText(obj)].join('\x1f'), 'utf8');
 }
 
-function blake20(buffers) {
-  const h = crypto.createHash('blake2b512');
+// 20-byte content hash. sha512, NOT blake2b512 — Electron's BoringSSL lacks
+// blake2 (see HASH DEVIATION in the header); the digest must exist in both
+// the node test runtime and the Electron app runtime.
+function hash20(buffers) {
+  const h = crypto.createHash('sha512');
   for (const b of buffers) h.update(b);
   return h.digest('hex').slice(0, 40); // 20 bytes
 }
@@ -139,7 +147,7 @@ function prefixHash(obj, upto) {
     parts.push(Buffer.from('\x1e'));
     parts.push(canonMessage(m));
   }
-  return blake20(parts);
+  return hash20(parts);
 }
 
 // Hashes for the two leading CLI cache breakpoints (both live in system[];
@@ -164,7 +172,7 @@ function segmentHashes(obj) {
     const stable = sys.slice(0, idx + 1).filter((b) =>
       !(b && typeof b === 'object' && !Array.isArray(b)
         && String(b.text || '').startsWith('x-anthropic-billing-header')));
-    return blake20([model, Buffer.from('\x1e'), canonMessage(tools), Buffer.from('\x1e'), canonMessage(stable)]);
+    return hash20([model, Buffer.from('\x1e'), canonMessage(tools), Buffer.from('\x1e'), canonMessage(stable)]);
   };
   const ttlOf = (idx) => ((sys[idx].cache_control || {}).ttl === '1h' ? 3600 : 300);
 
