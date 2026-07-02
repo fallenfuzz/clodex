@@ -1,0 +1,401 @@
+'use strict';
+
+// Clodeux wire core: transparent API proxy with an SSE observer tee.
+// Seeded from clodex2 lib/proxy.js (tested + live-verified there), adapted
+// for Phase W1 of CLODEUX-PLAN.md. Differences from the clodex2 seed:
+//   - no IntentScanner: the wire does NOT scan intents. It emits
+//     'turn.completed' with the full normalized assistant text; the
+//     SessionManager's existing parseIntent consumes it (one intent
+//     grammar in the app, not two).
+//   - turn.completed carries { agent, sessionId, text, usage } so the
+//     consumer never has to join events to identify a turn.
+//
+// Invariant — TEE, DON'T TRANSFORM: the client receives the exact raw
+// upstream bytes (status, headers minus hop-by-hop, body). All parsing
+// happens on an observer copy; parser failures degrade to "no turn seen",
+// never to a broken session. The one deliberate exception is the codex
+// ChatGPT-backend REQUEST rewrite (auth injection), carried over as-is.
+//
+// Ordering contract (matches wirescope's): client bytes first, always.
+// 'turn.completed' and 'stream-end' fire strictly AFTER the final client
+// byte has been written.
+//
+// Events:
+//   'request'        { agent, provider, reqId, method, path }
+//   'response'       { agent, reqId, status, sse }
+//   'stream-start'   { agent, reqId }                  → activity: thinking
+//   'turn.completed' { agent, provider, reqId, sessionId, text, usage, truncated }
+//   'stream-end'     { agent, reqId }                  → activity: idle
+//   'session'        { agent, sessionId }              → persistence/--resume
+//   'usage'          { agent, reqId, usage }           → cost/ctx telemetry
+//   'proxy-error'    { agent, reqId, error }
+
+const http = require('http');
+const https = require('https');
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const { EventEmitter } = require('events');
+const { URL } = require('url');
+
+const { parseAgentPath, inferProvider } = require('./route');
+const { SSEFramer, anthropicTextDelta, openaiTextDelta, UsageCollector } = require('./sse');
+const { Decompressor } = require('./decompress');
+
+// Hop-by-hop headers per RFC 7230 §6.1, plus content-length/host which the
+// HTTP libs manage themselves. content-encoding stays — the client receives
+// raw upstream bytes, still compressed when upstream compresses.
+const HOP_BY_HOP = new Set([
+  'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+  'te', 'trailers', 'transfer-encoding', 'upgrade', 'host', 'content-length',
+]);
+
+const DEFAULT_UPSTREAMS = {
+  anthropic: 'https://api.anthropic.com',
+  // Default to the ChatGPT backend so codex uses a ChatGPT subscription
+  // without a platform API key (see chatgpt-backend mode below). Override
+  // with { upstreams: { openai: 'https://api.openai.com' } } when a platform
+  // key is available.
+  openai: 'https://chatgpt.com/backend-api/codex',
+};
+
+// Cap on accumulated turn text. A turn past this size keeps streaming to
+// the client untouched; the observer just stops appending and marks the
+// event truncated (intents live at column 1 of ordinary-sized turns).
+const TURN_TEXT_CAP = 4 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// ChatGPT-backend mode — codex ChatGPT-subscription auth.
+// ---------------------------------------------------------------------------
+
+const CODEX_AUTH_PATH = path.join(os.homedir(), '.codex', 'auth.json');
+
+function isChatgptBackend(upstream) {
+  return (upstream || '').includes('chatgpt.com/backend-api');
+}
+
+// Re-read per request so codex's native OAuth refresh (which rewrites the
+// file) is picked up without a restart. Nulls on any error — the request is
+// forwarded as-is and upstream rejects it cleanly.
+function readCodexAuth() {
+  try {
+    const data = JSON.parse(fs.readFileSync(CODEX_AUTH_PATH, 'utf8'));
+    const tokens = data.tokens || {};
+    return { accessToken: tokens.access_token || null, accountId: tokens.account_id || null };
+  } catch {
+    return { accessToken: null, accountId: null };
+  }
+}
+
+// Strip /v1 prefix and inject ChatGPT OAuth headers. Leaves everything
+// untouched when the auth file is unreadable.
+function rewriteChatgptRequest(upstreamPath, headers) {
+  const { accessToken, accountId } = readCodexAuth();
+  if (!accessToken) return upstreamPath;
+  if (upstreamPath.startsWith('/v1/')) upstreamPath = upstreamPath.slice(3);
+  else if (upstreamPath === '/v1') upstreamPath = '/';
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === 'authorization') delete headers[k];
+  }
+  headers['authorization'] = `Bearer ${accessToken}`;
+  if (accountId) headers['chatgpt-account-id'] = accountId;
+  // Mirror what codex CLI sends natively.
+  if (!('originator' in headers)) headers['originator'] = 'codex_cli_rs';
+  if (!('openai-beta' in headers)) headers['openai-beta'] = 'responses=experimental';
+  return upstreamPath;
+}
+
+// Baseline: content-type says SSE. Override: the chatgpt backend's
+// Responses-API stream says application/json even though the body IS SSE.
+function detectSse(contentType, chatgptMode, method, upstreamPath) {
+  if ((contentType || '').toLowerCase().includes('text/event-stream')) return true;
+  if (chatgptMode && method === 'POST') {
+    const p = upstreamPath.replace(/\/+$/, '');
+    if (p === '/responses' || p === '/chat/completions') return true;
+  }
+  return false;
+}
+
+// Claude Code ships session identity in metadata.user_id — currently a
+// JSON-encoded string with a session_id field; older builds used
+// "..._session_<uuid>". Handle both; null when absent.
+function extractSessionId(bodyBuf) {
+  try {
+    const body = JSON.parse(bodyBuf.toString('utf8'));
+    const uid = (body.metadata && body.metadata.user_id) || '';
+    if (!uid) return null;
+    try {
+      const inner = JSON.parse(uid);
+      if (inner && typeof inner.session_id === 'string') return inner.session_id;
+    } catch { /* not JSON — fall through to regex */ }
+    const m = /session[_-]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(uid);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Proxy
+// ---------------------------------------------------------------------------
+
+class WireProxy extends EventEmitter {
+  // opts:
+  //   host        default 127.0.0.1 (do not bind wider without a reason)
+  //   port        default 0 (ephemeral; read back from listen())
+  //   upstreams   { anthropic, openai } URL overrides
+  //   requireTokens  when true, every registered agent needs a token and
+  //                  requests must carry it as the first path segment after
+  //                  the agent name: /agent/<name>/<token>/v1/...
+  constructor(opts = {}) {
+    super();
+    this.host = opts.host || '127.0.0.1';
+    this.port = opts.port ?? 0;
+    this.upstreams = { ...DEFAULT_UPSTREAMS, ...(opts.upstreams || {}) };
+    this.requireTokens = !!opts.requireTokens;
+    this._tokens = new Map(); // agent name → token
+    this.stats = {
+      startedAt: Date.now(),
+      requestsTotal: 0,
+      requestsErrored: 0,
+      bytesForwarded: 0,
+      turnsCompleted: 0,
+    };
+    this.server = http.createServer((req, res) => this._handle(req, res));
+    // SSE responses can idle for minutes between deltas.
+    this.server.timeout = 0;
+    this.server.requestTimeout = 0;
+    this.server.headersTimeout = 60_000;
+  }
+
+  listen() {
+    return new Promise((resolve, reject) => {
+      this.server.once('error', reject);
+      this.server.listen(this.port, this.host, () => {
+        this.port = this.server.address().port;
+        resolve(this.port);
+      });
+    });
+  }
+
+  close() {
+    return new Promise((resolve) => this.server.close(() => resolve()));
+  }
+
+  // Register an agent and mint its token. Returns the base URL to put in
+  // the CLI's env (ANTHROPIC_BASE_URL / equivalent). The token is the
+  // closed-loop guarantee: it only ever exists in the app's memory and the
+  // spawned CLI's environment, so nothing else on the machine can speak
+  // for this agent.
+  registerAgent(name) {
+    if (this.requireTokens) {
+      const token = crypto.randomBytes(16).toString('hex');
+      this._tokens.set(name, token);
+      return `http://${this.host}:${this.port}/agent/${name}/${token}`;
+    }
+    return `http://${this.host}:${this.port}/agent/${name}`;
+  }
+
+  unregisterAgent(name) {
+    this._tokens.delete(name);
+  }
+
+  _json(res, status, obj) {
+    const body = JSON.stringify(obj);
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(body);
+  }
+
+  _handle(req, res) {
+    const u = new URL(req.url, 'http://localhost');
+    if (u.pathname === '/healthz') {
+      return this._json(res, 200, { ok: true, ts: Date.now(), component: 'clodeux-wire' });
+    }
+    if (u.pathname === '/stats') {
+      return this._json(res, 200, {
+        uptimeSeconds: Math.round((Date.now() - this.stats.startedAt) / 1000),
+        ...this.stats,
+      });
+    }
+
+    this.stats.requestsTotal += 1;
+
+    const parsed = parseAgentPath(u.pathname);
+    if (!parsed) {
+      return this._json(res, 400, { error: 'path must start with /agent/<name>/...' });
+    }
+    const agent = parsed.agent;
+    let rest = parsed.rest;
+
+    if (this.requireTokens) {
+      const want = this._tokens.get(agent);
+      const seg = '/' + (want || ' ');
+      if (!want || !(rest === seg || rest.startsWith(seg + '/'))) {
+        this.stats.requestsErrored += 1;
+        return this._json(res, 401, { error: 'bad or missing session token' });
+      }
+      rest = rest.slice(seg.length) || '/';
+    }
+
+    const { provider, upstreamPath } = inferProvider(rest);
+    const upstreamBase = this.upstreams[provider];
+    const chatgptMode = provider === 'openai' && isChatgptBackend(upstreamBase);
+
+    // chatgpt backend has no platform-style model list; stub codex's
+    // startup probe with the shape it expects.
+    if (chatgptMode && (upstreamPath === '/v1/models' || upstreamPath === '/v1/models/')) {
+      return this._json(res, 200, {
+        models: [{ id: 'gpt-5.3-codex', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'openai' }],
+      });
+    }
+
+    const reqId = `${Date.now()}-${crypto.randomBytes(3).toString('hex')}-${agent}-${provider}`;
+    this.emit('request', { agent, provider, reqId, method: req.method, path: upstreamPath });
+
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const body = chunks.length ? Buffer.concat(chunks) : null;
+      this._forward(req, res, { agent, provider, reqId, upstreamBase, upstreamPath, chatgptMode, body, query: u.search });
+    });
+    req.on('error', () => { /* client vanished while sending — nothing to do */ });
+  }
+
+  _forward(req, res, ctx) {
+    const { agent, provider, reqId, upstreamBase, chatgptMode, body, query } = ctx;
+    let upstreamPath = ctx.upstreamPath;
+
+    // Session identity rides in the request body. Cheap: only POSTs with a
+    // body are parsed, on an observer copy.
+    let sessionId = null;
+    if (body && req.method === 'POST') {
+      sessionId = extractSessionId(body);
+      if (sessionId) this.emit('session', { agent, sessionId });
+    }
+
+    const fwdHeaders = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (!HOP_BY_HOP.has(k.toLowerCase())) fwdHeaders[k] = v;
+    }
+    if (chatgptMode) {
+      upstreamPath = rewriteChatgptRequest(upstreamPath, fwdHeaders);
+    }
+
+    let upstreamUrl;
+    try {
+      upstreamUrl = new URL(upstreamBase.replace(/\/+$/, '') + upstreamPath + (query || ''));
+    } catch (e) {
+      this.stats.requestsErrored += 1;
+      return this._json(res, 502, { error: `bad upstream url: ${e.message}` });
+    }
+
+    const lib = upstreamUrl.protocol === 'https:' ? https : http;
+    const upReq = lib.request(upstreamUrl, { method: req.method, headers: fwdHeaders }, (upRes) => {
+      const respHeaders = {};
+      for (const [k, v] of Object.entries(upRes.headers)) {
+        if (!HOP_BY_HOP.has(k.toLowerCase())) respHeaders[k] = v;
+      }
+      const sse = detectSse(upRes.headers['content-type'], chatgptMode, req.method, ctx.upstreamPath);
+      this.emit('response', { agent, reqId, status: upRes.statusCode, sse });
+
+      let tee = null;
+      if (sse) {
+        this.emit('stream-start', { agent, reqId });
+        tee = this._buildTee(agent, provider, reqId, sessionId, upRes.headers['content-encoding']);
+      }
+
+      res.writeHead(upRes.statusCode, respHeaders);
+      upRes.on('data', (chunk) => {
+        // Client first — the tee must never delay client-bound bytes.
+        res.write(chunk);
+        this.stats.bytesForwarded += chunk.length;
+        if (tee) tee.feed(chunk);
+      });
+      upRes.on('end', () => {
+        res.end();
+        if (tee) tee.close();
+      });
+      upRes.on('error', (e) => {
+        this.stats.requestsErrored += 1;
+        this.emit('proxy-error', { agent, reqId, error: `upstream read: ${e.message}` });
+        res.destroy();
+        if (tee) tee.close();
+      });
+      // Client gave up mid-stream — stop pulling from upstream, flush tee.
+      res.on('close', () => {
+        if (!res.writableEnded) {
+          upRes.destroy();
+          if (tee) tee.close();
+        }
+      });
+    });
+
+    upReq.on('error', (e) => {
+      this.stats.requestsErrored += 1;
+      this.emit('proxy-error', { agent, reqId, error: `upstream connect: ${e.message}` });
+      if (!res.headersSent) this._json(res, 502, { error: `upstream error: ${e.message}` });
+      else res.destroy();
+    });
+
+    req.on('aborted', () => upReq.destroy());
+    if (body) upReq.end(body);
+    else upReq.end();
+  }
+
+  // Observer pipeline: raw bytes → decompress → SSE frames → text deltas →
+  // turn accumulator (+ usage collector for anthropic). Emission order on
+  // stream close: 'usage' → 'turn.completed' → 'stream-end', all strictly
+  // after the client's final byte.
+  _buildTee(agent, provider, reqId, sessionId, contentEncoding) {
+    const usage = provider === 'anthropic' ? new UsageCollector() : null;
+    const extract = provider === 'anthropic' ? anthropicTextDelta : openaiTextDelta;
+    let text = '';
+    let truncated = false;
+    const framer = new SSEFramer((event, data) => {
+      if (usage) usage.onEvent(event, data);
+      const t = extract(event, data);
+      if (t && !truncated) {
+        if (text.length + t.length > TURN_TEXT_CAP) truncated = true;
+        else text += t;
+      }
+    });
+    const decomp = new Decompressor(contentEncoding, (d) => framer.feed(d));
+    let closed = false;
+    return {
+      feed: (chunk) => decomp.feed(chunk),
+      close: () => {
+        if (closed) return;
+        closed = true;
+        decomp.end(() => {
+          const usageRecord = usage && usage.record ? usage.record : null;
+          if (usageRecord) this.emit('usage', { agent, reqId, usage: usageRecord });
+          if (text || usageRecord) {
+            this.stats.turnsCompleted += 1;
+            this.emit('turn.completed', { agent, provider, reqId, sessionId, text, usage: usageRecord, truncated });
+          }
+          this.emit('stream-end', { agent, reqId });
+        });
+      },
+    };
+  }
+}
+
+module.exports = { WireProxy, extractSessionId, detectSse };
+
+// ---------------------------------------------------------------------------
+// Standalone runner — smoke testing without the app shell:
+//   node wire/proxy.js [port]
+// Prints every event; point a CLI at http://127.0.0.1:<port>/agent/<name>.
+// ---------------------------------------------------------------------------
+
+if (require.main === module) {
+  const proxy = new WireProxy({ port: Number(process.argv[2]) || 9777 });
+  for (const ev of ['request', 'response', 'stream-start', 'stream-end', 'turn.completed', 'session', 'usage', 'proxy-error']) {
+    proxy.on(ev, (payload) => console.log(`[${ev}]`, JSON.stringify(payload)));
+  }
+  proxy.listen().then((port) => {
+    console.log(`clodeux wire on http://127.0.0.1:${port}`);
+    console.log(`route shape: /agent/<name>/v1/messages (anthropic) · /agent/<name>/openai/... (explicit)`);
+  });
+}

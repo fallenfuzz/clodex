@@ -1,0 +1,37 @@
+'use strict';
+
+const zlib = require('zlib');
+
+// Observer-side incremental decoder. The CLIENT always receives the raw
+// upstream bytes untouched — this exists only so the SSE tee can read a
+// compressed stream. Callback-based because zlib streams deliver async.
+//
+// Corrupt framing kills the observer for this stream only; the client
+// keeps receiving raw bytes (tee, don't transform).
+class Decompressor {
+  constructor(encoding, onData) {
+    const enc = (encoding || '').toLowerCase().trim();
+    this.passthrough = enc !== 'gzip' && enc !== 'deflate';
+    this._onData = onData;
+    this._dead = false;
+    if (!this.passthrough) {
+      this._z = enc === 'gzip' ? zlib.createGunzip() : zlib.createInflate();
+      this._z.on('data', (d) => this._onData(d));
+      this._z.on('error', () => { this._dead = true; });
+    }
+  }
+
+  feed(chunk) {
+    if (!chunk || !chunk.length) return;
+    if (this.passthrough) { this._onData(chunk); return; }
+    if (!this._dead) this._z.write(chunk);
+  }
+
+  // Flush remaining bytes, then call done (always called, even when dead).
+  end(done) {
+    if (this.passthrough || this._dead) { if (done) done(); return; }
+    this._z.end(() => { if (done) done(); });
+  }
+}
+
+module.exports = { Decompressor };
