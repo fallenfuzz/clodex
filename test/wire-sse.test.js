@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { UsageCollector } = require('../wire/sse');
+const { UsageCollector, OpenAIUsageCollector } = require('../wire/sse');
 
 test('multi-iteration server-tool turn: final message_delta usage wins (cumulative)', () => {
   // Billing contract (wirescope, billing.py:241): receipts price
@@ -59,4 +59,74 @@ test('no usage events → null record', () => {
   const u = new UsageCollector();
   u.onEvent('content_block_delta', '{"type":"content_block_delta"}');
   assert.equal(u.record, null);
+});
+
+test('meta: usage_final is the LAST delta verbatim (replaced, not merged); merged record still merges', () => {
+  const u = new UsageCollector();
+  u.onEvent('message_start', JSON.stringify({
+    type: 'message_start',
+    message: { id: 'm2', model: 'claude-haiku-4-5-20251001',
+      usage: { input_tokens: 10, service_tier: 'standard' } },
+  }));
+  u.onEvent('message_delta', JSON.stringify({
+    type: 'message_delta', delta: {},
+    usage: { output_tokens: 5, cache_read_input_tokens: 99 },
+  }));
+  u.onEvent('message_delta', JSON.stringify({
+    type: 'message_delta', delta: { stop_reason: 'end_turn' },
+    usage: { output_tokens: 9 },
+  }));
+  const m = u.meta;
+  // final delta's object AS-IS — no cache_read_input_tokens carried over
+  assert.deepEqual(m.usage_final, { output_tokens: 9 });
+  assert.deepEqual(m.usage_start, { input_tokens: 10, service_tier: 'standard' });
+  assert.equal(m.resolved_model, 'claude-haiku-4-5-20251001');
+  assert.equal(m.stop_reason, 'end_turn');
+  // the merged telemetry view keeps everything seen
+  assert.equal(u.record.cache_read_input_tokens, 99);
+  assert.equal(u.record.output_tokens, 9);
+});
+
+test('meta: content_block_start collects block types and tool names; error captured', () => {
+  const u = new UsageCollector();
+  u.onEvent('content_block_start', JSON.stringify({
+    type: 'content_block_start', content_block: { type: 'text' },
+  }));
+  u.onEvent('content_block_start', JSON.stringify({
+    type: 'content_block_start', content_block: { type: 'tool_use', name: 'Bash' },
+  }));
+  u.onEvent('error', JSON.stringify({
+    type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' },
+  }));
+  const m = u.meta;
+  assert.deepEqual(m.content_block_types, ['text', 'tool_use']);
+  assert.deepEqual(m.tool_uses, ['Bash']);
+  assert.equal(m.error.type, 'overloaded_error');
+});
+
+test('OpenAIUsageCollector: response.completed carries usage + model + status', () => {
+  const u = new OpenAIUsageCollector();
+  u.onEvent(null, JSON.stringify({ type: 'response.output_text.delta', delta: 'hi' }));
+  u.onEvent(null, JSON.stringify({
+    type: 'response.completed',
+    response: { id: 'resp_1', model: 'gpt-5.3-codex', status: 'completed',
+      usage: { input_tokens: 50, output_tokens: 7,
+        input_tokens_details: { cached_tokens: 30 } } },
+  }));
+  const m = u.meta;
+  assert.equal(m.resolved_model, 'gpt-5.3-codex');
+  assert.equal(m.status, 'completed');
+  assert.equal(m.usage.input_tokens, 50);
+  assert.equal(m.response_id, 'resp_1');
+  assert.equal(m.error, null);
+});
+
+test('OpenAIUsageCollector: response.failed surfaces the error', () => {
+  const u = new OpenAIUsageCollector();
+  u.onEvent(null, JSON.stringify({
+    type: 'response.failed',
+    response: { id: 'resp_2', status: 'failed', error: { code: 'server_error' } },
+  }));
+  assert.equal(u.meta.status, 'failed');
+  assert.equal(u.meta.error.code, 'server_error');
 });

@@ -1,0 +1,282 @@
+'use strict';
+
+// Pricing + running totals: port of proxylab/billing.py (PRICES tables,
+// _price_for, _billing, _billing_openai, _new_totals, _bump, _accumulate).
+// Semantics matched field-for-field against the Python — the golden gate
+// (CLODEUX-PLAN.md W2 step 3) diffs this module against current proxylab
+// code over the capture corpus, so "close enough" is not enough:
+//   - output_tokens comes from usage_final ONLY (no usage_start fallback);
+//   - service_tier comes from usage_start ONLY;
+//   - input/cache_read fall back start-ward on KEY ABSENCE (Python
+//     dict.get(k, fallback)), not on null;
+//   - cache_creation uses Python or-semantics: an EMPTY object in
+//     usage_final falls through to usage_start's;
+//   - a flat cache_creation_input_tokens with no 5m/1h split is priced at
+//     the cheaper 5m premium, and the basis string says so.
+// Billing contract (wirescope, billing.py:241): usage_final is the
+// CUMULATIVE last message_delta — never sum iterations[].
+//
+// Pure module: no disk I/O, no event emitters. The proxy owns when to bill
+// (tee close) and the app owns persistence.
+
+// Approximate public list prices, USD per 1M tokens. EDIT as rates change.
+// Matched by LONGEST model-name prefix (so "claude-opus-4-8" beats the
+// legacy bare "claude-opus-4" entry). est_usd is a DERIVED estimate; the
+// authoritative billing signal is the token breakdown itself. Write
+// premiums: 5m=1.25x, 1h=2x; reads=0.10x of input.
+// NOTE: opus REPRICED at 4.5 — $15/$75 is 4.0/4.1 ONLY; 4.5+ is $5/$25.
+const PRICES = {
+  'claude-fable-5':  { in: 10.0, out: 50.0, cache_write_5m: 12.5,  cache_write_1h: 20.0, cache_read: 1.00 },
+  'claude-opus-4-5': { in: 5.0,  out: 25.0, cache_write_5m: 6.25,  cache_write_1h: 10.0, cache_read: 0.50 },
+  'claude-opus-4-6': { in: 5.0,  out: 25.0, cache_write_5m: 6.25,  cache_write_1h: 10.0, cache_read: 0.50 },
+  'claude-opus-4-7': { in: 5.0,  out: 25.0, cache_write_5m: 6.25,  cache_write_1h: 10.0, cache_read: 0.50 },
+  'claude-opus-4-8': { in: 5.0,  out: 25.0, cache_write_5m: 6.25,  cache_write_1h: 10.0, cache_read: 0.50 },
+  // legacy opus 4.0 / 4.1 (also catches their dated full ids)
+  'claude-opus-4':   { in: 15.0, out: 75.0, cache_write_5m: 18.75, cache_write_1h: 30.0, cache_read: 1.50 },
+  'claude-sonnet-4': { in: 3.0,  out: 15.0, cache_write_5m: 3.75,  cache_write_1h: 6.0,  cache_read: 0.30 },
+  'claude-haiku-4':  { in: 1.0,  out: 5.0,  cache_write_5m: 1.25,  cache_write_1h: 2.0,  cache_read: 0.10 },
+};
+
+// OpenAI side (codex routes), same longest-prefix matching on their axes:
+// no client cache writes (caching is server-side), cached input bills at
+// 10% of input. NOTE: codex traffic rides a ChatGPT plan and is never
+// dollar-billed — est_usd is the API-EQUIVALENT price of the same tokens,
+// so codex carriage is comparable with the anthropic numbers.
+const PRICES_OPENAI = {
+  'gpt-5.5':       { in: 5.0,  cached_in: 0.50,  out: 30.0 },
+  'gpt-5.4':       { in: 2.5,  cached_in: 0.25,  out: 15.0 },
+  'gpt-5.4-mini':  { in: 0.75, cached_in: 0.075, out: 4.5 },
+  'gpt-5.3-codex': { in: 1.75, cached_in: 0.175, out: 14.0 },
+};
+
+// Longest-prefix match (a first-hit walk silently shadowed
+// "claude-opus-4-8" with the legacy "claude-opus-4" entry). null = unpriced.
+function priceFor(model, table) {
+  if (!model) return null;
+  let best = null;
+  for (const [pfx, p] of Object.entries(table || PRICES)) {
+    if (model.startsWith(pfx) && (best === null || pfx.length > best[0].length)) {
+      best = [pfx, p];
+    }
+  }
+  return best ? best[1] : null;
+}
+
+const _unpricedWarned = new Set();
+
+function warnUnpriced(model, tableName) {
+  if (_unpricedWarned.has(model)) return;
+  _unpricedWarned.add(model);
+  console.error(`[pricing] WARNING: no ${tableName} entry matches ${JSON.stringify(model)} — ` +
+    'est_usd=null for its traffic; cumulative est_usd is now a FLOOR. ' +
+    'Tracked in totals.unpriced_requests/unpriced_models; add rates ' +
+    `to ${tableName}.`);
+}
+
+function usd(tokens, ratePerM) {
+  return round6((tokens || 0) * ratePerM / 1_000_000);
+}
+
+// Python round(x, 6) on the exact binary double. toFixed is also
+// exact-decimal; they differ only on exact .5 ties (astronomically rare
+// for token*rate/1e6 — the golden gate would surface one).
+function round6(x) {
+  return Number(x.toFixed(6));
+}
+
+// Python dict.get(k, fallback): fall back on key ABSENCE, an explicit
+// null stays null.
+function getOr(obj, key, fallback) {
+  return key in obj ? obj[key] : fallback;
+}
+
+function norm(v) {
+  return v === undefined ? null : v;
+}
+
+// Python or-chain truthiness: null/undefined/0/''/false and EMPTY objects
+// all fall through.
+function pyTruthy(v) {
+  if (v == null || v === 0 || v === '' || v === false) return false;
+  if (typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0) return false;
+  return true;
+}
+
+// Formatted per-request billing. count_tokens is NOT billed for tokens
+// (returns only an input count) — it spends request-rate-limit budget only.
+function billing(kind, { modelResolved = null, usageFinal = null, usageStart = null, countTokens = null } = {}) {
+  if (kind === 'count_tokens') {
+    const ct = countTokens || {};
+    return { endpoint: 'count_tokens', billable: false,
+      note: 'count_tokens not billed for tokens; consumes request-rate-limit only',
+      counted_input_tokens: norm(ct.input_tokens), est_usd: 0.0 };
+  }
+  const uf = usageFinal || {};
+  const us = usageStart || {};
+  const cc = (pyTruthy(uf.cache_creation) && uf.cache_creation)
+    || (pyTruthy(us.cache_creation) && us.cache_creation) || {};
+  const tokens = {
+    input_tokens: norm(getOr(uf, 'input_tokens', us.input_tokens)),
+    output_tokens: norm(uf.output_tokens),
+    cache_read_input_tokens: norm(getOr(uf, 'cache_read_input_tokens', us.cache_read_input_tokens)),
+    cache_write_5m_tokens: norm(cc.ephemeral_5m_input_tokens),
+    cache_write_1h_tokens: norm(cc.ephemeral_1h_input_tokens),
+    // flat total — fallback when the 5m/1h split is absent from the response
+    cache_write_flat_tokens: norm(getOr(uf, 'cache_creation_input_tokens', us.cache_creation_input_tokens)),
+    thinking_tokens: norm((uf.output_tokens_details || {}).thinking_tokens),
+    service_tier: norm(us.service_tier),
+  };
+  const p = priceFor(modelResolved);
+  let est = null;
+  let unpriced = false;
+  let basis = 'approx public list USD/1M; edit PRICES';
+  if (p) {
+    let w5 = tokens.cache_write_5m_tokens;
+    const w1 = tokens.cache_write_1h_tokens;
+    if (w5 == null && w1 == null && tokens.cache_write_flat_tokens) {
+      // no TTL split returned: don't silently drop the write cost — price
+      // the flat total at the cheaper 5m premium and say so in the basis.
+      w5 = tokens.cache_write_flat_tokens;
+      basis += '; cache_creation split absent, flat total priced at 5m rate';
+    }
+    est = round6(usd(tokens.input_tokens, p.in)
+      + usd(tokens.output_tokens, p.out)
+      + usd(tokens.cache_read_input_tokens, p.cache_read)
+      + usd(w5, p.cache_write_5m)
+      + usd(w1, p.cache_write_1h));
+  } else if (modelResolved) {
+    // PRICING BLINDNESS guard: an unmatched model must be LOUD, not a
+    // silent null that lets the totals report a confident under-count.
+    unpriced = true;
+    warnUnpriced(modelResolved, 'PRICES');
+  }
+  return { endpoint: 'messages', billable: true, model: modelResolved,
+    tokens, est_usd: est, unpriced, price_basis: basis };
+}
+
+// Bill an openai /responses receipt in the same shape bump() consumes.
+// OpenAI's input_tokens INCLUDES the cached portion — split it out so the
+// shared totals keep anthropic semantics (input = uncached at full rate,
+// cache_read = cached at the discounted rate). reasoning_tokens are part
+// of output_tokens on their wire, surfaced as thinking_tokens.
+function billingOpenai(modelResolved, usage) {
+  const u = usage || {};
+  const totalIn = u.input_tokens || 0;
+  const cached = (u.input_tokens_details || {}).cached_tokens || 0;
+  const tokens = {
+    input_tokens: Math.max(totalIn - cached, 0),
+    output_tokens: norm(u.output_tokens),
+    cache_read_input_tokens: cached,
+    cache_write_5m_tokens: null, cache_write_1h_tokens: null,
+    cache_write_flat_tokens: null,
+    thinking_tokens: norm((u.output_tokens_details || {}).reasoning_tokens),
+    service_tier: null,
+  };
+  const p = priceFor(modelResolved, PRICES_OPENAI);
+  let est = null;
+  let unpriced = false;
+  const basis = 'API-equivalent USD/1M (chatgpt-plan traffic is never ' +
+    'dollar-billed); edit PRICES_OPENAI';
+  if (p) {
+    est = round6(usd(tokens.input_tokens, p.in)
+      + usd(cached, p.cached_in)
+      + usd(tokens.output_tokens, p.out));
+  } else if (modelResolved) {
+    unpriced = true;
+    warnUnpriced(modelResolved, 'PRICES_OPENAI');
+  }
+  return { endpoint: 'responses', billable: true, model: modelResolved,
+    tokens, est_usd: est, unpriced, price_basis: basis };
+}
+
+function newTotals() {
+  return { requests: 0, billed_requests: 0, count_tokens_requests: 0,
+    input_tokens: 0, output_tokens: 0, cache_read_tokens: 0,
+    cache_write_tokens: 0, est_usd: 0.0,
+    // PRICING-BLINDNESS guard: est_usd EXCLUDES these. A nonzero
+    // unpriced_requests means the cumulative $ is a floor, not a total.
+    unpriced_requests: 0, unpriced_models: [],
+    // SERVER-SIDE refusal classifier hits (stop_reason:"refusal" — zero
+    // content blocks, the model never ran). Count + evidence, not anecdotes.
+    refusals: 0,
+    // Completed user turns, receipt-counted: one terminal response
+    // (stop_reason != tool_use) = one turn; tool-loop hops, title
+    // side-calls and subagent traffic excluded at the call site
+    // (stop.is_turn). CLI retries dedupe for free — a failed request never
+    // produces a terminal response.
+    turns: 0 };
+}
+
+function localIso() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function bump(totals, bill, stop) {
+  totals.requests += 1;
+  if (stop && stop.is_turn) totals.turns = (totals.turns || 0) + 1;
+  if (stop && stop.stop_reason === 'refusal') {
+    totals.refusals = (totals.refusals || 0) + 1;
+    // keep the FULL stop_details: the category + explanation are the only
+    // non-generic facts, and the UI renders them. `at` (epoch) lets a view
+    // tell whether the captured last request IS the blocked context.
+    const ev = { ts: localIso(), at: Math.round(Date.now()) / 1000,
+      model: bill.model || null,
+      category: ((stop.stop_details || {}).category) ?? null,
+      stop_details: stop.stop_details || null,
+      request_id: stop.request_id || null };
+    if (!totals.refusal_events) totals.refusal_events = [];
+    totals.refusal_events.push(ev);
+    totals.refusal_events.splice(0, totals.refusal_events.length - 20); // keep the last 20
+  }
+  if (bill.endpoint === 'count_tokens') {
+    totals.count_tokens_requests += 1;
+  } else {
+    totals.billed_requests += 1;
+    const t = bill.tokens || {};
+    totals.input_tokens += t.input_tokens || 0;
+    totals.output_tokens += t.output_tokens || 0;
+    totals.cache_read_tokens += t.cache_read_input_tokens || 0;
+    const w = (t.cache_write_5m_tokens || 0) + (t.cache_write_1h_tokens || 0);
+    totals.cache_write_tokens += w || (t.cache_write_flat_tokens || 0);
+    totals.est_usd = round6(totals.est_usd + (bill.est_usd || 0));
+    if (bill.unpriced) {
+      totals.unpriced_requests = (totals.unpriced_requests || 0) + 1;
+      const m = bill.model;
+      if (!totals.unpriced_models) totals.unpriced_models = [];
+      if (m && !totals.unpriced_models.includes(m)) totals.unpriced_models.push(m);
+    }
+  }
+}
+
+// Global + per-session running totals (the API never returns one).
+// In-memory only; the app snapshots/persists as it sees fit.
+class Ledger {
+  constructor() {
+    this.totals = newTotals();
+    this.sessions = new Map(); // sessionKey → totals
+  }
+
+  session(key) {
+    let t = this.sessions.get(key);
+    if (!t) { t = newTotals(); this.sessions.set(key, t); }
+    return t;
+  }
+
+  accumulate(bill, sessionKey, stop) {
+    bump(this.totals, bill, stop);
+    bump(this.session(sessionKey), bill, stop);
+    return { ...this.totals };
+  }
+
+  forget(sessionKey) {
+    this.sessions.delete(sessionKey);
+  }
+}
+
+module.exports = {
+  PRICES, PRICES_OPENAI, priceFor, usd, round6,
+  billing, billingOpenai, newTotals, bump, Ledger,
+};

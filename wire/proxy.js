@@ -25,10 +25,21 @@
 //   'response'       { agent, reqId, status, sse }
 //   'stream-start'   { agent, reqId }                  → activity: thinking
 //   'turn.completed' { agent, provider, reqId, sessionId, role, sideCall,
-//                      text, usage, truncated }
+//                      text, usage, truncated, model, billing, stop,
+//                      sessionTotals }
 //                    role: parent/unknown = main line; Plan/verification/
 //                    general-purpose/subagent = Task subs (see wire/role.js).
 //                    sideCall: title-generator / health-probe request.
+//                    billing/stop/sessionTotals (W2): the receipt — priced
+//                    tokens (wire/billing.js, usage_final contract), stop
+//                    facts incl. is_turn (terminal main-line response), and
+//                    a snapshot of the session's running totals. Python twin:
+//                    proxylab/receipts.py; the tee close is the one
+//                    turn-finalize convergence point in-process.
+//                    NOTE: non-SSE responses (count_tokens, JSON error
+//                    bodies) are not teed and so not billed yet — proxylab
+//                    counts those as 0-token billed/count_tokens requests;
+//                    request counts may differ until W2 step 4 wires them.
 //   'stream-end'     { agent, reqId }                  → activity: idle
 //   'session'        { agent, sessionId, previous }    → persistence/--resume
 //                    fires on CHANGE only (first sight or /clear rotation),
@@ -52,9 +63,10 @@ const { EventEmitter } = require('events');
 const { URL } = require('url');
 
 const { parseAgentPath, inferProvider } = require('./route');
-const { SSEFramer, anthropicTextDelta, openaiTextDelta, UsageCollector } = require('./sse');
+const { SSEFramer, anthropicTextDelta, openaiTextDelta, UsageCollector, OpenAIUsageCollector } = require('./sse');
 const { Decompressor } = require('./decompress');
 const { RoleClassifier, isSubagentRole, isTitleCall, isProbeCall } = require('./role');
+const { billing, billingOpenai, Ledger } = require('./billing');
 
 // Hop-by-hop headers per RFC 7230 §6.1, plus content-length/host which the
 // HTTP libs manage themselves. content-encoding stays — the client receives
@@ -178,6 +190,7 @@ class WireProxy extends EventEmitter {
     this._agentSessions = new Map(); // agent name → last main-line sessionId
     this._agentUpstreams = new Map(); // agent name → { provider: baseUrl } overrides
     this._roles = new RoleClassifier();
+    this.billing = new Ledger(); // global + per-session running totals
     this.stats = {
       startedAt: Date.now(),
       requestsTotal: 0,
@@ -327,10 +340,12 @@ class WireProxy extends EventEmitter {
     let sessionId = null;
     let role = null;
     let sideCall = false;
+    let model = null;
     if (body && req.method === 'POST') {
       try {
         const obj = JSON.parse(body.toString('utf8'));
         sessionId = sessionIdFrom(obj);
+        if (typeof obj.model === 'string') model = obj.model;
         if (provider === 'anthropic') {
           const agentId = req.headers['x-claude-code-agent-id'] || null;
           sideCall = isTitleCall(obj) || isProbeCall(obj);
@@ -391,7 +406,9 @@ class WireProxy extends EventEmitter {
         };
         this.on('stream-end', onEnd);
         try {
-          tee = this._buildTee({ agent, provider, reqId, sessionId, role, sideCall },
+          tee = this._buildTee(
+            { agent, provider, reqId, sessionId, role, sideCall, model,
+              requestId: upRes.headers['request-id'] || null },
             upRes.headers['content-encoding']);
         } catch (e) { teeFail(e); }
       }
@@ -450,8 +467,8 @@ class WireProxy extends EventEmitter {
   // after the client's final byte. Consumers wanting main-line turns only
   // (intent scanning) filter role parent/unknown + sideCall false.
   _buildTee(turnCtx, contentEncoding) {
-    const { agent, provider, reqId, sessionId, role, sideCall } = turnCtx;
-    const usage = provider === 'anthropic' ? new UsageCollector() : null;
+    const { agent, provider, reqId, sessionId, role, sideCall, model, requestId } = turnCtx;
+    const usage = provider === 'anthropic' ? new UsageCollector() : new OpenAIUsageCollector();
     const extract = provider === 'anthropic' ? anthropicTextDelta : openaiTextDelta;
     let text = '';
     let truncated = false;
@@ -486,13 +503,57 @@ class WireProxy extends EventEmitter {
         closed = true;
         decomp.end(() => {
           try {
-            const usageRecord = !dead && usage && usage.record ? usage.record : null;
+            // Receipt convergence (receipts.py's job, in-process): parse →
+            // bill → accumulate → one event. Anything downstream of "a turn
+            // happened" hangs off turn.completed, not a second closure.
+            let usageRecord = null;
+            let bill = null;
+            let stop = null;
+            if (!dead) {
+              if (provider === 'anthropic') {
+                usageRecord = usage.record;
+                if (usageRecord || text) {
+                  bill = billing('messages', {
+                    modelResolved: usage.resolvedModel || model,
+                    usageFinal: usage.usageFinal,
+                    usageStart: usage.usageStart,
+                  });
+                  stop = {
+                    stop_reason: usage.stopReason,
+                    stop_details: usage.stopDetails,
+                    request_id: requestId,
+                    // one terminal response = one completed user turn
+                    // (refusal/max_tokens still END a turn; tool_use is a
+                    // mid-turn hop). Side-calls + subagents don't count.
+                    is_turn: !sideCall && (role === 'parent' || role === 'unknown')
+                      && usage.stopReason != null && usage.stopReason !== 'tool_use',
+                  };
+                }
+              } else {
+                const rec = usage.meta;
+                usageRecord = rec.usage;
+                if (usageRecord || text) {
+                  bill = billingOpenai(rec.resolved_model || model, rec.usage);
+                  // a completed response WITH text ends a turn; tool-loop
+                  // hops come back text-less (reasoning + calls only).
+                  stop = { stop_reason: rec.status, request_id: requestId,
+                    is_turn: rec.status === 'completed' && !!text };
+                }
+              }
+            }
             if (usageRecord) this.emit('usage', { agent, reqId, usage: usageRecord });
             if (!dead && (text || usageRecord)) {
               this.stats.turnsCompleted += 1;
+              let sessionTotals = null;
+              if (bill) {
+                const sessionKey = sessionId || `agent:${agent}`;
+                this.billing.accumulate(bill, sessionKey, stop);
+                sessionTotals = { ...this.billing.session(sessionKey) };
+              }
               this.emit('turn.completed', {
                 agent, provider, reqId, sessionId, role, sideCall, text,
-                usage: usageRecord, truncated,
+                usage: usageRecord, truncated, model, billing: bill, stop,
+                sessionTotals,
               });
             }
           } catch (e) { fail(e); }

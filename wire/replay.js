@@ -102,14 +102,18 @@ function replayPair(proxy, classifier, stem, reqPath, ssePath, opts) {
 
   const out = {
     stem, agent: req.agent || null, provider, sessionId, role, sideCall,
-    turn: null, usage: null, teeFailure: null,
+    turn: null, usage: null, billing: null, stop: null, teeFailure: null,
   };
   if (!fs.existsSync(ssePath)) {
     out.note = 'no sse capture';
     return out;
   }
 
-  const onTurn = (t) => { out.turn = { text: t.text, truncated: t.truncated }; };
+  const onTurn = (t) => {
+    out.turn = { text: t.text, truncated: t.truncated };
+    out.billing = t.billing || null;
+    out.stop = t.stop || null;
+  };
   const onUsage = (u) => { out.usage = u.usage; };
   const onFail = (f) => { out.teeFailure = f.error; };
   proxy.on('turn.completed', onTurn);
@@ -117,7 +121,8 @@ function replayPair(proxy, classifier, stem, reqPath, ssePath, opts) {
   proxy.on('tee-failure', onFail);
   try {
     const tee = proxy._buildTee(
-      { agent: out.agent, provider, reqId: stem, sessionId, role, sideCall },
+      { agent: out.agent, provider, reqId: stem, sessionId, role, sideCall,
+        model: typeof obj.model === 'string' ? obj.model : null, requestId: null },
       null, // .response.sse is stored decoded
     );
     const sse = fs.readFileSync(ssePath);
