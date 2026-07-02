@@ -1789,6 +1789,9 @@ class ProxyPoller {
     for (const name of this.last.keys()) {
       if (!this.manager.sessions.has(name)) this.last.delete(name);
     }
+    if (this.manager._wireTelemetry) {
+      this.manager._wireTelemetry.prune(new Set(this.manager.sessions.keys()));
+    }
     const bases = this._activeBases();
     if (bases.size === 0) return; // nobody cares — skip all HTTP
     this._busy = true;
@@ -1851,6 +1854,10 @@ class ProxyPoller {
           }
           this.last.set(s.name, payload);
           this.manager._sendToSession(s.name, 'session-proxy', s.name, payload);
+          // W2 step-4 dark bridge: diff this live emission against the wire's
+          // shaped payload into the shadow log (validation evidence for the
+          // cutover). No-op unless CLODEX_WIRE_SHADOW brought the wire up.
+          if (this.manager._wireTelemetry) this.manager._wireTelemetry.diffPoll(s.name, payload);
           // Reconcile the wire strip state against proxy TRUTH every tick rather
           // than fire-once asserting. The old latch recorded "asserted" the moment
           // a POST was dispatched and only retried on a REJECTED promise — so a
@@ -2674,6 +2681,7 @@ class SessionManager {
     this.windows = new Map(); // workspaceId -> BrowserWindow
     this._wire = null;       // in-process tee (WIRE_SHADOW only in W1)
     this._shadow = null;     // wire-vs-jsonl intent differ
+    this._wireTelemetry = null; // W2 step-4 dark bridge (wire-telemetry.js)
   }
 
   // --- In-process wire tee (Phase W1, shadow mode) ---
@@ -2735,6 +2743,17 @@ class SessionManager {
         this._shadowLog({ type: 'wire-observer-error', error: e.message });
       }
     });
+    // W2 step-4 bridge (clodex-side, dark): shape receipts into poll-payload
+    // parity + diff against ProxyPoller emissions (wire-telemetry.js). Its own
+    // listener so the shadow-intent handler above stays untouched; every
+    // WireTelemetry method swallows its own errors.
+    try {
+      const { WireTelemetry } = require('./wire-telemetry');
+      this._wireTelemetry = new WireTelemetry({ warmth, log: (rec) => this._shadowLog(rec) });
+      wire.on('turn.completed', (t) => this._wireTelemetry.noteTurn(t));
+    } catch (e) {
+      this._shadowLog({ type: 'wire-telemetry-unavailable', error: e.message });
+    }
     wire.on('session', (ev) => this._shadowLog({ type: 'wire-session', ...ev }));
     wire.on('proxy-error', (ev) => this._shadowLog({ type: 'wire-error', ...ev }));
     // W3 cutover contract attaches here: when wire events become the live
