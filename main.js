@@ -1042,10 +1042,15 @@ const DEFAULT_UI_SETTINGS = {
     claudeCommand: '',
     codex: ['context-used', 'model-name', 'project-root', 'git-branch', 'five-hour-limit', 'current-dir'],
   },
-  proxyEnabled: false,
+  // ON by default since the proxy became self-contained (vendored copy +
+  // managed venv + autostart): "off" existed to protect users from a manual
+  // setup burden that no longer exists. The Traffic optimization toggle is
+  // the opt-out; missing python3 degrades to unrouted sessions, no breakage.
+  // Users who saved prefs before the flip keep their persisted choice.
+  proxyEnabled: true,
   proxyUrl: 'http://127.0.0.1:7800',
-  // wirescope integration (phase-0): a user-pointed source checkout Clodex can
-  // start/stop. Empty dir = nothing to manage (detect-only).
+  // wirescope source override: empty = the vendored copy bundled with Clodex;
+  // a power user can point at their own checkout (settings-file-only, no UI).
   wirescopeDir: '',
   wirescopePort: 7800,
   // Cold-resume compaction: when a parked session is resumed (GUI relaunch =
