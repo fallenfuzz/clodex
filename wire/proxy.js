@@ -24,9 +24,15 @@
 //   'request'        { agent, provider, reqId, method, path }
 //   'response'       { agent, reqId, status, sse }
 //   'stream-start'   { agent, reqId }                  → activity: thinking
-//   'turn.completed' { agent, provider, reqId, sessionId, text, usage, truncated }
+//   'turn.completed' { agent, provider, reqId, sessionId, role, sideCall,
+//                      text, usage, truncated }
+//                    role: parent/unknown = main line; Plan/verification/
+//                    general-purpose/subagent = Task subs (see wire/role.js).
+//                    sideCall: title-generator / health-probe request.
 //   'stream-end'     { agent, reqId }                  → activity: idle
-//   'session'        { agent, sessionId }              → persistence/--resume
+//   'session'        { agent, sessionId, previous }    → persistence/--resume
+//                    fires on CHANGE only (first sight or /clear rotation),
+//                    and only from main-line non-side-call turns.
 //   'usage'          { agent, reqId, usage }           → cost/ctx telemetry
 //   'proxy-error'    { agent, reqId, error }
 
@@ -42,6 +48,7 @@ const { URL } = require('url');
 const { parseAgentPath, inferProvider } = require('./route');
 const { SSEFramer, anthropicTextDelta, openaiTextDelta, UsageCollector } = require('./sse');
 const { Decompressor } = require('./decompress');
+const { RoleClassifier, isSubagentRole, isTitleCall, isProbeCall } = require('./role');
 
 // Hop-by-hop headers per RFC 7230 §6.1, plus content-length/host which the
 // HTTP libs manage themselves. content-encoding stays — the client receives
@@ -120,10 +127,9 @@ function detectSse(contentType, chatgptMode, method, upstreamPath) {
 // Claude Code ships session identity in metadata.user_id — currently a
 // JSON-encoded string with a session_id field; older builds used
 // "..._session_<uuid>". Handle both; null when absent.
-function extractSessionId(bodyBuf) {
+function sessionIdFrom(obj) {
   try {
-    const body = JSON.parse(bodyBuf.toString('utf8'));
-    const uid = (body.metadata && body.metadata.user_id) || '';
+    const uid = (obj.metadata && obj.metadata.user_id) || '';
     if (!uid) return null;
     try {
       const inner = JSON.parse(uid);
@@ -131,6 +137,14 @@ function extractSessionId(bodyBuf) {
     } catch { /* not JSON — fall through to regex */ }
     const m = /session[_-]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(uid);
     return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractSessionId(bodyBuf) {
+  try {
+    return sessionIdFrom(JSON.parse(bodyBuf.toString('utf8')));
   } catch {
     return null;
   }
@@ -155,6 +169,8 @@ class WireProxy extends EventEmitter {
     this.upstreams = { ...DEFAULT_UPSTREAMS, ...(opts.upstreams || {}) };
     this.requireTokens = !!opts.requireTokens;
     this._tokens = new Map(); // agent name → token
+    this._agentSessions = new Map(); // agent name → last main-line sessionId
+    this._roles = new RoleClassifier();
     this.stats = {
       startedAt: Date.now(),
       requestsTotal: 0,
@@ -188,7 +204,14 @@ class WireProxy extends EventEmitter {
   // closed-loop guarantee: it only ever exists in the app's memory and the
   // spawned CLI's environment, so nothing else on the machine can speak
   // for this agent.
-  registerAgent(name) {
+  //
+  // Spawn-time identity binding (closes the pre-first-request window the
+  // external proxy had): registration happens BEFORE the PTY spawns, and a
+  // resume can pre-bind the known sessionId so the proxy never has an
+  // unbound agent. The binding then tracks the CLI's declared identity
+  // ('session' fires only on change — first sight or /clear rotation).
+  registerAgent(name, opts = {}) {
+    if (opts.sessionId) this._agentSessions.set(name, opts.sessionId);
     if (this.requireTokens) {
       const token = crypto.randomBytes(16).toString('hex');
       this._tokens.set(name, token);
@@ -199,6 +222,23 @@ class WireProxy extends EventEmitter {
 
   unregisterAgent(name) {
     this._tokens.delete(name);
+    const sid = this._agentSessions.get(name);
+    if (sid) this._roles.forgetSession(sid);
+    this._agentSessions.delete(name);
+  }
+
+  sessionOf(name) {
+    return this._agentSessions.get(name) || null;
+  }
+
+  // Main-line identity binding: only called for parent/unknown non-side-call
+  // turns, so a subagent (shared session_id) or title probe can't rebind.
+  _bindSession(agent, sessionId) {
+    const prev = this._agentSessions.get(agent);
+    if (prev === sessionId) return;
+    this._agentSessions.set(agent, sessionId);
+    if (prev) this._roles.forgetSession(prev); // /clear rotated the id
+    this.emit('session', { agent, sessionId, previous: prev || null });
   }
 
   _json(res, status, obj) {
@@ -266,12 +306,29 @@ class WireProxy extends EventEmitter {
     const { agent, provider, reqId, upstreamBase, chatgptMode, body, query } = ctx;
     let upstreamPath = ctx.upstreamPath;
 
-    // Session identity rides in the request body. Cheap: only POSTs with a
-    // body are parsed, on an observer copy.
+    // Session identity + role classification ride in the request body.
+    // Observer-side: a parse failure degrades to null role, never a broken
+    // request. Anthropic wire only — codex carries neither the billing
+    // header nor metadata-embedded identity (hook path covers codex in W1).
     let sessionId = null;
+    let role = null;
+    let sideCall = false;
     if (body && req.method === 'POST') {
-      sessionId = extractSessionId(body);
-      if (sessionId) this.emit('session', { agent, sessionId });
+      try {
+        const obj = JSON.parse(body.toString('utf8'));
+        sessionId = sessionIdFrom(obj);
+        if (provider === 'anthropic') {
+          const agentId = req.headers['x-claude-code-agent-id'] || null;
+          sideCall = isTitleCall(obj) || isProbeCall(obj);
+          role = this._roles.classify(obj, sessionId, agentId);
+          if (!sideCall && !isSubagentRole(role)) {
+            // Durable main line: stamp the content fingerprint (the
+            // stale-agent-id backstop) and own the agent↔session binding.
+            this._roles.noteMainFingerprint(sessionId, obj);
+            if (sessionId) this._bindSession(agent, sessionId);
+          }
+        }
+      } catch { /* not JSON — nothing to observe */ }
     }
 
     const fwdHeaders = {};
@@ -302,7 +359,8 @@ class WireProxy extends EventEmitter {
       let tee = null;
       if (sse) {
         this.emit('stream-start', { agent, reqId });
-        tee = this._buildTee(agent, provider, reqId, sessionId, upRes.headers['content-encoding']);
+        tee = this._buildTee({ agent, provider, reqId, sessionId, role, sideCall },
+          upRes.headers['content-encoding']);
       }
 
       res.writeHead(upRes.statusCode, respHeaders);
@@ -346,8 +404,10 @@ class WireProxy extends EventEmitter {
   // Observer pipeline: raw bytes → decompress → SSE frames → text deltas →
   // turn accumulator (+ usage collector for anthropic). Emission order on
   // stream close: 'usage' → 'turn.completed' → 'stream-end', all strictly
-  // after the client's final byte.
-  _buildTee(agent, provider, reqId, sessionId, contentEncoding) {
+  // after the client's final byte. Consumers wanting main-line turns only
+  // (intent scanning) filter role parent/unknown + sideCall false.
+  _buildTee(turnCtx, contentEncoding) {
+    const { agent, provider, reqId, sessionId, role, sideCall } = turnCtx;
     const usage = provider === 'anthropic' ? new UsageCollector() : null;
     const extract = provider === 'anthropic' ? anthropicTextDelta : openaiTextDelta;
     let text = '';
@@ -372,7 +432,10 @@ class WireProxy extends EventEmitter {
           if (usageRecord) this.emit('usage', { agent, reqId, usage: usageRecord });
           if (text || usageRecord) {
             this.stats.turnsCompleted += 1;
-            this.emit('turn.completed', { agent, provider, reqId, sessionId, text, usage: usageRecord, truncated });
+            this.emit('turn.completed', {
+              agent, provider, reqId, sessionId, role, sideCall, text,
+              usage: usageRecord, truncated,
+            });
           }
           this.emit('stream-end', { agent, reqId });
         });

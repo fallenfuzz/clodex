@@ -34,18 +34,28 @@ const SSE_BODY = [
 
 const SESSION_ID = '4a59af49-cc52-44b7-8b02-7f4196a4b486';
 
-const REQUEST_BODY = JSON.stringify({
-  model: 'claude-test',
-  stream: true,
-  metadata: {
-    user_id: JSON.stringify({
-      device_id: 'd'.repeat(64),
-      account_uuid: 'fa6f9261-1d7e-4998-b9b7-a0f97aa9e8d6',
-      session_id: SESSION_ID,
-    }),
-  },
-  messages: [{ role: 'user', content: 'hi' }],
-});
+function makeBody(overrides = {}) {
+  return JSON.stringify({
+    model: 'claude-test',
+    stream: true,
+    system: [
+      { type: 'text', text: 'x-anthropic-billing-header: cc_surface=cli cc_is_subagent=false cc_version=a1b2c3.1.0.53' },
+      { type: 'text', text: 'You are Claude Code, an agentic coding tool.' },
+    ],
+    tools: [{ name: 'Bash' }],
+    metadata: {
+      user_id: JSON.stringify({
+        device_id: 'd'.repeat(64),
+        account_uuid: 'fa6f9261-1d7e-4998-b9b7-a0f97aa9e8d6',
+        session_id: SESSION_ID,
+      }),
+    },
+    messages: [{ role: 'user', content: 'hi' }],
+    ...overrides,
+  });
+}
+
+const REQUEST_BODY = makeBody();
 
 // Fake upstream: records the request, streams SSE in awkward chunk sizes
 // (boundaries land mid-frame) to exercise the framer's buffering.
@@ -135,11 +145,15 @@ test('e2e: byte-exact pass-through + turn.completed/session/usage events', async
   assert.equal(turn.sessionId, SESSION_ID);
   assert.equal(turn.text, 'On it.\n[agent:dm bob] hello from the wire\ndone.');
   assert.equal(turn.truncated, false);
+  assert.equal(turn.role, 'parent');
+  assert.equal(turn.sideCall, false);
   assert.equal(turn.usage.input_tokens, 10);
   assert.equal(turn.usage.output_tokens, 42);
 
   assert.equal(events.session[0].agent, 'tester');
   assert.equal(events.session[0].sessionId, SESSION_ID);
+  assert.equal(events.session[0].previous, null);
+  assert.equal(proxy.sessionOf('tester'), SESSION_ID);
 
   assert.equal(events.usage[0].usage.input_tokens, 10);
   assert.equal(events.usage[0].usage.output_tokens, 42);
@@ -197,6 +211,79 @@ test('dead upstream yields 502, not a hang', async () => {
   const res = await request(proxy.port, '/agent/tester/v1/messages', '{}');
   assert.equal(res.status, 502);
   await proxy.close();
+});
+
+test('identity binding: main line owns it; subagents and side-calls cannot rebind', async () => {
+  const up = await startFakeUpstream();
+  const proxy = new WireProxy({ upstreams: { anthropic: `http://127.0.0.1:${up.port}` } });
+  await proxy.listen();
+  const events = collect(proxy, ['session', 'turn.completed']);
+
+  // Turn 1: parent — binds agent↔session, fires 'session' once.
+  await request(proxy.port, '/agent/tester/v1/messages', REQUEST_BODY);
+  // Turn 2: same parent, same session — no re-fire.
+  await request(proxy.port, '/agent/tester/v1/messages', REQUEST_BODY);
+  // Subagent turn under a DIFFERENT (bogus) session id must not rebind.
+  const subBody = makeBody({
+    system: [
+      { type: 'text', text: 'x-anthropic-billing-header: cc_surface=cli cc_is_subagent=true cc_version=ffff99.1' },
+      { type: 'text', text: 'You are an agent for Claude Code.' },
+    ],
+    metadata: { user_id: JSON.stringify({ session_id: '99999999-9999-9999-9999-999999999999' }) },
+  });
+  await request(proxy.port, '/agent/tester/v1/messages', subBody);
+  // Title side-call must not rebind either.
+  const titleBody = makeBody({
+    system: 'Generate a concise, sentence-case title for this conversation.',
+    tools: [],
+    metadata: { user_id: JSON.stringify({ session_id: '88888888-8888-8888-8888-888888888888' }) },
+  });
+  await request(proxy.port, '/agent/tester/v1/messages', titleBody);
+
+  await new Promise((r) => setTimeout(r, 60));
+
+  assert.equal(events.session.length, 1);
+  assert.equal(proxy.sessionOf('tester'), SESSION_ID);
+
+  // All four streams produced turns, correctly labeled for the consumer.
+  const roles = events['turn.completed'].map((t) => [t.role, t.sideCall]);
+  assert.deepEqual(roles, [
+    ['parent', false],
+    ['parent', false],
+    ['general-purpose', false],
+    ['unknown', true],
+  ]);
+
+  await proxy.close();
+  up.server.close();
+});
+
+test('registerAgent pre-binds a resumed session id', async () => {
+  const up = await startFakeUpstream();
+  const proxy = new WireProxy({ upstreams: { anthropic: `http://127.0.0.1:${up.port}` } });
+  await proxy.listen();
+  const events = collect(proxy, ['session']);
+
+  proxy.registerAgent('tester', { sessionId: SESSION_ID });
+  assert.equal(proxy.sessionOf('tester'), SESSION_ID);
+
+  // First request declares the SAME id → already bound, no event.
+  await request(proxy.port, '/agent/tester/v1/messages', REQUEST_BODY);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(events.session.length, 0);
+
+  // /clear rotates the id → change fires with previous recorded.
+  const rotated = makeBody({
+    metadata: { user_id: JSON.stringify({ session_id: '11111111-2222-3333-4444-555555555555' }) },
+  });
+  await request(proxy.port, '/agent/tester/v1/messages', rotated);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(events.session.length, 1);
+  assert.equal(events.session[0].sessionId, '11111111-2222-3333-4444-555555555555');
+  assert.equal(events.session[0].previous, SESSION_ID);
+
+  await proxy.close();
+  up.server.close();
 });
 
 test('malformed SSE degrades to no turn, session unbroken', async () => {
