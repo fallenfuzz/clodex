@@ -2,7 +2,20 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { PRICES, PRICES_OPENAI, priceFor, billing, billingOpenai, newTotals, bump, Ledger } = require('../wire/billing');
+const { PRICES, PRICES_OPENAI, priceFor, round6, billing, billingOpenai, newTotals, bump, Ledger } = require('../wire/billing');
+
+test('round6 matches Python round(): ties-to-even on the exact binary value', () => {
+  // exact dyadic ties — toFixed would give ...63 / ...25; Python gives even.
+  // Golden-gate regression: 203125 * 0.50 / 1e6 and 78125 * 0.50 / 1e6.
+  assert.equal(round6(203125 * 0.50 / 1e6), 0.101562);
+  assert.equal(round6(78125 * 0.50 / 1e6), 0.039062);
+  assert.equal(round6(0.0000015), 0.000002); // 0.0000015 double is above the true tie
+  // non-tie: the double for 1.0000005 sits slightly ABOVE the true tie
+  assert.equal(round6(1.0000005), 1.000001);
+  assert.equal(round6(0), 0);
+  assert.equal(round6(-0.1015625), -0.101562);
+  assert.equal(round6(0.026262), 0.026262);
+});
 
 test('priceFor: longest prefix wins (opus-4-8 must not hit legacy opus-4)', () => {
   assert.equal(priceFor('claude-opus-4-8-20260115').in, 5.0);

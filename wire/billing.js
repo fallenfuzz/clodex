@@ -77,11 +77,31 @@ function usd(tokens, ratePerM) {
   return round6((tokens || 0) * ratePerM / 1_000_000);
 }
 
-// Python round(x, 6) on the exact binary double. toFixed is also
-// exact-decimal; they differ only on exact .5 ties (astronomically rare
-// for token*rate/1e6 — the golden gate would surface one).
+// Python round(x, 6): correctly rounded on the double's EXACT binary
+// value, ties to EVEN. toFixed rounds ties up, and exact ties are not
+// rare here — token*rate/1e6 lands on one whenever the product is a
+// dyadic rational (the golden gate caught 3 in the first corpus run,
+// e.g. 203125 read-tokens * $0.50/1M = 0.1015625). Decompose the double
+// with BigInt and round exactly; no float tricks.
 function round6(x) {
-  return Number(x.toFixed(6));
+  if (!Number.isFinite(x) || x === 0) return x;
+  const dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, x);
+  const bits = dv.getBigUint64(0);
+  const sign = bits >> 63n ? -1 : 1;
+  const rawExp = Number((bits >> 52n) & 0x7ffn);
+  let mant = bits & 0xfffffffffffffn;
+  let exp;
+  if (rawExp === 0) { exp = 1 - 1075; } else { mant |= 0x10000000000000n; exp = rawExp - 1075; }
+  // |x| * 10^6 = mant * 10^6 * 2^exp; round half-to-even to integer q
+  let num = mant * 1000000n;
+  let den = 1n;
+  if (exp >= 0) num <<= BigInt(exp);
+  else den = 1n << BigInt(-exp);
+  let q = num / den;
+  const twiceRem = 2n * (num % den);
+  if (twiceRem > den || (twiceRem === den && (q & 1n) === 1n)) q += 1n;
+  return sign * Number(q) / 1e6;
 }
 
 // Python dict.get(k, fallback): fall back on key ABSENCE, an explicit
