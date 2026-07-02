@@ -3553,9 +3553,9 @@ class SessionManager {
           // Inject the mandatory handoff as turn-one once the FRESH process is
           // listening. reattach (above) is a UI signal fired immediately after
           // create() — too early; the new CLI's input loop isn't up yet. The
-          // real readiness gate is the new watcher reporting a sessionId (cold
-          // boot mints one when the SessionStart hook repoints the symlink =
-          // CLI booted). _injectReloadHandoff polls for it, then settles + injects.
+          // real readiness gate is the SessionStart hook recreating the
+          // transcript symlink (= CLI booted; kill's cleanup removed the old
+          // one). _injectReloadHandoff polls for it, then settles + injects.
           const fresh = this.sessions.get(name);
           if (fresh) this._injectReloadHandoff(fresh, handoff);
         } catch (err) {
@@ -3593,18 +3593,28 @@ class SessionManager {
 
   // Inject a reloaded session's mandatory handoff body as turn-one, once the
   // FRESH process is actually listening. Same-process restart, so the body rides
-  // a closure variable across kill→create — no disk needed. Readiness gate: a
-  // cold boot (resumeId=null) starts with session.sessionId=null; the new
-  // JsonlWatcher sets it when the SessionStart hook repoints the symlink, which
-  // means the CLI has booted. Poll for that, then a settle delay so the input
-  // loop is up, then inject. If the session dies or never reports a sessionId
-  // (timeout), bail rather than inject blind into a half-dead PTY.
+  // a closure variable across kill→create — no disk needed. Readiness gate: the
+  // SessionStart hook repoints ~/.clodex/<name>.jsonl at CLI boot, and kill()'s
+  // cleanup unlinked the old link before we respawned — so link-present = fresh
+  // CLI booted. Probe with readlinkSync, NOT session.sessionId: the watcher only
+  // sets sessionId once the transcript FILE exists, and Claude creates it lazily
+  // on the first user turn — gating turn-one injection on it deadlocks and the
+  // timeout eats the handoff (bit us live 2026-07-02). Then a settle delay so
+  // the input loop is up, then inject. If the session dies or the link never
+  // appears (CLI failed to boot), bail rather than inject blind into a half-dead
+  // PTY — but surface the drop in the IPC log, not just the dev console.
   async _injectReloadHandoff(session, handoff, timeoutMs = 30000) {
+    const linkPath = path.join(REGISTRY_DIR, `${session.name}.jsonl`);
     const start = Date.now();
-    while (!session.sessionId) {
+    for (;;) {
       if (session._dead) return;
+      try { fs.readlinkSync(linkPath); break; } catch {}
       if (Date.now() - start > timeoutMs) {
-        console.error(`[agent:context reload] ${session.name}: fresh session never reported a sessionId; handoff not injected`);
+        console.error(`[agent:context reload] ${session.name}: fresh CLI never signaled boot (no transcript symlink); handoff not injected`);
+        this._broadcast('ipc-message', {
+          type: 'context', from: session.name, to: session.name,
+          body: 'context reload → handoff NOT injected (fresh CLI never signaled boot)',
+        });
         return;
       }
       await new Promise(r => setTimeout(r, 100));
