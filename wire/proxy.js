@@ -24,6 +24,13 @@
 //   'request'        { agent, provider, reqId, method, path }
 //   'response'       { agent, reqId, status, sse }
 //   'stream-start'   { agent, reqId }                  → activity: thinking
+//   'turn.started'   { agent, provider, reqId, sessionId, role, sideCall,
+//                      model }
+//                    W3: emitted at request-accept for exactly the calls
+//                    that will later produce a turn.completed (anthropic
+//                    POST /v1/messages, count_tokens excluded) — so a
+//                    started/completed in-flight counter can't leak. App-
+//                    side activity tracking opens 'thinking' here.
 //   'turn.completed' { agent, provider, reqId, sessionId, role, sideCall,
 //                      text, usage, truncated, model, status, billing, stop,
 //                      sessionTotals, warmth }
@@ -375,6 +382,16 @@ class WireProxy extends EventEmitter {
           }
         }
       } catch { /* not JSON — nothing to observe */ }
+    }
+
+    // Turn-open observation (W3 intent cutover: app-side activity tracking).
+    // Emitted for exactly the requests that will later produce a
+    // turn.completed — anthropic POST /v1/messages, count_tokens excluded
+    // (it bills but never emits a turn receipt) — so started/completed pair
+    // 1:1 and an in-flight counter can't leak. Observation only.
+    if (provider === 'anthropic' && req.method === 'POST'
+        && upstreamPath.replace(/\/+$/, '').endsWith('/v1/messages')) {
+      this.emit('turn.started', { agent, provider, reqId, sessionId, role, sideCall, model });
     }
 
     const fwdHeaders = {};

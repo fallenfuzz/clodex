@@ -41,6 +41,7 @@ for (const f of fs.readdirSync(path.join(ROOT, 'wire')).filter((f) => f.endsWith
   check(`require wire/${f}`, () => require(path.join(ROOT, 'wire', f)));
 }
 check('require wire-telemetry.js', () => require(path.join(ROOT, 'wire-telemetry.js')));
+check('require wire-intents.js', () => require(path.join(ROOT, 'wire-intents.js')));
 
 // 2. The crypto surface wire/ actually uses must produce digests here.
 check('crypto digests used by wire/', () => {

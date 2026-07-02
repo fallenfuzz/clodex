@@ -213,6 +213,17 @@ const WIRE_SHADOW = process.env.CLODEX_WIRE_SHADOW === '1';
 const WIRE_TELEMETRY_LIVE = process.env.CLODEX_WIRE_TELEMETRY != null
   ? process.env.CLODEX_WIRE_TELEMETRY === '1'
   : WIRE_SHADOW;
+// W3 intent cutover: wire turn.completed becomes the LIVE intent path for
+// wire-routed claude sessions; the always-on 250ms transcript parse is
+// replaced by a TranscriptSentinel (symlink identity + compact rendezvous +
+// tee-failure recovery — wire-intents.js). Evidence: W1 shadow gates green
+// plus the healthy-epoch differ (7/7 intents both-seen, 0 unmatched; every
+// historical unmatched maps to the dead-tee window or JSONL flush latency).
+// Codex and wire-failed spawns keep the JsonlWatcher path untouched.
+// CLODEX_WIRE_INTENTS=0 reverts to JSONL dispatch (with wire shadow-compare).
+const WIRE_INTENTS_LIVE = process.env.CLODEX_WIRE_INTENTS != null
+  ? process.env.CLODEX_WIRE_INTENTS === '1'
+  : WIRE_SHADOW;
 const LONG_TEXT_THRESHOLD = 200;
 const LONG_TEXT_DELAY = 1000;
 const SHORT_TEXT_DELAY = 50;
@@ -2707,6 +2718,18 @@ class SessionManager {
     this._wire = null;       // in-process tee (WIRE_SHADOW only in W1)
     this._shadow = null;     // wire-vs-jsonl intent differ
     this._wireTelemetry = null; // W2 step-4 dark bridge (wire-telemetry.js)
+    // W3 intent cutover (wire-intents.js): claim-once intent ledger shared by
+    // the wire dispatch and the tee-failure recovery watcher, and the
+    // wire-event-fed activity tracker. Built eagerly — they're pure state,
+    // and the JSONL path never touches them.
+    const { IntentDeduper, ActivityTracker } = require('./wire-intents');
+    this._intentDeduper = new IntentDeduper();
+    this._activity = new ActivityTracker((name, state, { turnEnd }) => {
+      // Notify only on a REAL turn end (stop.is_turn) — the quiet-gap idle
+      // (mid-turn tool run gone silent) isn't "finished". The JSONL path
+      // notified on every 1s flush; this is the honest version.
+      this._emitActivity(name, state, state === 'idle' && turnEnd);
+    });
   }
 
   // --- In-process wire tee (Phase W1, shadow mode) ---
@@ -2751,22 +2774,65 @@ class SessionManager {
     this._shadow = new ShadowDiff((rec) => this._shadowLog(rec));
     wire.on('turn.completed', (t) => {
       try {
-        if (t.sideCall || isSubagentRole(t.role)) return; // main line only
+        // Activity: every non-side-call completion feeds the tracker; only a
+        // main-line terminal stop (is_turn) reads as "finished". Wire-owned
+        // sessions only — the JsonlWatcher owns activity everywhere else.
+        {
+          const s = this.sessions.get(t.agent);
+          if (s && s.intentSource === 'wire') {
+            this._activity.turnCompleted(t.agent, { reqId: t.reqId, sideCall: t.sideCall, stop: t.stop });
+          }
+        }
+        if (t.sideCall || isSubagentRole(t.role)) return; // intents: main line only
         const intents = this._extractIntents(t.text);
         this._shadowLog({
           type: 'wire-turn', agent: t.agent, sessionId: t.sessionId,
           role: t.role, reqId: t.reqId, textLen: t.text.length,
           intents: intents.length,
         });
-        for (const intent of intents) {
-          this._shadow.record('wire', shadowIntentKey(t.agent, intent), {
-            agent: t.agent, sessionId: t.sessionId, intentType: intent.type,
-            reqId: t.reqId,
-          });
+        const s = this.sessions.get(t.agent);
+        if (s && s.intentSource === 'wire') {
+          // W3 LIVE path: dispatch off the wire receipt. A healthy main-line
+          // turn also ends any tee-failure recovery window (the sentinel's
+          // stop() flushes its pending text back through this same deduper,
+          // so the handover turn can't double-fire). Dispatch is deferred off
+          // the wire's finalize callback — _handleIntent can kill/inject
+          // PTYs and even unregister this agent from the wire (reload).
+          if (s.sentinel) s.sentinel.noteWireHealthy();
+          for (const intent of intents) {
+            if (!this._intentDeduper.claim(t.agent, shadowIntentKey(t.agent, intent))) continue;
+            setImmediate(() => this._handleIntent(t.agent, intent));
+          }
+          // Identity backstop: the sentinel's symlink poll is the primary
+          // (it fires at CLI boot, before any turn); the receipt keeps
+          // persistence honest even if the hook's symlink got wiped.
+          if (t.sessionId && s.sessionId !== t.sessionId) {
+            s.sessionId = t.sessionId;
+            persistence.setSessionId(t.agent, t.sessionId);
+          }
+        } else if (s && s.agentType === 'claude') {
+          // Shadow-compare mode (CLODEX_WIRE_INTENTS=0): record wire
+          // sightings for the differ; the JSONL path stays live.
+          for (const intent of intents) {
+            this._shadow.record('wire', shadowIntentKey(t.agent, intent), {
+              agent: t.agent, sessionId: t.sessionId, intentType: intent.type,
+              reqId: t.reqId,
+            });
+          }
         }
       } catch (e) {
         this._shadowLog({ type: 'wire-observer-error', error: e.message });
       }
+    });
+    // Activity opens on the request, not the response — the bar/tray dot
+    // flips to "thinking" the moment a messages call leaves the CLI.
+    wire.on('turn.started', (t) => {
+      try {
+        const s = this.sessions.get(t.agent);
+        if (s && s.intentSource === 'wire') {
+          this._activity.turnStarted(t.agent, { reqId: t.reqId, sideCall: t.sideCall });
+        }
+      } catch { /* observer-grade */ }
     });
     // W2 step-4 bridge (clodex-side, dark): shape receipts into poll-payload
     // parity + diff against ProxyPoller emissions (wire-telemetry.js). Its own
@@ -2788,11 +2854,36 @@ class SessionManager {
       this._shadowLog({ type: 'wire-telemetry-unavailable', error: e.message });
     }
     wire.on('session', (ev) => this._shadowLog({ type: 'wire-session', ...ev }));
-    wire.on('proxy-error', (ev) => this._shadowLog({ type: 'wire-error', ...ev }));
-    // W3 cutover contract attaches here: when wire events become the live
-    // intent path, a tee-failure must disable ALL wire-fed controls
-    // visibly (never a partial set). In shadow mode it is log-only.
-    wire.on('tee-failure', (ev) => this._shadowLog({ type: 'wire-tee-failure', ...ev }));
+    // Failed request: no receipt will come for this reqId. Unstick activity;
+    // for a wire-owned session a tee-failure also means that turn's TEXT (and
+    // any intents in it) is lost to the wire — arm the transcript recovery
+    // watcher: the CLI writes the turn to the transcript regardless, and the
+    // sentinel replays the tail through the same dedupe'd dispatch until the
+    // wire produces a healthy main-line turn again. Visible, not silent: the
+    // IPC log broadcast is the W3 form of the "tee-failure must disable/
+    // degrade wire-fed controls visibly" contract — the degradation IS the
+    // fallback path, announced.
+    const onWireFailure = (ev, kind) => {
+      this._shadowLog({ type: kind, ...ev });
+      try {
+        this._activity.requestFailed(ev.agent, ev.reqId);
+        const s = this.sessions.get(ev.agent);
+        if (s && s.intentSource === 'wire' && s.sentinel && !s.sentinel.recovering) {
+          s.sentinel.armRecovery((text) => {
+            for (const intent of this._extractIntents(text)) {
+              if (!this._intentDeduper.claim(ev.agent, shadowIntentKey(ev.agent, intent))) continue;
+              setImmediate(() => this._handleIntent(ev.agent, intent));
+            }
+          });
+          this._broadcast('ipc-message', {
+            type: 'system', from: ev.agent, to: ev.agent,
+            body: `wire ${kind} (${ev.error}) — intent recovery armed on transcript tail`,
+          });
+        }
+      } catch { /* observer-grade */ }
+    };
+    wire.on('proxy-error', (ev) => onWireFailure(ev, 'wire-error'));
+    wire.on('tee-failure', (ev) => onWireFailure(ev, 'wire-tee-failure'));
     this._shadowLog({ type: 'wire-up', port: wire.port });
     this._wire = wire;
     return wire;
@@ -2878,6 +2969,13 @@ class SessionManager {
     let cmd, args;
     const shell = process.env.SHELL || '/bin/bash';
     const agentType = (type === 'claude') ? 'claude' : (type === 'codex') ? 'codex' : null;
+    // W3: which mechanism owns live intent dispatch + activity for this
+    // session. 'wire' only when the claude spawn actually registered with the
+    // in-process wire (set below); everything else keeps the JSONL path.
+    // wireRouted (bytes flow through the tee, whatever owns intents) gates
+    // the shadow differ: comparing feeds only makes sense when both exist.
+    let intentSource = 'jsonl';
+    let wireRouted = false;
 
     // Stable per-session proxy identity (clodex-<name>-<nonce>). Reuse the
     // persisted one across resume/restart/restore/clear; mint fresh on a new
@@ -2932,6 +3030,11 @@ class SessionManager {
             console.error('wire shadow unavailable, spawning unshadowed:', e.message);
           }
         }
+        // Intent cutover is per-session and spawn-bound: only a session whose
+        // bytes actually flow through the wire may take intents from it. A
+        // wire-failed spawn stays JSONL — never a silent intent blackout.
+        wireRouted = !!wireBase;
+        if (wireBase && WIRE_INTENTS_LIVE) intentSource = 'wire';
         if (!args.includes('--settings')) {
           const settingsPath = setupClaudeHook(name, proxyBase, proxyAgent, denyBuiltins, disabledTools, disabledSkills, wireBase);
           args.push('--settings', settingsPath);
@@ -3124,6 +3227,7 @@ class SessionManager {
       sessionId: resumeId || null,
       workspaceId,
       proxyAgent, proxyBase,
+      intentSource, wireRouted, sentinel: null,
     };
     this.sessions.set(name, session);
 
@@ -3149,48 +3253,40 @@ class SessionManager {
       injectSkills: Array.isArray(injectSkills) ? injectSkills : [],
     });
 
-    // JSONL watcher for agent modes
-    if (agentType) {
+    // Turn observation for agent modes. Two mutually exclusive paths:
+    //
+    //   wire (W3 cutover)  claude session successfully registered with the
+    //     in-process wire — intents/activity ride turn events (_ensureWire
+    //     listeners); a TranscriptSentinel keeps the transcript-only jobs
+    //     (symlink identity, compact rendezvous, tee-failure recovery).
+    //     Steady-state transcript PARSING: none.
+    //
+    //   jsonl (legacy)  codex sessions (no wire route yet), wire-failed
+    //     spawns, and CLODEX_WIRE_INTENTS=0 — the full JsonlWatcher, exactly
+    //     the pre-cutover behavior (incl. shadow-compare when wire-routed).
+    const onSessionId = (sessionId) => {
+      session.sessionId = sessionId;
+      persistence.setSessionId(name, sessionId);
+    };
+    if (agentType && session.intentSource === 'wire') {
+      const { TranscriptSentinel } = require('./wire-intents');
+      session.sentinel = new TranscriptSentinel({
+        linkPath: path.join(REGISTRY_DIR, `${name}.jsonl`),
+        onSessionId,
+        // The sentinel never parses transcripts itself: armed windows get a
+        // real JsonlWatcher (starts at EOF — exactly the "tail from now"
+        // semantics both the compact rendezvous and recovery replay need).
+        makeWatcher: ({ onText, onCompactSummary }) => new JsonlWatcher(
+          name, onText || (() => {}), () => {}, () => {}, onCompactSummary || (() => {})),
+      });
+      session.sentinel.start();
+    } else if (agentType) {
       session.watcher = new JsonlWatcher(
         name,
         (text) => this._scanJsonlText(text, name),
-        (sessionId) => {
-          session.sessionId = sessionId;
-          persistence.setSessionId(name, sessionId);
-        },
-        (state) => {
-          // state: 'thinking' | 'idle'
-          this._sendToSession(name, 'session-activity', name, state);
-          // Surface a system notification when an agent finishes
-          const owningWin = this.windowForSession(name);
-          if (state === 'idle' && (!owningWin || !owningWin.isFocused())) {
-            try {
-              const { Notification } = require('electron');
-              if (Notification.isSupported()) {
-                new Notification({
-                  title: `${name} finished`,
-                  body: 'Agent completed a turn.',
-                  silent: false,
-                }).show();
-              }
-            } catch {}
-          }
-        },
-        () => {
-          // Compact summary landed. If this compact was self-fired via
-          // [agent:context compact], a continuation was stashed — inject it now
-          // as the first post-compact turn so the agent keeps working instead of
-          // parking. One-shot: clear the stash so a later manual /compact (no
-          // stash) never replays it. Defer so the inject lands after the summary
-          // write fully settles in the PTY.
-          const cont = session._compactContinuation;
-          if (cont) {
-            session._compactContinuation = null;
-            setTimeout(() => {
-              if (!session._dead) this._injectText(session, cont);
-            }, COMPACT_CONTINUATION_DELAY);
-          }
-        },
+        onSessionId,
+        (state) => this._emitActivity(name, state, state === 'idle'),
+        () => this._fireCompactContinuation(session),
       );
       session.watcher.start();
     }
@@ -3312,12 +3408,15 @@ class SessionManager {
     if (!s) return;
     if (this._wire) { try { this._wire.unregisterAgent(name); } catch {} }
     if (s.watcher) s.watcher.stop();
+    if (s.sentinel) { try { s.sentinel.stop(); } catch {} }
     if (s.ctxWatcher) { try { s.ctxWatcher.close(); } catch {} }
     if (s.transport) s.transport.stop();
     if (s.agentType) registry.unregister(name);
     if (s.agentType === 'claude') { cleanupClaudeHook(name); cleanupSkillPlugin(name); }
     if (s.agentType === 'codex') cleanupCodexHook(name, s.cwd);
     this.sessions.delete(name);
+    const live = new Set(this.sessions.keys());
+    try { this._intentDeduper.prune(live); this._activity.prune(live); } catch {}
   }
 
   // --- PTY output scanning (non-agent mode) ---
@@ -3331,6 +3430,43 @@ class SessionManager {
       const intent = parseIntent(line);
       if (!intent || intent.type === 'escape') continue;
       this._handleIntent(session.name, intent);
+    }
+  }
+
+  // Activity fan-out shared by both observation paths (wire tracker + legacy
+  // JsonlWatcher callback): renderer event + optional "finished" notification
+  // when the owning window isn't focused.
+  _emitActivity(name, state, notify) {
+    this._sendToSession(name, 'session-activity', name, state);
+    if (!notify) return;
+    const owningWin = this.windowForSession(name);
+    if (!owningWin || !owningWin.isFocused()) {
+      try {
+        const { Notification } = require('electron');
+        if (Notification.isSupported()) {
+          new Notification({
+            title: `${name} finished`,
+            body: 'Agent completed a turn.',
+            silent: false,
+          }).show();
+        }
+      } catch {}
+    }
+  }
+
+  // Compact summary landed. If this compact was self-fired via
+  // [agent:context compact], a continuation was stashed — inject it now as
+  // the first post-compact turn so the agent keeps working instead of
+  // parking. One-shot: clear the stash so a later manual /compact (no stash)
+  // never replays it. Defer so the inject lands after the summary write
+  // fully settles in the PTY.
+  _fireCompactContinuation(session) {
+    const cont = session._compactContinuation;
+    if (cont) {
+      session._compactContinuation = null;
+      setTimeout(() => {
+        if (!session._dead) this._injectText(session, cont);
+      }, COMPACT_CONTINUATION_DELAY);
     }
   }
 
@@ -3382,10 +3518,14 @@ class SessionManager {
   }
 
   _scanJsonlText(text, senderName) {
+    const s = this.sessions.get(senderName);
     for (const intent of this._extractIntents(text)) {
-      if (WIRE_SHADOW && this._shadow) {
+      // Differ: only when this session ALSO has a wire feed to compare
+      // against (shadow-compare mode, CLODEX_WIRE_INTENTS=0). A codex or
+      // wire-failed session has no wire side — recording it would only
+      // manufacture unmatched noise.
+      if (WIRE_SHADOW && this._shadow && s && s.wireRouted && s.intentSource === 'jsonl') {
         try {
-          const s = this.sessions.get(senderName);
           this._shadow.record('jsonl', shadowIntentKey(senderName, intent), {
             agent: senderName, sessionId: (s && s.sessionId) || null,
             intentType: intent.type,
@@ -3686,6 +3826,10 @@ class SessionManager {
     if (sub === 'compact') {
       const cont = (body && body.trim()) ? body.trim() : DEFAULT_COMPACT_CONTINUATION;
       session._compactContinuation = cont;
+      // Wire-owned sessions have no always-on transcript watcher; arm the
+      // sentinel's compact rendezvous for exactly this window (isCompactSummary
+      // is a transcript fact — nothing rides the wire for it).
+      if (session.sentinel) session.sentinel.armCompact(() => this._fireCompactContinuation(session));
     }
     // Inject the literal slash command as a turn — same PTY-write path as any
     // other injection (_injectText defers the Enter off the death window).
