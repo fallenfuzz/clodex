@@ -1412,13 +1412,45 @@ function mergeCodexInstructions(extraArgs, ipcPrompt, opts = {}) {
   return { cleaned, merged: parts.filter(Boolean).join('\n\n') };
 }
 
-// Parse the statusline ctx side-channel "<pct>\t<used_tokens>\t<window_size>".
-// pct is the first whitespace-delimited field, so callers that still parseInt
-// the whole file keep working; tok/size are null on legacy single-value files.
+// Context-window sizes the CLI statusline under-reports. The bar's denominator
+// comes solely from statusline JSON `.context_window.context_window_size`, and
+// for 1M-window models the CLI still reports 200k (observed: claude-fable-5
+// showing "20% of 200k" on a 1M window). First matching rule wins; the override
+// never SHRINKS a reported size, so a CLI that starts reporting correctly (or a
+// future >1M window) passes through untouched.
+const MODEL_WINDOWS = [
+  [/\[1m\]$/, 1_000_000],        // CLI marks 1M-mode ids with a [1m] suffix
+  [/^claude-fable-5/, 1_000_000], // 1M natively
+];
+
+function effectiveWindowSize(modelId, reported) {
+  if (modelId) {
+    for (const [re, size] of MODEL_WINDOWS) {
+      if (re.test(modelId)) return Math.max(size, reported || 0);
+    }
+  }
+  return reported;
+}
+
+// Parse the statusline ctx side-channel "<pct>\t<used_tokens>\t<window_size>
+// \t<model_id>". pct is the first whitespace-delimited field, so callers that
+// still parseInt the whole file keep working; tok/size/model are null on legacy
+// shorter files. Applies the MODEL_WINDOWS denominator override here — the one
+// choke point both the live fs.watch path and restore's readCtxFor go through —
+// and recomputes pct against the corrected size (the CLI's used_percentage is
+// computed off the same wrong denominator).
 function parseCtxFile(raw) {
   const parts = String(raw).trim().split('\t');
   const num = (s) => { const n = parseInt(s, 10); return isNaN(n) ? null : n; };
-  return { pct: num(parts[0]), tok: num(parts[1]), size: num(parts[2]) };
+  let pct = num(parts[0]);
+  const tok = num(parts[1]);
+  const reported = num(parts[2]);
+  const model = (parts[3] || '').trim() || null;
+  const size = effectiveWindowSize(model, reported);
+  if (size !== reported && tok != null && size > 0) {
+    pct = Math.round((tok / size) * 100);
+  }
+  return { pct, tok, size };
 }
 
 // Render Claude's statusline bash script based on user-selected components.
@@ -1458,21 +1490,24 @@ function renderClaudeStatusScript(name, headless = false) {
     : '';
   return `#!/bin/bash
 INPUT="$(cat)"
-IFS=$'\\t' read -r MODEL CTX_NUM CTX_PCT COST CWD CTX_TOK CTX_SIZE <<<"$(echo "$INPUT" | jq -r '[
+IFS=$'\\t' read -r MODEL CTX_NUM CTX_PCT COST CWD CTX_TOK CTX_SIZE MODEL_ID <<<"$(echo "$INPUT" | jq -r '[
   (.model.display_name // "?"),
   ((.context_window.used_percentage // 0) | floor | tostring),
   (((.context_window.used_percentage // 0) | floor | tostring) + "%"),
   ("$" + (((.cost.total_cost_usd // 0) * 100 | floor) / 100 | tostring)),
   (.workspace.current_dir // .cwd // ""),
   ((.context_window.total_input_tokens // 0) | floor | tostring),
-  ((.context_window.context_window_size // 0) | floor | tostring)
+  ((.context_window.context_window_size // 0) | floor | tostring),
+  (.model.id // "")
 ] | @tsv' 2>/dev/null)"
 SHORT_CWD="\${CWD##*/}"
 ${branchSh}
-# Side-channel for Clodex: "<pct>\\t<used_tokens>\\t<window_size>". pct stays the
-# first field so legacy parseInt readers (sidebar badge) are unaffected; the
-# token counts feed the proxy bar's absolute "used/size" display.
-printf '%s\\t%s\\t%s' "\${CTX_NUM}" "\${CTX_TOK}" "\${CTX_SIZE}" > "${REGISTRY_DIR}/${name}-ctx" 2>/dev/null || true
+# Side-channel for Clodex: "<pct>\\t<used_tokens>\\t<window_size>\\t<model_id>".
+# pct stays the first field so legacy parseInt readers (sidebar badge) are
+# unaffected; the token counts feed the proxy bar's absolute "used/size"
+# display; model_id lets the app correct the window size the CLI under-reports
+# for 1M models (MODEL_WINDOWS in main.js).
+printf '%s\\t%s\\t%s\\t%s' "\${CTX_NUM}" "\${CTX_TOK}" "\${CTX_SIZE}" "\${MODEL_ID}" > "${REGISTRY_DIR}/${name}-ctx" 2>/dev/null || true
 ${customCmd ? `export CLODEX_AGENT_NAME="${name}"
 OUT="$(printf '%s' "$INPUT" | ( ${customCmd} ) 2>/dev/null)"
 if [ -n "$OUT" ]; then
