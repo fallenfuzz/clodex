@@ -53,13 +53,68 @@ function inc(now, base) {
 }
 
 class WireTelemetry {
-  constructor({ warmth = null, hold = null, log = () => {} } = {}) {
+  constructor({ warmth = null, hold = null, log = () => {}, persist = null } = {}) {
     this._warmth = warmth;
     this._hold = hold; // wire/hold HoldKeeper — hold/pingable payload fields + overlay ownership
     this._log = log;
     this._agents = new Map();   // name -> { sessionId, model, totals, inputTokens, ts }
     this._lastDiff = new Map(); // name -> JSON of last logged diff (dedupe)
     this._baseline = new Map(); // name -> co-observation epoch base (see diffPoll)
+    // Lifetime-totals continuity (full-independence ledger, CLODEUX-PLAN.md):
+    // the wire's sessionTotals are per-app-launch; wirescope's poll payload
+    // carried PERSISTED session-lifetime totals. `persist` ({read, write})
+    // stores lifetime = base + launch-ledger per session_id so the bar's
+    // cost survives restarts without wirescope. base is loaded once here;
+    // seedLifetime() imports wirescope's history while it still exists.
+    this._persist = persist;
+    this._lifetimeBase = new Map(); // sessionId -> { cost, requests, turns, refusals, ts }
+    this._saveTimer = null;
+    if (persist) {
+      try {
+        const saved = persist.read();
+        if (saved && saved.sessions) {
+          for (const [sid, v] of Object.entries(saved.sessions)) this._lifetimeBase.set(sid, v);
+        }
+      } catch { /* a corrupt totals file costs continuity, not the wire */ }
+    }
+  }
+
+  // base + per-launch ledger, field-wise; null only when BOTH sides are
+  // unobservable (preserves payload()'s null semantics for fresh agents).
+  _lifetime(a) {
+    const b = (a.sessionId && this._lifetimeBase.get(a.sessionId)) || null;
+    const t = a.totals || {};
+    const add = (x, y) => (x == null && y == null) ? null : Math.round(((x || 0) + (y || 0)) * 1e6) / 1e6;
+    return {
+      cost: add(b && b.cost, t.est_usd),
+      requests: add(b && b.requests, t.requests),
+      turns: add(b && b.turns, t.turns),
+      refusals: ((b && b.refusals) || 0) + (t.refusals || 0),
+    };
+  }
+
+  _scheduleSave() {
+    if (!this._persist || this._saveTimer) return;
+    this._saveTimer = setTimeout(() => { this._saveTimer = null; this._save(); }, 1000);
+    if (this._saveTimer.unref) this._saveTimer.unref();
+  }
+
+  _save() {
+    try {
+      const sessions = {};
+      // Dormant sessions keep their last persisted value; live ones overwrite.
+      for (const [sid, v] of this._lifetimeBase) sessions[sid] = v;
+      for (const a of this._agents.values()) {
+        if (!a.sessionId || !a.totals) continue;
+        sessions[a.sessionId] = { ...this._lifetime(a), ts: Date.now() };
+      }
+      const ids = Object.keys(sessions);
+      if (ids.length > 500) {
+        ids.sort((x, y) => (sessions[x].ts || 0) - (sessions[y].ts || 0));
+        for (const sid of ids.slice(0, ids.length - 500)) delete sessions[sid];
+      }
+      this._persist.write({ version: 1, sessions });
+    } catch { /* persistence failure costs continuity, never the tick */ }
   }
 
   // Wire listener body. Never throws.
@@ -85,7 +140,36 @@ class WireTelemetry {
         const used = (tok.input_tokens || 0) + (tok.cache_read_input_tokens || 0) + w;
         if (used > 0) a.inputTokens = used; // error receipts (all-null usage) keep the last real value
       }
+      if (a.sessionId && a.totals) this._scheduleSave();
     } catch { /* consume-only: a bad receipt is a missing sample, not a crash */ }
+  }
+
+  // One-time per session_id: import wirescope's persisted lifetime totals as
+  // this session's base while the external proxy still exists, so the bar's
+  // number stays continuous across the cutover (base = poll lifetime − the
+  // wire's launch-ledger; both saw the same traffic since wire-up). Called
+  // from the poller tick BEFORE overlay/diffPoll on that tick — the diff
+  // anchors its epoch after the seed, so increments stay clean. Once seeded
+  // (or loaded from the totals file) a session is never re-seeded: a lag
+  // behind wirescope from un-telemetered stretches is accepted, drift-free.
+  seedLifetime(name, poll) {
+    try {
+      if (!this._persist) return;
+      if (!poll || !poll.linked || !poll.sessionId || !poll.cost) return;
+      const a = this._agents.get(name);
+      if (!a || a.sessionId !== poll.sessionId) return; // both sides must agree on the session
+      if (this._lifetimeBase.has(poll.sessionId)) return;
+      const t = a.totals || {};
+      const sub = (p, l) => (p == null) ? null : Math.max(0, Math.round(((p || 0) - (l || 0)) * 1e6) / 1e6);
+      this._lifetimeBase.set(poll.sessionId, {
+        cost: sub(poll.cost.usd, t.est_usd),
+        requests: sub(poll.cost.requests, t.requests),
+        turns: sub(poll.turns, t.turns),
+        refusals: sub(poll.refusals, t.refusals) || 0,
+        ts: Date.now(),
+      });
+      this._scheduleSave();
+    } catch { /* seeding failure costs continuity, never the tick */ }
   }
 
   // shapeProxyRecord-parity subset (the fields the validation compares and
@@ -94,7 +178,7 @@ class WireTelemetry {
     try {
       const a = this._agents.get(name);
       if (!a) return null;
-      const t = a.totals || {};
+      const lt = this._lifetime(a); // persisted base + launch ledger
       let warmth = null;
       if (this._warmth && a.sessionId) {
         // Own try: a broken warmth store costs the warmth field, not the
@@ -123,9 +207,9 @@ class WireTelemetry {
         linked: true,
         sessionId: a.sessionId,
         model: a.model,
-        cost: { usd: t.est_usd ?? null, requests: t.requests ?? null },
-        turns: t.turns ?? null,
-        refusals: t.refusals || 0,
+        cost: { usd: lt.cost, requests: lt.requests },
+        turns: lt.turns,
+        refusals: lt.refusals || 0,
         context: { inputTokens: a.inputTokens },
         warmth,
         pingable,

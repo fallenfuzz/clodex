@@ -240,6 +240,63 @@ test('overlay: no wire identity / unlinked poll → poll returned untouched; nev
   assert.strictEqual(broken.overlay('alice', poll), poll);
 });
 
+test('lifetime totals: persisted base folds into payload; save writes base+ledger', () => {
+  const writes = [];
+  const persist = {
+    read: () => ({ version: 1, sessions: { 'sid-1': { cost: 10, requests: 100, turns: 5, refusals: 1, ts: 1 } } }),
+    write: (o) => writes.push(o),
+  };
+  const wt = new WireTelemetry({ persist });
+  wt.noteTurn(mainTurn()); // ledger: 0.1234 / 8 / 2 / 0
+  const p = wt.payload('alice');
+  assert.strictEqual(p.cost.usd, 10.1234);
+  assert.strictEqual(p.cost.requests, 108);
+  assert.strictEqual(p.turns, 7);
+  assert.strictEqual(p.refusals, 1);
+  wt._save();
+  const saved = writes.at(-1).sessions['sid-1'];
+  assert.strictEqual(saved.cost, 10.1234); // next launch's base = this lifetime
+  assert.strictEqual(saved.requests, 108);
+});
+
+test('lifetime totals: seedLifetime imports wirescope history once; restart keeps continuity', () => {
+  const writes = [];
+  const persist = { read: () => null, write: (o) => writes.push(o) };
+  const wt = new WireTelemetry({ persist });
+  wt.noteTurn(mainTurn()); // ledger: 0.1234 / 8 / 2 / 0
+  const poll = { linked: true, sessionId: 'sid-1', cost: { usd: 113.98, requests: 392 }, turns: 50, refusals: 3 };
+  wt.seedLifetime('alice', poll);
+  const p = wt.payload('alice');
+  assert.strictEqual(p.cost.usd, 113.98); // base = poll − ledger, so lifetime == poll now
+  assert.strictEqual(p.cost.requests, 392);
+  assert.strictEqual(p.turns, 50);
+  assert.strictEqual(p.refusals, 3);
+  wt.seedLifetime('alice', { ...poll, cost: { usd: 999, requests: 999 } }); // never re-seeds
+  assert.strictEqual(wt.payload('alice').cost.usd, 113.98);
+  // Session mismatch / unlinked / no persist: all silent no-ops.
+  wt.seedLifetime('alice', { ...poll, sessionId: 'other' });
+  wt.seedLifetime('alice', { linked: false });
+  new WireTelemetry({}).seedLifetime('alice', poll);
+  // "Restart": fresh instance loads the saved lifetime as base.
+  wt._save();
+  const wt2 = new WireTelemetry({ persist: { read: () => writes.at(-1), write: () => {} } });
+  wt2.noteTurn(mainTurn({ sessionTotals: { requests: 1, est_usd: 0.01, turns: 1, refusals: 0 } }));
+  assert.strictEqual(wt2.payload('alice').cost.usd, 113.99);
+  assert.strictEqual(wt2.payload('alice').cost.requests, 393);
+});
+
+test('lifetime totals: no persist configured — pure launch-ledger, prior shape unchanged', () => {
+  const wt = new WireTelemetry({});
+  wt.noteTurn(mainTurn());
+  const p = wt.payload('alice');
+  assert.strictEqual(p.cost.usd, 0.1234);
+  assert.strictEqual(p.turns, 2);
+  // Broken read never throws out of the constructor.
+  const broken = new WireTelemetry({ persist: { read: () => { throw new Error('corrupt'); }, write: () => {} } });
+  broken.noteTurn(mainTurn());
+  assert.strictEqual(broken.payload('alice').cost.usd, 0.1234);
+});
+
 test('prune drops agents not in the live set', () => {
   const wt = new WireTelemetry({});
   wt.noteTurn(mainTurn());

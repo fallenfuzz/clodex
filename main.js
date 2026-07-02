@@ -1863,6 +1863,10 @@ class ProxyPoller {
               continue; // transient miss — leave last-good in place, don't re-emit
             }
           }
+          // Lifetime-totals seed: one-time per session_id, must precede both
+          // the overlay (bar shows the continuous number immediately) and
+          // diffPoll (the diff anchors its epoch after the seed).
+          if (this.manager._wireTelemetry) this.manager._wireTelemetry.seedLifetime(s.name, payload);
           // W2 cutover preview: with CLODEX_WIRE_TELEMETRY=1 the wire-carried
           // fields overwrite the poll's before emission (per-agent, all-or-
           // nothing — see WireTelemetry.overlay). The snapshot map stores the
@@ -2770,7 +2774,15 @@ class SessionManager {
     // WireTelemetry method swallows its own errors.
     try {
       const { WireTelemetry } = require('./wire-telemetry');
-      this._wireTelemetry = new WireTelemetry({ warmth, hold, log: (rec) => this._shadowLog(rec) });
+      // Lifetime-totals continuity: wire totals are per-launch; this file
+      // carries each session's cumulative base across restarts (and imports
+      // wirescope's persisted history via seedLifetime while it still runs).
+      const totalsPath = path.join(app.getPath('userData'), 'wire-totals.json');
+      const persistTotals = {
+        read: () => JSON.parse(fs.readFileSync(totalsPath, 'utf8')),
+        write: (obj) => fs.writeFileSync(totalsPath, JSON.stringify(obj)),
+      };
+      this._wireTelemetry = new WireTelemetry({ warmth, hold, log: (rec) => this._shadowLog(rec), persist: persistTotals });
       wire.on('turn.completed', (t) => this._wireTelemetry.noteTurn(t));
     } catch (e) {
       this._shadowLog({ type: 'wire-telemetry-unavailable', error: e.message });
