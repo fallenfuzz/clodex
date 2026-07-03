@@ -4866,6 +4866,42 @@ app.whenReady().then(() => {
   // sessions degrade gracefully (wire → Anthropic direct) until it's up.
   if (wirescope.autoStartWanted()) wirescope.start().catch(() => {});
 
+  // Mid-run watchdog. Autostart only fires at launch and on the settings
+  // toggle, so a managed wirescope that dies BETWEEN launches (crash, OOM,
+  // external kill) would stay dead — and every routed session bakes the proxy
+  // into its ANTHROPIC_BASE_URL at spawn, so a dead proxy means connection-
+  // refused on the next turn until relaunch. This poll refills that gap; a
+  // respawn on the same port lets in-flight sessions self-heal on their next
+  // turn (same host:port, no session restart).
+  //
+  // Safe by construction: start() is detect-first, so if anything is already
+  // serving the port (our survivor OR an adopted external) it adopts rather
+  // than double-spawning — we only ever spawn into a genuinely empty port, and
+  // only when autoStartWanted (proxy enabled + pointed at the managed local
+  // port; a toggle-off or remote proxyUrl silences it). Exponential backoff
+  // (15s→5min cap) throttles a crash-looping/broken-venv install without ever
+  // permanently giving up; a healthy probe resets it to fast recovery.
+  let wsFails = 0;          // consecutive respawn attempts since last healthy
+  let wsNextAttempt = 0;    // epoch ms gate for the next attempt
+  const WS_WATCHDOG_INTERVAL = 10000;   // ms between health checks
+  const WS_WATCHDOG_BASE = 15000;       // ms first backoff step
+  const WS_WATCHDOG_MAX = 300000;       // ms backoff cap
+  setInterval(async () => {
+    if (!wirescope.autoStartWanted()) { wsFails = 0; wsNextAttempt = 0; return; }
+    let st;
+    try { st = await wirescope.status(); } catch { return; }
+    if (st.state === 'managed' || st.state === 'external') {
+      wsFails = 0; wsNextAttempt = 0; return;   // healthy — nothing to do
+    }
+    if (st.state === 'installing' || st.state === 'starting') return; // mid-launch
+    // state === 'stopped': nothing serving the wanted port.
+    const now = Date.now();
+    if (now < wsNextAttempt) return;
+    wsFails++;
+    wsNextAttempt = now + Math.min(WS_WATCHDOG_BASE * 2 ** (wsFails - 1), WS_WATCHDOG_MAX);
+    wirescope.start().catch(() => {});
+  }, WS_WATCHDOG_INTERVAL);
+
   cleanupOldMessages();
   setInterval(cleanupOldMessages, MSG_CLEANUP_INTERVAL);
   registry.cleanup();
