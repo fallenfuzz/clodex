@@ -197,12 +197,17 @@ const MSG_CLEANUP_INTERVAL = 5 * 60 * 1000; // ms
 const POLL_INTERVAL = 250; // ms
 const TURN_COMPLETE_TIMEOUT = 1000; // ms
 // Phase W1 shadow mode (CLODEUX-PLAN.md): route claude sessions through the
-// in-process wire tee (wire/proxy.js) and diff wire-observed intents against
-// the JSONL path into ~/.clodex/wire-shadow.jsonl. Observation only — the
-// JSONL watcher remains the live intent path; an external wirescope keeps
-// its role via per-agent upstream chaining. Default OFF: zero behavior
-// change without the env flag.
-const WIRE_SHADOW = process.env.CLODEX_WIRE_SHADOW === '1';
+// in-process wire tee (wire/proxy.js): the live intent + telemetry path for
+// wire-routed claude sessions. Operational + wire-side events land in
+// ~/.clodex/wire-shadow.jsonl (the name is historical — in the default
+// full-cutover state the two-sided wire-vs-JSONL diff only runs when intents
+// are forced back to JSONL via CLODEX_WIRE_INTENTS=0). An external wirescope
+// keeps its role via per-agent upstream chaining. Default ON since v2.0 — the
+// tee is the intended steady state (W2/W3 gates green, shipped and stable);
+// CLODEX_WIRE_SHADOW=0 is the explicit revert to the pre-wire JsonlWatcher
+// path (also the automatic fallback when the tee fails to come up or a session
+// isn't wire-routed — see intentSource resolution in create()).
+const WIRE_SHADOW = process.env.CLODEX_WIRE_SHADOW !== '0';
 // W2 telemetry cutover: overlay the wire-carried fields (cost/turns/
 // refusals/inputTokens/warmth + hold ownership) onto each poll payload before
 // it reaches the renderer (WireTelemetry.overlay). Requires WIRE_SHADOW (the
