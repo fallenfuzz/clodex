@@ -2754,8 +2754,10 @@ function jsonlToMessages(jsonlPath, limit = 100) {
       text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
       if (text.startsWith('<command-name>') || text.startsWith('<local-command-stdout>')) text = '';
       // panel/phone sends carry the delivery label; the phone view is the
-      // sender's own chat, so render them clean (peer labels stay visible)
-      text = text.replace(/^\[agent:from user\]\s*/, '');
+      // sender's own chat, so render them clean (peer labels stay visible).
+      // Injected input can be recorded with the leading Ctrl-U (\x15) that
+      // _injectText uses to clear the line — drop control chars first.
+      text = text.replace(/^[\x00-\x1f]+/, '').replace(/^\[agent:from user\]\s*/, '');
     } else if (type === 'assistant') {
       role = 'assistant';
       const content = (obj.message || {}).content;

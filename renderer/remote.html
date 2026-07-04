@@ -235,8 +235,11 @@
     const d = document.createElement('div');
     d.className = 'msg ' + role;
     // server-side strip of the delivery label ships with the app process;
-    // duplicate it here so a page reload suffices before a GUI restart
-    d.textContent = role === 'user' ? text.replace(/^\[agent:from user\]\s*/, '') : text;
+    // duplicate it here so a page reload suffices before a GUI restart.
+    // Leading control chars = the Ctrl-U from input injection.
+    d.textContent = role === 'user'
+      ? text.replace(/^[\x00-\x1f]+/, '').replace(/^\[agent:from user\]\s*/, '')
+      : text;
     chatEl.appendChild(d);
   }
 
