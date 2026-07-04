@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0d1117">
+<title>Clodex</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+    --user-bubble: #1f3a5f; --green: #3fb950; --red: #f85149;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    overscroll-behavior: none;
+  }
+  #app { display: flex; flex-direction: column; height: 100dvh; }
+
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; padding-top: calc(10px + env(safe-area-inset-top));
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    flex: none;
+  }
+  header h1 { font-size: 16px; font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #back { display: none; background: none; border: none; color: var(--accent); font-size: 15px; padding: 4px 6px 4px 0; }
+  #conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); flex: none; }
+  #conn-dot.on { background: var(--green); }
+
+  main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+
+  /* --- session list --- */
+  .session-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px; border-bottom: 1px solid var(--border);
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  .session-row:active { background: var(--panel); }
+  .session-dot { width: 10px; height: 10px; border-radius: 50%; background: #555; flex: none; }
+  .session-dot.thinking { background: var(--green); animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  .session-info { flex: 1; min-width: 0; }
+  .session-name { font-weight: 600; }
+  .session-meta { font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .empty { padding: 40px 20px; text-align: center; color: var(--dim); }
+
+  /* --- chat --- */
+  #chat { display: none; padding: 12px; }
+  .msg { max-width: 88%; margin-bottom: 10px; padding: 9px 12px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+  .msg.user { background: var(--user-bubble); margin-left: auto; border-bottom-right-radius: 4px; }
+  .msg.assistant { background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  #thinking { display: none; color: var(--dim); font-size: 13px; padding: 2px 12px 10px; }
+  #thinking.on { display: block; }
+
+  /* --- composer --- */
+  #composer {
+    display: none; gap: 8px; padding: 10px 12px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    background: var(--panel); border-top: 1px solid var(--border); flex: none;
+  }
+  #input {
+    flex: 1; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 18px;
+    padding: 9px 14px; font: inherit; resize: none; max-height: 120px;
+    outline: none;
+  }
+  #input:focus { border-color: var(--accent); }
+  #send {
+    background: var(--accent); color: #0d1117; border: none; border-radius: 18px;
+    padding: 0 16px; font: inherit; font-weight: 600; flex: none;
+  }
+  #send:disabled { opacity: 0.4; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <button id="back">&#8249; Back</button>
+    <h1 id="title">Clodex</h1>
+    <div id="conn-dot"></div>
+  </header>
+  <main id="main">
+    <div id="list"></div>
+    <div id="chat"></div>
+  </main>
+  <div id="thinking">thinking&#8230;</div>
+  <div id="composer">
+    <textarea id="input" rows="1" placeholder="Message" enterkeyhint="send"></textarea>
+    <button id="send">Send</button>
+  </div>
+</div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const listEl = $('list'), chatEl = $('chat'), mainEl = $('main');
+  const titleEl = $('title'), backBtn = $('back'), connDot = $('conn-dot');
+  const composer = $('composer'), input = $('input'), sendBtn = $('send');
+  const thinkingEl = $('thinking');
+
+  let sessions = [];
+  let open = null;           // name of the open session, or null
+  let fetching = false;
+
+  // --- data ---
+
+  async function loadSessions() {
+    try {
+      const r = await fetch('/api/sessions');
+      const j = await r.json();
+      if (j.ok) { sessions = j.sessions; renderList(); }
+    } catch {}
+  }
+
+  async function loadTranscript() {
+    if (!open || fetching) return;
+    fetching = true;
+    try {
+      const r = await fetch('/api/transcript/' + encodeURIComponent(open));
+      const j = await r.json();
+      if (j.ok && open) renderChat(j.messages);
+    } catch {}
+    fetching = false;
+  }
+
+  async function send() {
+    const text = input.value.trim();
+    if (!text || !open) return;
+    sendBtn.disabled = true;
+    try {
+      const r = await fetch('/api/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: open, text }),
+      });
+      const j = await r.json();
+      if (j.ok) {
+        input.value = '';
+        input.style.height = 'auto';
+        appendBubble('user', text);
+        scrollDown();
+      } else {
+        alert(j.error || 'send failed');
+      }
+    } catch { alert('send failed — connection?'); }
+    sendBtn.disabled = false;
+  }
+
+  // --- rendering ---
+
+  function renderList() {
+    listEl.innerHTML = '';
+    if (!sessions.length) {
+      const d = document.createElement('div');
+      d.className = 'empty';
+      d.textContent = 'No agent sessions running';
+      listEl.appendChild(d);
+      return;
+    }
+    for (const s of sessions) {
+      const row = document.createElement('div');
+      row.className = 'session-row';
+      const dot = document.createElement('div');
+      dot.className = 'session-dot' + (s.activity === 'thinking' ? ' thinking' : '');
+      dot.dataset.name = s.name;
+      const info = document.createElement('div');
+      info.className = 'session-info';
+      const nm = document.createElement('div');
+      nm.className = 'session-name';
+      nm.textContent = s.name;
+      const meta = document.createElement('div');
+      meta.className = 'session-meta';
+      meta.textContent = (s.workspace ? s.workspace + ' · ' : '') + s.type + ' · ' + s.cwd;
+      info.appendChild(nm); info.appendChild(meta);
+      row.appendChild(dot); row.appendChild(info);
+      row.addEventListener('click', () => openSession(s.name));
+      listEl.appendChild(row);
+    }
+  }
+
+  function appendBubble(role, text) {
+    const d = document.createElement('div');
+    d.className = 'msg ' + role;
+    d.textContent = text;
+    chatEl.appendChild(d);
+  }
+
+  function renderChat(messages) {
+    const atBottom = mainEl.scrollHeight - mainEl.scrollTop - mainEl.clientHeight < 60;
+    chatEl.innerHTML = '';
+    for (const m of messages) appendBubble(m.role, m.text);
+    if (atBottom) scrollDown();
+  }
+
+  function scrollDown() { mainEl.scrollTop = mainEl.scrollHeight; }
+
+  // --- navigation ---
+
+  function openSession(name) {
+    open = name;
+    titleEl.textContent = name;
+    listEl.style.display = 'none';
+    chatEl.style.display = 'block';
+    composer.style.display = 'flex';
+    backBtn.style.display = 'block';
+    chatEl.innerHTML = '';
+    const s = sessions.find(x => x.name === name);
+    thinkingEl.className = (s && s.activity === 'thinking') ? 'on' : '';
+    loadTranscript().then(scrollDown);
+  }
+
+  function closeSession() {
+    open = null;
+    titleEl.textContent = 'Clodex';
+    chatEl.style.display = 'none';
+    composer.style.display = 'none';
+    backBtn.style.display = 'none';
+    thinkingEl.className = '';
+    listEl.style.display = 'block';
+    loadSessions();
+  }
+
+  backBtn.addEventListener('click', closeSession);
+  sendBtn.addEventListener('click', send);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  });
+
+  // --- live updates (SSE) ---
+
+  let es = null, retry = 1000;
+  function connect() {
+    es = new EventSource('/api/events');
+    es.onopen = () => { connDot.className = 'on'; retry = 1000; refresh(); };
+    es.onerror = () => {
+      connDot.className = '';
+      es.close();
+      setTimeout(connect, retry);
+      retry = Math.min(retry * 2, 15000);
+    };
+    es.addEventListener('activity', (e) => {
+      const d = JSON.parse(e.data);
+      const s = sessions.find(x => x.name === d.name);
+      if (s) s.activity = d.state;
+      const dot = listEl.querySelector('.session-dot[data-name="' + CSS.escape(d.name) + '"]');
+      if (dot) dot.className = 'session-dot' + (d.state === 'thinking' ? ' thinking' : '');
+      if (open === d.name) {
+        thinkingEl.className = d.state === 'thinking' ? 'on' : '';
+        // refetch once per real turn end; also on thinking-start so the
+        // user's own injected message shows up promptly
+        if (d.turnEnd || d.state === 'thinking') loadTranscript();
+      }
+    });
+    es.addEventListener('sessions', () => loadSessions());
+  }
+
+  function refresh() {
+    loadSessions();
+    if (open) loadTranscript();
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refresh();
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>

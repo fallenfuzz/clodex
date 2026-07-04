@@ -134,6 +134,9 @@ window.api = {
   wirescopeStart: () => ipcRenderer.invoke('wirescope:start'),
   wirescopeStop: () => ipcRenderer.invoke('wirescope:stop'),
 
+  // Remote access (phone web UI)
+  remoteStatus: () => ipcRenderer.invoke('remote:status'),
+
   // Session args
   getSessionArgs: (name) => ipcRenderer.invoke('session:getArgs', name),
   getSessionHistory: (name) => ipcRenderer.invoke('session:history', name),

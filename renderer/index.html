@@ -430,6 +430,18 @@
         </label>
       </section>
       <section>
+        <h4>Phone access</h4>
+        <p class="hint-text">Serves a chat-style web view of your agent sessions (transcript + send box, no terminal) on this machine only (<code>127.0.0.1</code>). To reach it from your phone, put both devices on a tailnet and run <code>tailscale serve &lt;port&gt;</code>, or use an SSH tunnel — Clodex never opens a network-visible port itself.</p>
+        <label style="display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="prefs-remote-enabled" style="margin: 0;">
+          <span>Enable phone access</span>
+        </label>
+        <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+          <span id="remote-dot" style="width: 10px; height: 10px; border-radius: 50%; background: #888; display: inline-block; flex: none;"></span>
+          <span id="remote-status-text" class="hint-text" style="flex: 1;">—</span>
+        </div>
+      </section>
+      <section>
         <h4>Claude MCP</h4>
         <p class="hint-text">Claude Code auto-injects the built-in <code>claude_design</code> connector (~20 tools, ~4k tokens every turn) with no global opt-out. When a session is routed through a strip-capable proxy, the proxy already removes just those tools and keeps your real MCPs — nothing to do here. This fallback is for <em>unrouted</em> sessions only and uses <code>--strict-mcp-config</code>, which is all-or-nothing: it disables <strong>every</strong> MCP server, including project/user ones. Leave it off unless your unrouted agents use no MCP. Applied at spawn — restart a session to pick up changes.</p>
         <label style="display: flex; align-items: center; gap: 8px;">

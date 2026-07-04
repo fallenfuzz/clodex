@@ -3429,6 +3429,9 @@ const prefsToolsList = document.getElementById('prefs-tools-list');
 wireBulkToggles(prefsToolsRow, prefsToolsList);
 const wsDot = document.getElementById('ws-dot');
 const wsStatusText = document.getElementById('ws-status-text');
+const prefsRemoteEnabled = document.getElementById('prefs-remote-enabled');
+const remoteDot = document.getElementById('remote-dot');
+const remoteStatusText = document.getElementById('remote-status-text');
 const CLAUDE_LABELS = {
   'model': 'Model name',
   'context': 'Context usage (estimated)',
@@ -3497,6 +3500,21 @@ function renderWsStatus(st) {
 let wsPollTimer = null;
 async function refreshWsStatus() {
   try { renderWsStatus(await window.api.wirescopeStatus()); } catch {}
+  try { renderRemoteStatus(await window.api.remoteStatus()); } catch {}
+}
+
+function renderRemoteStatus(st) {
+  if (!st) return;
+  if (st.running) {
+    remoteDot.style.background = '#3fb950';
+    remoteStatusText.textContent = `Serving on http://127.0.0.1:${st.port}`;
+  } else if (st.error) {
+    remoteDot.style.background = '#f85149';
+    remoteStatusText.textContent = st.error;
+  } else {
+    remoteDot.style.background = '#888';
+    remoteStatusText.textContent = prefsRemoteEnabled.checked ? 'Not running' : 'Off';
+  }
 }
 
 async function openPrefs() {
@@ -3507,6 +3525,7 @@ async function openPrefs() {
   prefsProxyEnabled.checked = !!s.proxyEnabled;
   prefsDisableDesignMcp.checked = s.disableClaudeDesignMcp !== false;
   prefsCompactOnResume.checked = !!s.compactOnResume;
+  prefsRemoteEnabled.checked = !!s.remoteEnabled;
   // Global default tool-deny set (cwd-independent, so no lower-layer provenance).
   // Unchecked = denied by default for new sessions.
   claudeToolsCache = s.claudeTools || [];
@@ -3537,6 +3556,7 @@ document.getElementById('btn-prefs-save').addEventListener('click', async () => 
     proxyEnabled: prefsProxyEnabled.checked,
     disableClaudeDesignMcp: prefsDisableDesignMcp.checked,
     compactOnResume: prefsCompactOnResume.checked,
+    remoteEnabled: prefsRemoteEnabled.checked,
   });
   // Default tool denies live in a separate store (the "*" agent-default), so
   // persist them via their own setter. collectToolChecklist returns the

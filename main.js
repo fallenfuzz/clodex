@@ -1088,6 +1088,12 @@ const DEFAULT_UI_SETTINGS = {
   // View > Theme menu can show the right radio; the renderer mirrors it to
   // localStorage for instant pre-paint application.
   theme: 'midnight',
+  // Remote access: phone-friendly web UI served on 127.0.0.1 only. OFF by
+  // default — it's a door into every agent session, so the user opens it
+  // deliberately and pairs it with `tailscale serve` (or an SSH tunnel) for
+  // off-machine reach. Port is settings-file-only (no UI), like wirescopePort.
+  remoteEnabled: false,
+  remotePort: 7900,
 };
 const THEME_KEYS = ['midnight', 'claude', 'light'];
 
@@ -1108,6 +1114,8 @@ const uiSettings = {
         compactOnResume: typeof raw?.compactOnResume === 'boolean' ? raw.compactOnResume : DEFAULT_UI_SETTINGS.compactOnResume,
         disableClaudeDesignMcp: typeof raw?.disableClaudeDesignMcp === 'boolean' ? raw.disableClaudeDesignMcp : DEFAULT_UI_SETTINGS.disableClaudeDesignMcp,
         theme: THEME_KEYS.includes(raw?.theme) ? raw.theme : DEFAULT_UI_SETTINGS.theme,
+        remoteEnabled: typeof raw?.remoteEnabled === 'boolean' ? raw.remoteEnabled : DEFAULT_UI_SETTINGS.remoteEnabled,
+        remotePort: Number.isInteger(raw?.remotePort) ? raw.remotePort : DEFAULT_UI_SETTINGS.remotePort,
       };
     } catch { return DEFAULT_UI_SETTINGS; }
   },
@@ -1127,6 +1135,8 @@ const uiSettings = {
       compactOnResume: partial?.compactOnResume ?? cur.compactOnResume,
       disableClaudeDesignMcp: partial?.disableClaudeDesignMcp ?? cur.disableClaudeDesignMcp,
       theme: THEME_KEYS.includes(partial?.theme) ? partial.theme : cur.theme,
+      remoteEnabled: partial?.remoteEnabled ?? cur.remoteEnabled,
+      remotePort: Number.isInteger(partial?.remotePort) ? partial.remotePort : cur.remotePort,
     };
     try {
       atomicWriteFileSync(UI_SETTINGS_FILE, JSON.stringify(next, null, 2));
@@ -2715,6 +2725,57 @@ function extractClaudeBlocks(content) {
   return out.join('\n');
 }
 
+// Transcript → chat messages for the remote (phone) view: user/assistant text
+// only, no tool traffic. Reads the on-disk JSONL, which is written by the CLI
+// regardless of which observation path (wire vs JsonlWatcher) is live — so the
+// remote view never depends on the intent machinery.
+function jsonlToMessages(jsonlPath, limit = 100) {
+  const raw = fs.readFileSync(jsonlPath, 'utf-8');
+  const messages = [];
+
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch { continue; }
+    if (obj.isSidechain || obj.isMeta) continue;
+    const type = obj.type || '';
+    let role = null, text = '';
+
+    if (type === 'user') {
+      const content = (obj.message || {}).content;
+      role = 'user';
+      if (typeof content === 'string') text = content;
+      else if (Array.isArray(content)) {
+        // text blocks only — a tool_result-carrying user entry is tool
+        // traffic, not something the operator typed
+        text = content.filter(b => b && b.type === 'text' && b.text).map(b => b.text).join('\n');
+      }
+      // local slash-command echoes and injected context aren't conversation
+      text = text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+      if (text.startsWith('<command-name>') || text.startsWith('<local-command-stdout>')) text = '';
+    } else if (type === 'assistant') {
+      role = 'assistant';
+      const content = (obj.message || {}).content;
+      if (Array.isArray(content)) {
+        text = content.filter(b => b && b.type === 'text' && b.text).map(b => b.text).join('\n');
+      }
+    } else if (type === 'event_msg') {
+      const payload = obj.payload || {};
+      if (payload.type === 'agent_message' && payload.message) { role = 'assistant'; text = String(payload.message); }
+      else if (payload.type === 'user_message' && payload.message) { role = 'user'; text = String(payload.message); }
+    }
+
+    if (!role || !text.trim()) continue;
+    const prev = messages[messages.length - 1];
+    // Consecutive same-role entries (multi-block turns interleaved with tool
+    // calls) render as one bubble
+    if (prev && prev.role === role) prev.text += '\n\n' + text.trim();
+    else messages.push({ role, text: text.trim(), ts: obj.timestamp || null });
+  }
+
+  return messages.slice(-limit);
+}
+
 function extractText(obj) {
   const type = obj.type || '';
   // Claude format
@@ -3552,6 +3613,7 @@ class SessionManager {
 
     if (typeof refreshTrayMenu === 'function') refreshTrayMenu();
     if (typeof refreshAppMenu === 'function') refreshAppMenu();
+    if (remoteServer) { try { remoteServer.notifySessions(); } catch {} }
     return { name, type, pid: ptyProc.pid };
   }
 
@@ -3628,6 +3690,7 @@ class SessionManager {
     this.sessions.delete(name);
     const live = new Set(this.sessions.keys());
     try { this._intentDeduper.prune(live); this._activity.prune(live); } catch {}
+    if (remoteServer) { try { remoteServer.notifySessions(); } catch {} }
   }
 
   // --- PTY output scanning (non-agent mode) ---
@@ -3649,6 +3712,9 @@ class SessionManager {
   // when the owning window isn't focused.
   _emitActivity(name, state, notify) {
     this._sendToSession(name, 'session-activity', name, state);
+    // notify is only ever true on a real end-of-turn idle, so it doubles as
+    // the remote client's "refetch the transcript now" signal.
+    if (remoteServer) { try { remoteServer.notifyActivity(name, state, notify); } catch {} }
     if (!notify) return;
     const owningWin = this.windowForSession(name);
     if (!owningWin || !owningWin.isFocused()) {
@@ -4717,6 +4783,66 @@ function refreshAppMenu() {
 const manager = new SessionManager();
 const proxyPoller = new ProxyPoller(manager);
 
+// ---------------------------------------------------------------------------
+// Remote access server (remote.js) — phone web UI on 127.0.0.1. Module-level
+// `let` because SessionManager's activity/lifecycle fan-outs poke it directly.
+// ---------------------------------------------------------------------------
+
+let remoteServer = null;
+let remoteError = null;
+
+function syncRemoteServer() {
+  const s = uiSettings.get();
+  if (!s.remoteEnabled) {
+    if (remoteServer) { remoteServer.stop(); remoteServer = null; }
+    remoteError = null;
+    return;
+  }
+  if (remoteServer && remoteServer.port !== s.remotePort) {
+    remoteServer.stop();
+    remoteServer = null;
+  }
+  if (!remoteServer) {
+    const { RemoteServer } = require('./remote');
+    remoteServer = new RemoteServer({
+      port: s.remotePort,
+      pagePath: path.join(__dirname, 'renderer', 'remote.html'),
+      getSessions: () =>
+        Array.from(manager.sessions.values())
+          .filter(sess => sess.agentType && !sess._dead)
+          .map(sess => ({
+            name: sess.name,
+            type: sess.type,
+            cwd: sess.cwd,
+            workspace: (workspaces.get(sess.workspaceId) || {}).name || '',
+          })),
+      getTranscript: (name, limit) => {
+        const sess = manager.sessions.get(name);
+        if (!sess || !sess.agentType) return { ok: false, error: 'Session not found' };
+        const linkPath = path.join(REGISTRY_DIR, `${name}.jsonl`);
+        let jsonlPath;
+        try { jsonlPath = fs.realpathSync(linkPath); }
+        catch { return { ok: true, messages: [] }; } // no transcript yet
+        try { return { ok: true, messages: jsonlToMessages(jsonlPath, limit) }; }
+        catch (e) { return { ok: false, error: e.message }; }
+      },
+      send: (name, text) => {
+        const sess = manager.sessions.get(name);
+        if (!sess || !sess.agentType || sess._dead) return { ok: false, error: 'Session not found' };
+        // Same path as the app's own panel: agents see "[agent:from user]",
+        // oversized bodies ride the spill channel.
+        manager._deliverMessage(name, 'user', text, 'dm');
+        return { ok: true };
+      },
+    });
+  }
+  remoteError = null;
+  remoteServer.start().catch((e) => {
+    remoteError = e.message;
+    remoteServer = null;
+  });
+}
+
 function createWindow(workspaceId = DEFAULT_WORKSPACE_ID) {
   // If a window for this workspace already exists, just bring it forward
   const existing = manager.windowForWorkspace(workspaceId);
@@ -4870,6 +4996,9 @@ app.whenReady().then(() => {
   // Fire-and-forget: a first-run venv install can take tens of seconds and
   // sessions degrade gracefully (wire → Anthropic direct) until it's up.
   if (wirescope.autoStartWanted()) wirescope.start().catch(() => {});
+
+  // Remote access web UI (phone) — no-op unless remoteEnabled in settings.
+  syncRemoteServer();
 
   // Mid-run watchdog. Autostart only fires at launch and on the settings
   // toggle, so a managed wirescope that dies BETWEEN launches (crash, OOM,
@@ -5478,6 +5607,8 @@ app.whenReady().then(() => {
       wirescopeDir: s.wirescopeDir,
       wirescopePort: s.wirescopePort,
       theme: s.theme,
+      remoteEnabled: s.remoteEnabled,
+      remotePort: s.remotePort,
     };
   });
   ipcMain.handle('settings:set', (_e, partial) => {
@@ -5488,8 +5619,17 @@ app.whenReady().then(() => {
     // child — an adopted external instance is never touched either way.
     if (wirescope.autoStartWanted()) wirescope.start().catch(() => {});
     else wirescope.stop();
+    syncRemoteServer();
     return next;
   });
+
+  // Remote access status for the prefs dialog: running/port/error. The URL
+  // shown is the localhost one — off-machine reach is the user's tailnet.
+  ipcMain.handle('remote:status', () => ({
+    running: !!(remoteServer && remoteServer.running),
+    port: uiSettings.get().remotePort,
+    error: remoteError,
+  }));
 
   // Global default tool-deny set new sessions inherit (the "*" agent-default).
   // An explicit [] is honored (deny nothing); separate store from uiSettings, so
@@ -5802,5 +5942,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   appQuitting = true;
+  if (remoteServer) { try { remoteServer.stop(); } catch {} remoteServer = null; }
   manager.killAll();
 });
