@@ -7,10 +7,10 @@
 # shipped copy is traceable to an exact upstream commit.
 #
 # Usage: scripts/vendor-wirescope.sh [ref]        (default: the pinned REF below)
-#        WIRESCOPE_SRC=/path/to/checkout scripts/vendor-wirescope.sh v0.6.13
+#        WIRESCOPE_SRC=/path/to/checkout scripts/vendor-wirescope.sh v0.6.14
 set -euo pipefail
 
-REF="${1:-v0.6.13}"
+REF="${1:-v0.6.14}"
 SRC="${WIRESCOPE_SRC:-$HOME/projects/proxy-lab}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/vendor/wirescope"
