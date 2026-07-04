@@ -3429,6 +3429,7 @@ const prefsToolsList = document.getElementById('prefs-tools-list');
 wireBulkToggles(prefsToolsRow, prefsToolsList);
 const wsDot = document.getElementById('ws-dot');
 const wsStatusText = document.getElementById('ws-status-text');
+const wsRestartBtn = document.getElementById('ws-restart-btn');
 const prefsRemoteEnabled = document.getElementById('prefs-remote-enabled');
 const remoteDot = document.getElementById('remote-dot');
 const remoteStatusText = document.getElementById('remote-status-text');
@@ -3476,11 +3477,18 @@ function renderPrefsCheckboxes(container, all, enabled, labels) {
 const WS_DOT = { managed: '#3fb950', external: '#58a6ff', starting: '#d29922', installing: '#d29922', stopped: '#888', error: '#f85149' };
 
 function renderWsStatus(st) {
+  if (wsRestartBusy) return; // hold the "Restarting…" line against the poll
   const err = st && st.error;
   let color = WS_DOT[st ? st.state : 'stopped'] || '#888';
   let text;
   if (st && st.state === 'managed') {
     text = `Active${st.version ? ' — ' + st.version : ''}`;
+    // stale = running version differs from the bundled snapshot (normally
+    // auto-cleared at launch; this is the manual path if that was missed).
+    if (st.stale) {
+      text += ' — update ready, restart to apply';
+      color = WS_DOT.starting;
+    }
   } else if (st && st.state === 'external') {
     text = `Active — using the proxy already running on this machine${st.version ? ' (' + st.version + ')' : ''}`;
   } else if (st && st.state === 'installing') {
@@ -3495,7 +3503,25 @@ function renderWsStatus(st) {
   }
   wsDot.style.background = color;
   wsStatusText.textContent = text;
+  // Restart applies only to a Clodex-managed instance (external ones belong
+  // to whoever started them; main-side restart() enforces this too).
+  wsRestartBtn.style.display = (st && st.state === 'managed' && !wsRestartBusy) ? '' : 'none';
 }
+
+let wsRestartBusy = false;
+wsRestartBtn.addEventListener('click', async () => {
+  if (wsRestartBusy) return;
+  wsRestartBusy = true;
+  wsRestartBtn.style.display = 'none';
+  wsDot.style.background = WS_DOT.starting;
+  wsStatusText.textContent = 'Restarting…';
+  try {
+    const res = await window.api.wirescopeRestart();
+    if (res && res.ok === false && res.error) wsStatusText.textContent = res.error;
+  } catch {}
+  wsRestartBusy = false;
+  refreshWsStatus();
+});
 
 let wsPollTimer = null;
 async function refreshWsStatus() {

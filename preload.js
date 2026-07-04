@@ -133,6 +133,7 @@ window.api = {
   wirescopeStatus: () => ipcRenderer.invoke('wirescope:status'),
   wirescopeStart: () => ipcRenderer.invoke('wirescope:start'),
   wirescopeStop: () => ipcRenderer.invoke('wirescope:stop'),
+  wirescopeRestart: () => ipcRenderer.invoke('wirescope:restart'),
 
   // Remote access (phone web UI)
   remoteStatus: () => ipcRenderer.invoke('remote:status'),

@@ -2048,6 +2048,16 @@ class WirescopeSupervisor {
       : { dir: null, origin: null, error: 'No wirescope source (no vendored copy in this build; set a source directory)' };
   }
 
+  // Version the resolved source would run if (re)spawned — for staleness
+  // detection against a running instance. Only meaningful for the vendored
+  // snapshot: RELEASE is written by scripts/vendor-wirescope.sh and echoed
+  // verbatim by /_identity, so string equality is exact. A user checkout
+  // self-reports however it likes — no comparison, no false staleness.
+  _sourceVersion(src) {
+    if (!src || src.origin !== 'vendored' || !src.dir) return null;
+    try { return fs.readFileSync(path.join(src.dir, 'RELEASE'), 'utf8').trim(); } catch { return null; }
+  }
+
   _venvDir() { return path.join(app.getPath('userData'), 'wirescope', 'venv'); }
   _venvPython() { return path.join(this._venvDir(), 'bin', 'python3'); }
 
@@ -2144,6 +2154,13 @@ class WirescopeSupervisor {
     else if (alive || this._startChain) state = 'starting';
     else state = 'stopped';
 
+    // Managed instance serving a different version than the vendored source
+    // would spawn — the launch-time auto-restart normally clears this; it
+    // survives only if that path was latched or raced, and the prefs
+    // Restart button is the manual clear.
+    const wantVersion = this._sourceVersion(src);
+    const stale = !!(alive && probe && probe.version && wantVersion && probe.version !== wantVersion);
+
     return {
       state, port, base,
       dir: s.wirescopeDir || '',
@@ -2151,6 +2168,7 @@ class WirescopeSupervisor {
       origin: src.dir ? src.origin : null, // 'user' | 'vendored' | null
       product: probe ? probe.product : null,
       version: probe ? probe.version : null,
+      stale,
       managed: alive,
       error: this.lastError,
     };
@@ -2172,6 +2190,20 @@ class WirescopeSupervisor {
     if (probe) {
       this.lastError = null;
       const ours = !!this._survivorPid();
+      // Vendor-bump pickup: a managed survivor deliberately outlives the GUI,
+      // so after a re-vendor it keeps serving the OLD code forever unless
+      // someone kills it. If the survivor's reported version differs from the
+      // vendored RELEASE, restart it in place — once per app launch (the
+      // latch), so an unexpected version string can never restart-loop.
+      // Adopted external instances are someone else's process: never touched,
+      // whatever their version.
+      if (ours && !this._upgradeTried) {
+        const want = this._sourceVersion(this._source());
+        if (want && probe.version && probe.version !== want) {
+          this._upgradeTried = true;
+          return this.restart();
+        }
+      }
       return { ok: true, state: ours ? 'managed' : 'external', adopted: !ours };
     }
     if (this.child && this.child.exitCode === null) {
@@ -2303,6 +2335,36 @@ class WirescopeSupervisor {
     this.child = null;
     this.startedPort = null;
     return { ok: true };
+  }
+
+  // Restart the MANAGED instance in place — vendor-bump pickup or a manual
+  // nudge from prefs. Only ours (live child or pidfile survivor); an adopted
+  // external instance is someone else's process and gets an error, not a kill.
+  // Death is confirmed by pid polling, not the child handle (the instance is
+  // detached and usually from a previous launch); a hung graceful shutdown
+  // gets SIGKILL after ~10s. Waiting for the pid to actually vanish before
+  // start() matters: uvicorn's graceful drain keeps answering probes while
+  // dying, and a premature start() would "adopt" the corpse.
+  async restart() {
+    const pid = (this.child && this.child.exitCode === null && !this.child.killed)
+      ? this.child.pid : this._survivorPid();
+    if (!pid) {
+      const s = uiSettings.get();
+      const probe = await ProxyClient.probe(this._base(s.wirescopePort || 7800)).catch(() => null);
+      if (probe) return { ok: false, error: 'Proxy on this port is not managed by Clodex — restart it where it was started.' };
+      return this.start(); // nothing running: restart degenerates to start
+    }
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+    const gone = () => { try { process.kill(pid, 0); return false; } catch { return true; } };
+    for (let i = 0; i < 40 && !gone(); i++) await new Promise((r) => setTimeout(r, 250));
+    if (!gone()) {
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    try { fs.unlinkSync(this._pidFile()); } catch {}
+    this.child = null;
+    this.startedPort = null;
+    return this.start();
   }
 }
 const wirescope = new WirescopeSupervisor();
@@ -5692,6 +5754,7 @@ app.whenReady().then(() => {
   ipcMain.handle('wirescope:status', () => wirescope.status());
   ipcMain.handle('wirescope:start', () => wirescope.start());
   ipcMain.handle('wirescope:stop', () => wirescope.stop());
+  ipcMain.handle('wirescope:restart', () => wirescope.restart());
 
   ipcMain.handle('session:exportMarkdown', async (_e, name) => {
     const s = manager.sessions.get(name);
