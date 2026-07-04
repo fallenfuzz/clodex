@@ -1,0 +1,51 @@
+# Clodex phone view behind m.dinzona.ro/c — same pattern as wb-mobile:
+# ExternalName → host.docker.internal reaches the Mac-local server (7900).
+# Separate Ingress object so the basic-auth annotations apply only to /c,
+# not to workbench's paths on the same host.
+apiVersion: v1
+kind: Service
+metadata:
+  name: clodex-mobile
+  namespace: workbench
+spec:
+  type: ExternalName
+  externalName: host.docker.internal
+  ports:
+    - port: 7900
+      protocol: TCP
+      targetPort: 7900
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: clodex-mobile
+  namespace: workbench
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/upstream-vhost: $host
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: clodex-mobile-auth
+    nginx.ingress.kubernetes.io/auth-realm: "Clodex"
+spec:
+  ingressClassName: nginx
+  rules:
+    # needs a clodex.dinzona.ro CNAME -> servicii.home.ro in Cloudflare
+    # (proxied), same as every other subdomain. Own subdomain + own port
+    # (7900), so it serves at root — no path mount needed.
+    - host: clodex.dinzona.ro
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: clodex-mobile
+                port:
+                  number: 7900
+  tls:
+    - hosts:
+        - clodex.dinzona.ro
+      secretName: dinzona-wildcard-tls
