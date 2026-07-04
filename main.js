@@ -4813,12 +4813,33 @@ function syncRemoteServer() {
       getSessions: () =>
         Array.from(manager.sessions.values())
           .filter(sess => sess.agentType && !sess._dead)
-          .map(sess => ({
-            name: sess.name,
-            type: sess.type,
-            cwd: sess.cwd,
-            workspace: (workspaces.get(sess.workspaceId) || {}).name || '',
-          })),
+          .map(sess => {
+            // Same sources as the GUI status bar: proxy telemetry snapshot
+            // (model/cost/requests/live tokens) + the statusline ctx
+            // side-channel (window size; token fallback for unrouted sessions).
+            const snap = proxyPoller.snapshot(sess.name);
+            const p = (snap && snap.payload) || null;
+            let ctx = null;
+            try {
+              ctx = parseCtxFile(fs.readFileSync(path.join(REGISTRY_DIR, `${sess.name}-ctx`), 'utf-8'));
+            } catch {}
+            const wireTok = p && p.context && typeof p.context.inputTokens === 'number'
+              ? p.context.inputTokens : null;
+            return {
+              name: sess.name,
+              type: sess.type,
+              cwd: sess.cwd,
+              workspace: (workspaces.get(sess.workspaceId) || {}).name || '',
+              stats: {
+                model: (p && p.model) || null,
+                cost: p && p.cost && p.cost.usd != null ? p.cost.usd : null,
+                requests: p && p.cost && p.cost.requests != null ? p.cost.requests : null,
+                ctxTok: wireTok != null ? wireTok : (ctx && ctx.tok) || null,
+                ctxSize: (ctx && ctx.size) || null,
+                ctxPct: (ctx && ctx.pct != null) ? ctx.pct : null,
+              },
+            };
+          }),
       getTranscript: (name, limit) => {
         const sess = manager.sessions.get(name);
         if (!sess || !sess.agentType) return { ok: false, error: 'Session not found' };

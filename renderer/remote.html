@@ -28,7 +28,10 @@
     background: var(--panel); border-bottom: 1px solid var(--border);
     flex: none;
   }
-  header h1 { font-size: 16px; font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #hdr-mid { flex: 1; min-width: 0; }
+  #hdr-stats { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #hdr-stats:empty { display: none; }
   #back { display: none; background: none; border: none; color: var(--accent); font-size: 15px; padding: 4px 6px 4px 0; }
   #conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); flex: none; }
   #conn-dot.on { background: var(--green); }
@@ -82,7 +85,10 @@
 <div id="app">
   <header>
     <button id="back">&#8249; Back</button>
-    <h1 id="title">Clodex</h1>
+    <div id="hdr-mid">
+      <h1 id="title">Clodex</h1>
+      <div id="hdr-stats"></div>
+    </div>
     <div id="conn-dot"></div>
   </header>
   <main id="main">
@@ -100,6 +106,7 @@
   const $ = (id) => document.getElementById(id);
   const listEl = $('list'), chatEl = $('chat'), mainEl = $('main');
   const titleEl = $('title'), backBtn = $('back'), connDot = $('conn-dot');
+  const hdrStats = $('hdr-stats');
   const composer = $('composer'), input = $('input'), sendBtn = $('send');
   const thinkingEl = $('thinking');
 
@@ -115,8 +122,33 @@
     try {
       const r = await fetch('/api/sessions');
       const j = await r.json();
-      if (j.ok) { sessions = j.sessions; renderList(); }
+      if (j.ok) { sessions = j.sessions; renderList(); renderHdrStats(); }
     } catch {}
+  }
+
+  function fmtTok(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(n < 2e6 ? 1 : 0) + 'M';
+    if (n >= 1000) return Math.round(n / 1000) + 'k';
+    return String(n);
+  }
+
+  function renderHdrStats() {
+    if (!open) { hdrStats.textContent = ''; return; }
+    const s = sessions.find(x => x.name === open);
+    const st = s && s.stats;
+    if (!st) { hdrStats.textContent = ''; return; }
+    const segs = [];
+    if (st.model) segs.push(st.model);
+    if (st.ctxTok) {
+      segs.push(st.ctxSize
+        ? fmtTok(st.ctxTok) + '/' + fmtTok(st.ctxSize) + (st.ctxPct != null ? ' (' + st.ctxPct + '%)' : '')
+        : fmtTok(st.ctxTok) + (st.ctxPct != null ? ' (' + st.ctxPct + '%)' : ''));
+    } else if (st.ctxPct != null) {
+      segs.push('ctx ' + st.ctxPct + '%');
+    }
+    if (st.requests != null) segs.push('req ' + st.requests);
+    if (st.cost != null) segs.push('~$' + (st.cost >= 1 ? st.cost.toFixed(2) : st.cost.toFixed(4)));
+    hdrStats.textContent = segs.join(' · ');
   }
 
   async function loadTranscript() {
@@ -236,6 +268,7 @@
     chatEl.innerHTML = '';
     const s = sessions.find(x => x.name === name);
     thinkingEl.className = (s && s.activity === 'thinking') ? 'on' : '';
+    renderHdrStats();
     loadTranscript().then(scrollDown);
   }
 
@@ -247,6 +280,7 @@
     backBtn.style.display = 'none';
     thinkingEl.className = '';
     listEl.style.display = 'block';
+    hdrStats.textContent = '';
     loadSessions();
   }
 
@@ -284,6 +318,8 @@
         // injected from elsewhere) — as a burst, since the transcript entry
         // lands on disk after the event fires
         if (d.turnEnd || d.state === 'thinking') burstFetch();
+        // stats (cost/req/ctx) move once per turn — refresh them then
+        if (d.turnEnd) setTimeout(loadSessions, 1500);
       }
     });
     es.addEventListener('sessions', () => loadSessions());
