@@ -28,10 +28,9 @@
     background: var(--panel); border-bottom: 1px solid var(--border);
     flex: none;
   }
-  header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #hdr-mid { flex: 1; min-width: 0; }
+  header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; flex: none; }
+  #hdr-mid { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; overflow: hidden; }
   #hdr-stats { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #hdr-stats:empty { display: none; }
   #back { display: none; background: none; border: none; color: var(--accent); font-size: 15px; padding: 4px 6px 4px 0; }
   #conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); flex: none; }
   #conn-dot.on { background: var(--green); }
