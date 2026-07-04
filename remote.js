@@ -21,12 +21,13 @@ const MAX_BODY = 64 * 1024;          // matches the IPC message cap
 const SSE_HEARTBEAT_MS = 25000;
 
 class RemoteServer {
-  constructor({ port, pagePath, getSessions, getTranscript, send }) {
+  constructor({ port, pagePath, getSessions, getTranscript, send, restartApp }) {
     this._port = port;
     this._pagePath = pagePath;
     this._getSessions = getSessions;
     this._getTranscript = getTranscript;
     this._send = send;
+    this._restartApp = restartApp || null;
     this._server = null;
     this._clients = new Set();       // live SSE responses
     this._activity = new Map();      // name -> 'thinking' | 'idle'
@@ -138,6 +139,16 @@ class RemoteServer {
         const out = this._send(name, text);
         return this._json(res, out.ok ? 200 : 404, out);
       });
+    }
+    // Full app relaunch (sessions resume per the normal quit/restore
+    // lifecycle). The response is written BEFORE the restart fires — the
+    // server dies with the app, so a late reply would never arrive. POST
+    // only; the page fronts it with a confirm.
+    if (req.method === 'POST' && p === '/api/restart') {
+      if (!this._restartApp) return this._json(res, 501, { ok: false, error: 'restart not available' });
+      this._json(res, 200, { ok: true });
+      this._restartApp();
+      return;
     }
     this._json(res, 404, { ok: false, error: 'not found' });
   }

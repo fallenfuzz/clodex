@@ -32,8 +32,16 @@
   #hdr-mid { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; overflow: hidden; }
   #hdr-stats { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #back { display: none; background: none; border: none; color: var(--accent); font-size: 15px; padding: 4px 6px 4px 0; }
+  #restart { background: none; border: none; color: var(--dim); font-size: 18px; padding: 4px 6px; flex: none; -webkit-tap-highlight-color: transparent; }
+  #restart:disabled { opacity: 0.4; }
   #conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); flex: none; }
   #conn-dot.on { background: var(--green); }
+  #restart-overlay {
+    display: none; position: fixed; inset: 0; z-index: 10;
+    background: var(--bg); flex-direction: column; align-items: center;
+    justify-content: center; gap: 10px; color: var(--dim); text-align: center; padding: 20px;
+  }
+  #restart-overlay.on { display: flex; }
 
   main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 
@@ -88,8 +96,13 @@
       <h1 id="title">Clodex</h1>
       <div id="hdr-stats"></div>
     </div>
+    <button id="restart" title="Restart Clodex on the desktop">&#8635;</button>
     <div id="conn-dot"></div>
   </header>
+  <div id="restart-overlay">
+    <div>Restarting Clodex&#8230;</div>
+    <div style="font-size: 12px;">Sessions resume automatically. This page reloads when the app is back.</div>
+  </div>
   <main id="main">
     <div id="list"></div>
     <div id="chat"></div>
@@ -285,6 +298,37 @@
     hdrStats.textContent = '';
     loadSessions();
   }
+
+  // Full app restart from the phone. The server answers, THEN dies (~500ms
+  // later) taking the SSE with it; from there poll until the relaunched app
+  // answers again and reload. Cloudflare/ingress 502s during the gap are just
+  // failed polls. No timeout on the poll — the overlay says what's happening,
+  // and a manual reload is always available.
+  const restartBtn = $('restart'), restartOverlay = $('restart-overlay');
+  restartBtn.addEventListener('click', async () => {
+    if (!confirm('Restart Clodex on the desktop? Running turns are interrupted; sessions resume.')) return;
+    restartBtn.disabled = true;
+    try {
+      const r = await fetch('api/restart', { method: 'POST' });
+      const j = await r.json();
+      if (!j.ok) { alert(j.error || 'restart failed'); restartBtn.disabled = false; return; }
+    } catch { alert('restart failed — connection?'); restartBtn.disabled = false; return; }
+    restartOverlay.className = 'on';
+    if (es) { try { es.close(); } catch {} es = null; }
+    const started = Date.now();
+    const poll = async () => {
+      // Give the app a moment to actually go down before we start probing —
+      // an instant probe would hit the dying-but-still-serving instance.
+      if (Date.now() - started > 3000) {
+        try {
+          const r = await fetch('api/sessions', { cache: 'no-store' });
+          if (r.ok) { location.reload(); return; }
+        } catch {}
+      }
+      setTimeout(poll, 2000);
+    };
+    poll();
+  });
 
   backBtn.addEventListener('click', closeSession);
   sendBtn.addEventListener('click', send);

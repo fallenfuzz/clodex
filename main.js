@@ -4942,6 +4942,14 @@ function syncRemoteServer() {
         manager._deliverMessage(name, 'user', text, 'dm');
         return { ok: true };
       },
+      // Remote-triggered full relaunch: the normal quit path (before-quit →
+      // killAll) then a fresh instance — sessions --resume, the managed
+      // wirescope survives (detached) and the new launch's version check
+      // picks up any pending vendor bump. Delay lets the HTTP response and
+      // the ingress hop flush before the server dies under them.
+      restartApp: () => {
+        setTimeout(() => { app.relaunch(); app.quit(); }, 500);
+      },
     });
   }
   remoteError = null;
