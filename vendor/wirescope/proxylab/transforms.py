@@ -519,6 +519,98 @@ def _strip_system_sections(obj):
     return {"removed": removed} if removed else None
 
 
+# ---- TASK-REMINDER STRIP (rides the L2 strip level) ------------------------
+# The CLI nags "The task tools haven't been used recently..." (~421 ch ≈ 105
+# tok) every few tool-heavy turns, and each nag lands in settled history — so
+# they ACCRETE: a long clodex session carried 4+, re-shipped on every request,
+# with zero Task* calls ever following (the nag only fires in sessions that
+# don't use tasks). Skip the block entirely on encounter. Two wire shapes:
+#   1. mid-conversation `role:"system"` message (opus-4.8/fable form) whose
+#      text STARTS with the needle -> drop the whole message;
+#   2. a `<system-reminder>`-wrapped text block inside a user message (classic
+#      form) that is ENTIRELY the reminder -> drop just that block.
+# The match is anchored to the block head on reminder-shaped content only — a
+# bare substring test would eat conversation that merely QUOTES the text
+# (live capture: a tool_result Reading a clodex message file contained the
+# needle; deleting a tool_result also breaks tool_use pairing -> API 400).
+#
+# GATE = the per-session L2 strip level (>=2), same as the other content folds
+# (fold_read_edits / edit-ack / tool-error stubbing) — NOT a process-global
+# flag. So an L2 session strips the nags; L1/L0 leave them (an agent you WANT
+# nudged toward the task list just stays below L2, or a whole-fleet run keeps
+# the nudge with STRIP_TASK_REMINDERS=0 below). This deletes Anthropic's nudge,
+# so it belongs with the other opt-in L2 simplifications, not always-on.
+# Unlike the edit-ack/tool-error riders it needs NO `busted_from` gate: nags
+# debut at the tail, so stripping-from-arrival can never ORIGINATE a warm-prefix
+# bust (the reason those riders only fire inside a thinking-strip's bust region
+# doesn't apply). Deterministic every turn -> byte-stable; no usage-gating (a
+# gate that flipped when a session started using tasks would flip prefix bytes
+# mid-session — the anti-flap trap the strip-guard latch exists for).
+# STRIP_TASK_REMINDERS is a KILL-SWITCH (default ON): the real gate is L2, but
+# set it to 0 to preserve the nudge even in L2 sessions (keep the other L2
+# folds, lose only the nag strip).
+STRIP_TASK_REMINDERS = os.environ.get("STRIP_TASK_REMINDERS", "1") not in (
+    "0", "no", "off", "false")
+_TASK_REMINDER_NEEDLE = "The task tools haven't been used recently"
+
+
+def _is_task_reminder_text(text):
+    """True iff `text` IS the task nag (anchored; optionally system-reminder-
+    wrapped). Never matches mere quotation mid-content."""
+    if not isinstance(text, str):
+        return False
+    t = text.strip()
+    if t.startswith("<system-reminder>"):
+        inner = t[len("<system-reminder>"):].strip()
+        return inner.startswith(_TASK_REMINDER_NEEDLE) and t.endswith("</system-reminder>")
+    return t.startswith(_TASK_REMINDER_NEEDLE)
+
+
+def _strip_task_reminders(obj, agent_id=None):
+    """Delete task-tool nag reminders wherever they appear in messages[]. Runs
+    at the L2 strip level (rides `_strip_l2_enabled`, same as fold/edit-ack);
+    the STRIP_TASK_REMINDERS kill-switch can force it off even at L2. Returns a
+    log dict, or None if nothing matched / the gate is closed. Idempotent."""
+    if not (STRIP_TASK_REMINDERS and _strip_l2_enabled(obj, agent_id)):
+        return None
+    msgs = obj.get("messages")
+    if not isinstance(msgs, list):
+        return None
+    dropped_msgs = dropped_blocks = chars = 0
+    keep = []
+    for m in msgs:
+        if not isinstance(m, dict):
+            keep.append(m)
+            continue
+        c = m.get("content")
+        # shape 1: mid-conversation system message, string (or single-text) body
+        if m.get("role") == "system":
+            txt = c if isinstance(c, str) else (
+                c[0].get("text") if (isinstance(c, list) and len(c) == 1
+                                     and isinstance(c[0], dict)
+                                     and c[0].get("type") == "text") else None)
+            if _is_task_reminder_text(txt):
+                dropped_msgs += 1
+                chars += len(txt)
+                continue
+        # shape 2: a wrapped text block inside a user message's block list
+        if m.get("role") == "user" and isinstance(c, list):
+            hits = [b for b in c
+                    if isinstance(b, dict) and b.get("type") == "text"
+                    and _is_task_reminder_text(b.get("text"))]
+            # never empty a message (invalid wire) — sole-block nag stays put
+            if hits and len(hits) < len(c):
+                m["content"] = [b for b in c if b not in hits]
+                dropped_blocks += len(hits)
+                chars += sum(len(b.get("text") or "") for b in hits)
+        keep.append(m)
+    if not (dropped_msgs or dropped_blocks):
+        return None
+    obj["messages"] = keep
+    return {"system_msgs": dropped_msgs, "user_blocks": dropped_blocks,
+            "chars": chars}
+
+
 # ---- WIRESCOPE `[wirescope:omit ...]` — strip context sections from msgs[0] -
 # Honors `[wirescope:omit claudemd,useremail]` (see WIRESCOPE.md): the proxy
 # strips the named `# <Section>` blocks out of the <system-reminder> in the first

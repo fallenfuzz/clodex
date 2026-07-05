@@ -665,8 +665,13 @@ async def handler(request: Request) -> Response:
         # role — so concurrent same-role subagents each get their own page.
         subkey = request.query_params.get("sub") or request.query_params.get("role")
         if subkey:
+            sub_entry = meta_mod._subagent_request(sess, subkey)
+            if sub_entry is None:
+                # cold fallback: swept subagent state, but the captures remain
+                sub_entry, _, _ = views_mod._load_last_request_disk(sess,
+                                                                    subkey=subkey)
             return Response(views_mod._render_session_html(
-                                sess, meta_mod._subagent_request(sess, subkey),
+                                sess, sub_entry,
                                 status_mod._status_snapshot(session=sess),
                                 subrole=subkey),
                             media_type="text/html; charset=utf-8")
@@ -680,11 +685,19 @@ async def handler(request: Request) -> Response:
         # from the per-turn capture files. The reconstruction stitches the final
         # answer in as its last item, so don't also render the standalone resp.
         recon = report_mod.codex_ws_transcript(sess)
+        # Cold-session VIEW fallback: the sweeper deletes the replayable entry
+        # (memory + SQLite mirror) once the prefix is provably cold — right for
+        # replay, wrong to blank the read-only view while the capture files are
+        # still on disk. Rebuild view/answer/receipts from the captures instead.
+        disk_resp = disk_usage = None
+        if entry is None and recon is None:
+            entry, disk_resp, disk_usage = views_mod._load_last_request_disk(sess)
         return Response(views_mod._render_session_html(
                             sess, recon or entry,
                             status_mod._status_snapshot(session=sess),
-                            resp=None if recon else meta_mod._LAST_RESPONSE.get(sess),
-                            usage=meta_mod._LAST_USAGE.get(sess)),
+                            resp=None if recon else (meta_mod._LAST_RESPONSE.get(sess)
+                                                     or disk_resp),
+                            usage=meta_mod._LAST_USAGE.get(sess) or disk_usage),
                         media_type="text/html; charset=utf-8")
 
     # ---- warmth read endpoint (local consumers: statusline / hook / pinger) ---
@@ -1059,6 +1072,17 @@ async def handler(request: Request) -> Response:
                 record["fold_read_edits"] = fld
                 if fld.get("folded_read_bodies") or fld.get("stubbed_edit_calls") or fld.get("stubbed_edit_acks"):
                     changed = True
+            # TASK-REMINDER STRIP (part of STRIP LEVEL 2): drop the CLI's
+            # accreting "task tools haven't been used" nags wherever they
+            # appear in history. L2-gated inside the transform (rides
+            # _strip_l2_enabled, so the level directive resolved above at
+            # _strip_thinking_enabled is already in force); kill-switch
+            # STRIP_TASK_REMINDERS can force it off. No busted_from — nags
+            # arrive at the tail, so stripping them never originates a bust.
+            trs = transforms_mod._strip_task_reminders(obj, agent_id=agent_id)
+            if trs:
+                record["task_reminder_strip"] = trs
+                changed = True
             # HOLD-WARM: /warm-cache sentinel turn -> arm/disarm + inject the
             # echo instruction; the turn then forwards like any other (the
             # model speaks the ack; this request becomes the replayable,
