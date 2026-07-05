@@ -80,6 +80,7 @@ def _identity():
             "context_skills": True,       # /_context per-skill roster + utilization
             "context_report": True,       # /_report?session= cost/efficiency report
             "context_timeline": True,     # /_report?...&detail=1 series + /_timeline HTML
+            "bust_locator": True,         # /_bust?session= cache-divergence forensics
             # prior-turn thinking strip: per-session consumer opt-in via /_strip
             # or [wirescope:strip-thinking on]. `default` = the global flag (what
             # `effective` is when no per-session override is set). When the proxy
@@ -143,6 +144,7 @@ def _identity():
             "context": "/_context",
             "report": "/_report",
             "timeline": "/_timeline",
+            "bust": "/_bust",
             "strip": "/_strip",
         },
         "docs": "INTEGRATION.md",         # front-door contract; push deep-dive = SUBSCRIBERS.md
@@ -263,9 +265,13 @@ def _status_snapshot(session=None, all_sessions=False, limit=None):
                        # content-addressed → shared across sessions with
                        # identical layouts; display-grade only
                        "segments": warmth_mod.warmth_segments(sid)},
-            # lifetime count of resumes from a COLD cache (each = a full prefix
-            # re-write at the write premium); 0 = never lapsed between turns
-            "cold_resumes": warmth_mod.cold_resumes(sid),
+            # REAL-BUST rollup (2026-07-06): per-class cumulative counts + the
+            # last bust, each class carrying its own fault + fix_hint so a chip
+            # renders severity/tooltip from the payload. Supersedes the old
+            # `cold_resumes` scalar (which counted ONLY the `lapse` class and
+            # missed every warm content-divergence bust); lapse now lives in
+            # busts.by_class.lapse. None when the session never had a real bust.
+            "busts": warmth_mod.bust_summary(sid),
             "hold": hold,
             "cost": ({"est_usd": tot["est_usd"], "requests": tot["requests"],
                       "unpriced_requests": tot["unpriced_requests"]}
