@@ -4,3 +4,5 @@ dist/
 *.log
 .claude/
 HANDOFF.local.md
+# personal infra (ingress/tunnel manifests) — generic Clodex just serves 7900
+deploy/
