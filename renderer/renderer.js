@@ -1328,24 +1328,32 @@ function renderProxyBar() {
     }
   }
   if (p.refusals > 0) segs.push(`<span class="px-seg px-refusal">⚠ ${p.refusals}</span>`);
-  // Cache-bust chip: how many prefix re-writes this session took, and — the
-  // point — whether any were a REAL injected-prefix change worth investigating.
-  // wirescope classifies each bust's fault; we render loud ONLY on `content`
-  // (model swap, midnight date rollover, a CLAUDE.md edit) and stay calm for
-  // `environment` (expected cold) / `self` (designed strip cost). Clickable into
-  // the per-turn inspector when we can reach /_bust (base + live sessionId).
-  if (p.busts && p.busts.total > 0) {
-    const b = p.busts;
-    const classes = Array.isArray(b.classes) ? b.classes : [];
-    const contentCls = classes.filter((c) => c && c.fault === 'content');
-    const loud = contentCls.length > 0;
-    const clickable = !!(p.base && p.sessionId);
-    const cls = `px-seg px-bust${loud ? ' px-bust-loud' : ''}${clickable ? ' px-ctx-btn' : ''}`;
-    const tip = loud
-      ? `${contentCls.reduce((n, c) => n + (c.count || 0), 0)} cache-bust${b.total === 1 ? '' : 's'} from a real prefix change — ${esc((contentCls[0] && contentCls[0].fix_hint) || 'inspect what changed')}.${clickable ? ' Click to inspect.' : ''}`
-      : `${b.total} cache-bust event${b.total === 1 ? '' : 's'} — all expected (cold cache or designed strip cost), nothing to fix.${clickable ? ' Click to inspect.' : ''}`;
-    const attrs = clickable ? ' data-act="bust"' : '';
-    segs.push(`<span class="${cls}"${attrs} title="${tip}">💥 ${b.total}</span>`);
+  // Cache-bust chip: report GENUINE busts only. The per-turn thinking-strip
+  // microbusts (fault:self — a settled turn's cached thinking falling behind the
+  // last-user boundary each turn) are a DESIGN DECISION, not a cache problem, so
+  // they're excluded from the count entirely (settled 07-06) — not merely calm.
+  // What remains is genuine: `content` (a real injected-prefix change — model
+  // swap, midnight date rollover, a CLAUDE.md edit) and `environment` (idle-cold
+  // cache). Amber only on content; environment stays calm. No chip at all when
+  // the only busts are self, which is every active session by design. wirescope
+  // classifies the fault; we just filter + render. Clickable into the per-turn
+  // inspector when we can reach /_bust (base + live sessionId).
+  const bsum = p.busts;
+  if (bsum && Array.isArray(bsum.classes)) {
+    const genuine = bsum.classes.filter((c) => c && c.fault && c.fault !== 'self');
+    const genuineCount = genuine.reduce((n, c) => n + (c.count || 0), 0);
+    if (genuineCount > 0) {
+      const contentCls = genuine.filter((c) => c.fault === 'content');
+      const contentCount = contentCls.reduce((n, c) => n + (c.count || 0), 0);
+      const loud = contentCount > 0;
+      const clickable = !!(p.base && p.sessionId);
+      const cls = `px-seg px-bust${loud ? ' px-bust-loud' : ''}${clickable ? ' px-ctx-btn' : ''}`;
+      const tip = loud
+        ? `${contentCount} genuine cache-bust${contentCount === 1 ? '' : 's'} from a real prefix change — ${esc((contentCls[0] && contentCls[0].fix_hint) || 'inspect what changed')}.${clickable ? ' Click to inspect.' : ''}`
+        : `${genuineCount} cache-bust${genuineCount === 1 ? '' : 's'} from the cache going cold — expected, nothing changed.${clickable ? ' Click to inspect.' : ''}`;
+      const attrs = clickable ? ' data-act="bust"' : '';
+      segs.push(`<span class="${cls}"${attrs} title="${tip}">💥 ${genuineCount}</span>`);
+    }
   }
   if (p.base && p.sessionId) {
     const url = `${p.base}/_session?session=${encodeURIComponent(p.sessionId)}`;
@@ -2881,18 +2889,30 @@ function renderBustSeries(d, base, sid) {
   const link = (base && sid)
     ? `<span class="px-link-ext" data-url="${esc(`${base}/_session?session=${encodeURIComponent(sid)}`)}" title="Open the session in the wirescope navigator (⌘-click for browser)">Open navigator →</span>`
     : '';
-  if (!busts.length) {
-    return `<div class="cost-note">No cache busts recorded${nT != null ? ` across ${nT} turn transition${nT === 1 ? '' : 's'}` : ''} — the prefix stayed warm.</div>${link}`;
+  // Genuine busts (content / environment) are the investigation; the fault:self
+  // microbusts are the designed per-turn strip cost — collapsed to one muted
+  // line, not listed row-by-row (they're identical and expected). Matches the
+  // chip, which counts genuine only.
+  const genuine = busts.filter((t) => t.fault !== 'self');
+  const designed = busts.filter((t) => t.fault === 'self');
+  if (!genuine.length) {
+    const only = designed.length
+      ? `<div class="cost-note">No genuine cache busts — the ${designed.length} recorded event${designed.length === 1 ? ' is' : 's are'} the designed per-turn strip cost (thinking falling behind the boundary), not a cache problem.</div>`
+      : `<div class="cost-note">No cache busts recorded${nT != null ? ` across ${nT} turn transition${nT === 1 ? '' : 's'}` : ''} — the prefix stayed warm.</div>`;
+    return only + link;
   }
   const nStatic = d.n_static_prefix_busts != null ? d.n_static_prefix_busts : null;
-  const head = `<div class="cost-head"><b>${busts.length}</b> cache-bust${busts.length === 1 ? '' : 's'}`
+  const head = `<div class="cost-head"><b>${genuine.length}</b> genuine cache-bust${genuine.length === 1 ? '' : 's'}`
     + (nT != null ? ` over <b>${nT}</b> transitions` : '')
     + (nStatic ? ` · <b>${nStatic}</b> touched the static prefix` : '')
     + `</div>`;
   // Newest first — the operator usually cares about what just broke.
-  const rows = busts.slice().reverse().map((t) => bustRow(t, base, sid)).join('');
-  const note = '<div class="cost-note">Amber = a real injected-prefix change worth fixing (model swap, date rollover, CLAUDE.md edit). Dim = expected (idle cold cache or designed strip cost).</div>';
-  return head + `<div class="bust-list">${rows}</div>` + note + link;
+  const rows = genuine.slice().reverse().map((t) => bustRow(t, base, sid)).join('');
+  const designedNote = designed.length
+    ? `<div class="cost-note">+ ${designed.length} designed strip-cost microbust${designed.length === 1 ? '' : 's'} (fault:self) — expected every turn, not shown.</div>`
+    : '';
+  const note = '<div class="cost-note">Amber = a real injected-prefix change worth fixing (model swap, date rollover, CLAUDE.md edit). Dim = expected (idle cold cache, or a one-time deploy tax that self-heals).</div>';
+  return head + `<div class="bust-list">${rows}</div>` + designedNote + note + link;
 }
 
 async function openBustPopover(name, anchor) {
