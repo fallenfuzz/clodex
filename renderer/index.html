@@ -209,6 +209,24 @@
       <div class="popover-title"><span>Cache busts — <span id="bust-popover-name"></span></span><button type="button" class="popover-close" id="bust-popover-close" title="Close" aria-label="Close">&times;</button></div>
       <div id="bust-popover-body"></div>
     </div>
+    <div id="files-popover" class="hidden">
+      <div class="popover-title"><span>Touched files — <span id="files-popover-name"></span></span><button type="button" class="popover-close" id="files-popover-close" title="Close" aria-label="Close">&times;</button></div>
+      <div id="files-popover-body"></div>
+    </div>
+    <div id="file-peek-overlay" class="hidden">
+      <div id="file-peek-modal">
+        <div class="popover-title">
+          <span id="file-peek-path" title=""></span>
+          <span class="file-peek-controls">
+            <button type="button" class="file-peek-tab" id="file-peek-tab-diff">Diff</button>
+            <button type="button" class="file-peek-tab" id="file-peek-tab-file">File</button>
+            <button type="button" class="file-peek-open" id="file-peek-open" title="Open in the default editor">Open</button>
+            <button type="button" class="popover-close" id="file-peek-close" title="Close" aria-label="Close">&times;</button>
+          </span>
+        </div>
+        <div id="file-peek-body"></div>
+      </div>
+    </div>
     <div id="report-overlay" class="hidden">
       <div id="report-modal">
         <div class="popover-title"><span>Session report — <span id="report-name"></span></span><button type="button" class="popover-close" id="report-close" title="Close" aria-label="Close">&times;</button></div>
@@ -433,6 +451,23 @@
           <input type="checkbox" id="prefs-compact-on-resume" style="margin: 0;">
           <span>Bake transcripts on resume</span>
         </label>
+        <div id="ws-logs-block" style="display: none;">
+          <p class="hint-text" style="margin: 14px 0 2px;">Capture logs</p>
+          <p class="hint-text">The proxy keeps per-session request captures on disk to power cost and cache-bust forensics. They accrue over time; clearing collapses old sessions to their billing receipts (cost history is preserved — only the detailed request forensics are removed) and clears the probe-traffic bucket. Active, warm, and recent sessions are never touched.</p>
+          <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+            <span id="ws-logs-size" class="hint-text" style="flex: 1;">—</span>
+            <label class="hint-text" style="flex: none; display: flex; align-items: center; gap: 6px;">older than
+              <select id="ws-logs-age" style="flex: none;">
+                <option value="180d">180 days</option>
+                <option value="90d">90 days</option>
+                <option value="30d" selected>30 days</option>
+                <option value="7d">7 days</option>
+                <option value="1h">any (non-active)</option>
+              </select>
+            </label>
+            <button id="ws-logs-clear-btn" class="secondary" type="button" style="flex: none;" disabled>Clear…</button>
+          </div>
+        </div>
       </section>
       <section>
         <h4>Phone access</h4>

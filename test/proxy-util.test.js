@@ -60,7 +60,7 @@ test('shapeProxyRecord: maps wire fields to renderer payload', () => {
   const probe = { version: 'v1', capabilities: { stats: true } };
   const r = {
     session_id: 'sid', model: 'claude-opus-4-8',
-    cost: { est_usd: 1.25, requests: 7 },
+    cost: { est_usd: 1.25, main_est_usd: 0.07, requests: 7 },
     turns_completed: 4, refusals: 2,
     context: { turns_in_context: 9, n_messages: 30, input_tokens: 185218 },
     warmth: { state: 'warm', remaining_s: 280.4, ttl_s: 300 },
@@ -69,7 +69,7 @@ test('shapeProxyRecord: maps wire fields to renderer payload', () => {
   };
   const p = shapeProxyRecord(r, probe, 1);
   assert.strictEqual(p.linked, true);
-  assert.deepStrictEqual(p.cost, { usd: 1.25, requests: 7 });
+  assert.deepStrictEqual(p.cost, { usd: 1.25, mainUsd: 0.07, requests: 7 });
   assert.deepStrictEqual(p.context, { turns: 9, messages: 30, inputTokens: 185218 });
   assert.deepStrictEqual(p.warmth, { state: 'warm', remaining_s: 280.4, ttl_s: 300 });
   assert.strictEqual(p.refusals, 2);
@@ -90,7 +90,8 @@ test('shapeProxyRecord: codex-style nulls (no warmth/context) degrade cleanly', 
   const p = shapeProxyRecord(r, probe, 1);
   assert.strictEqual(p.warmth, null);
   assert.strictEqual(p.context, null);
-  assert.deepStrictEqual(p.cost, { usd: 0.01, requests: 3 });
+  // pre-.22 wire: no main_est_usd → mainUsd null (unbilled ≠ $0)
+  assert.deepStrictEqual(p.cost, { usd: 0.01, mainUsd: null, requests: 3 });
 });
 
 test('pickProxyRecord: empty / null candidates → null', () => {
@@ -123,4 +124,166 @@ test('pickProxyRecord: all ended → fall back to most-recently-seen', () => {
   const older = { session_id: 'a', ended: { reason: 'clear' }, last_seen: 10 };
   const newer = { session_id: 'b', ended: { reason: 'clear' }, last_seen: 20 };
   assert.strictEqual(pickProxyRecord([older, newer], 'missing'), newer);
+});
+
+// --- subagent child-row labels ----------------------------------------------
+// Live-wire regression (stocks session, 07-07): named spawns arrived with
+// display_name null + role "subagent" + the given name inside agent_id — three
+// rows all rendered the generic "subagent". The label must prefer the id's
+// name part; built-ins whose agent_id is a bare UUID keep their role label.
+const { shapeSubagent } = require('../proxy-util');
+
+test('shapeSubagent label: named spawn — agent_id name beats generic role', () => {
+  const s = shapeSubagent({
+    key: 'stock-diligence-FIG@session-2bcc26b4',
+    agent_id: 'stock-diligence-FIG@session-2bcc26b4',
+    role: 'subagent', display_name: null, model: 'claude-sonnet-5',
+  }, 1000);
+  assert.strictEqual(s.label, 'stock-diligence-FIG');
+  assert.strictEqual(s.key, 'stock-diligence-FIG@session-2bcc26b4'); // key untouched — detail param
+});
+
+test('shapeSubagent label: UUID agent_id falls back to role', () => {
+  const s = shapeSubagent({
+    key: 'k1', agent_id: '4a59af49-cc52-44b7-8b02-7f4196a4b486', role: 'Explore',
+  }, 1000);
+  assert.strictEqual(s.label, 'Explore');
+});
+
+test('shapeSubagent label: hex-blob agent_id falls back to role', () => {
+  const s = shapeSubagent({
+    key: 'k2', agent_id: 'deadbeefdeadbeefdeadbeef@session-1', role: 'Plan',
+  }, 1000);
+  assert.strictEqual(s.label, 'Plan');
+});
+
+test('shapeSubagent label: explicit display_name always wins', () => {
+  const s = shapeSubagent({
+    key: 'k3', agent_id: 'nice-name@session-1', role: 'subagent', display_name: 'Given Name',
+  }, 1000);
+  assert.strictEqual(s.label, 'Given Name');
+});
+
+test('shapeSubagent label: no agent_id, no display_name → role, then key', () => {
+  assert.strictEqual(shapeSubagent({ key: 'k4', role: 'general-purpose' }, 1000).label, 'general-purpose');
+  assert.strictEqual(shapeSubagent({ key: 'k5' }, 1000).label, 'k5');
+});
+
+// --- auto-compact-before-cold -------------------------------------------------
+// Policy gate for injecting /compact into a session whose prompt cache is about
+// to expire. Every clause is a safety guard (permission dialogs, half-typed
+// drafts, keep-warm holds) — each one must independently veto.
+const { shouldAutoCompact, AUTO_COMPACT } = require('../proxy-util');
+
+const AC_NOW = 10_000_000;
+function acArgs(over = {}, payloadOver = {}) {
+  return {
+    payload: {
+      linked: true,
+      hold: null,
+      warmth: { state: 'warm', remaining_s: 45, ttl_s: 300 },
+      context: { turns: 5, messages: 20, inputTokens: 150_000 },
+      ...payloadOver,
+    },
+    enabled: true,
+    atPrompt: true,
+    lastInputTs: 0,
+    lastFiredTs: 0,
+    now: AC_NOW,
+    ...over,
+  };
+}
+
+test('shouldAutoCompact: fires on the canonical about-to-cool heavy session', () => {
+  assert.strictEqual(shouldAutoCompact(acArgs()), true);
+});
+
+test('shouldAutoCompact: opt-out and not-at-prompt each veto', () => {
+  assert.strictEqual(shouldAutoCompact(acArgs({ enabled: false })), false);
+  // atPrompt false = last main-line stop was non-terminal (or never stamped):
+  // could be a permission dialog where the injected Enter answers the dialog.
+  assert.strictEqual(shouldAutoCompact(acArgs({ atPrompt: false })), false);
+});
+
+test('shouldAutoCompact: keep-warm hold owns the moment — never both', () => {
+  assert.strictEqual(shouldAutoCompact(acArgs({}, { hold: { until: 123, hours: 4 } })), false);
+});
+
+test('shouldAutoCompact: warmth gates — cold, absent, not yet expiring, unlinked', () => {
+  assert.strictEqual(shouldAutoCompact(acArgs({}, { warmth: { state: 'cold', remaining_s: null, ttl_s: null } })), false);
+  assert.strictEqual(shouldAutoCompact(acArgs({}, { warmth: null })), false);
+  assert.strictEqual(shouldAutoCompact(acArgs({}, { warmth: { state: 'warm', remaining_s: AUTO_COMPACT.WARMTH_HEADROOM_S + 1, ttl_s: 300 } })), false);
+  assert.strictEqual(shouldAutoCompact(acArgs({}, { linked: false })), false);
+});
+
+test('shouldAutoCompact: light context is not worth a lossy compact', () => {
+  assert.strictEqual(shouldAutoCompact(acArgs({}, { context: { turns: 2, messages: 4, inputTokens: 50_000 } })), false);
+  assert.strictEqual(shouldAutoCompact(acArgs({}, { context: null })), false);
+  assert.strictEqual(shouldAutoCompact(acArgs({}, { context: { turns: 2, messages: 4, inputTokens: AUTO_COMPACT.MIN_INPUT_TOKENS } })), true);
+});
+
+test('shouldAutoCompact: recent keystrokes veto (Ctrl-U would eat a draft)', () => {
+  assert.strictEqual(shouldAutoCompact(acArgs({ lastInputTs: AC_NOW - AUTO_COMPACT.INPUT_QUIET_MS + 1 })), false);
+  assert.strictEqual(shouldAutoCompact(acArgs({ lastInputTs: AC_NOW - AUTO_COMPACT.INPUT_QUIET_MS - 1 })), true);
+});
+
+test('shouldAutoCompact: cooldown latch — one fire per window, not per poll tick', () => {
+  assert.strictEqual(shouldAutoCompact(acArgs({ lastFiredTs: AC_NOW - AUTO_COMPACT.COOLDOWN_MS + 1 })), false);
+  assert.strictEqual(shouldAutoCompact(acArgs({ lastFiredTs: AC_NOW - AUTO_COMPACT.COOLDOWN_MS - 1 })), true);
+});
+
+// --- peer visibility: [agent:who] labels + dm hold gate ------------------------
+// A dm injection into a long-idle, not-warm peer re-bills that peer's whole
+// context; the gate bounces those unless the sender says urgent. Warmth must be
+// VERIFIABLE to count as cheap (unknown != warm), and remaining_s ages by
+// payload.ts before being trusted.
+const { peerStatusLabel, shouldHoldDm, DM_HOLD_IDLE_MS } = require('../proxy-util');
+
+const PV_NOW = 50_000_000;
+const warmPayload = (remaining, tsAgo = 0) => ({
+  linked: true, ts: PV_NOW - tsAgo,
+  warmth: { state: 'warm', remaining_s: remaining, ttl_s: 3600 },
+});
+
+test('peerStatusLabel: working / idle / warmth suffixes', () => {
+  assert.strictEqual(peerStatusLabel({ state: 'thinking', idleMs: 0, payload: null, now: PV_NOW }), 'working');
+  assert.strictEqual(peerStatusLabel({ state: 'idle', idleMs: 3 * 60_000, payload: null, now: PV_NOW }), 'idle 3m');
+  assert.strictEqual(peerStatusLabel({ state: 'idle', idleMs: 12 * 60_000, payload: warmPayload(600), now: PV_NOW }), 'idle 12m, warm');
+  assert.strictEqual(
+    peerStatusLabel({ state: 'idle', idleMs: 5 * 3600_000, payload: { linked: true, ts: PV_NOW, warmth: { state: 'cold', remaining_s: null, ttl_s: null } }, now: PV_NOW }),
+    'idle 5h, cache cold');
+  assert.strictEqual(peerStatusLabel({ state: 'idle', idleMs: 30_000, payload: null, now: PV_NOW }), 'idle <1m');
+  assert.strictEqual(peerStatusLabel({ state: 'idle', idleMs: (26 * 60 + 90) * 60_000, payload: null, now: PV_NOW }), 'idle 27h30m');
+});
+
+test('peerStatusLabel: stale-poll warm that has since expired reads cold', () => {
+  // Poll said warm/40s left, 60s ago — it's cold NOW.
+  assert.strictEqual(
+    peerStatusLabel({ state: 'idle', idleMs: 3600_000, payload: warmPayload(40, 60_000), now: PV_NOW }),
+    'idle 1h, cache cold');
+});
+
+test('shouldHoldDm: urgent, working, and recently-active peers always deliver', () => {
+  const base = { state: 'idle', idleMs: 5 * 3600_000, payload: null, now: PV_NOW };
+  assert.strictEqual(shouldHoldDm({ ...base, urgent: true }).hold, false);
+  assert.strictEqual(shouldHoldDm({ ...base, urgent: false, state: 'thinking' }).hold, false);
+  assert.strictEqual(shouldHoldDm({ urgent: false, state: 'idle', idleMs: DM_HOLD_IDLE_MS - 1, payload: null, now: PV_NOW }).hold, false);
+});
+
+test('shouldHoldDm: kept-warm peer is cheap no matter how long idle', () => {
+  assert.strictEqual(shouldHoldDm({ urgent: false, state: 'idle', idleMs: 9 * 3600_000, payload: warmPayload(1800), now: PV_NOW }).hold, false);
+});
+
+test('shouldHoldDm: long-idle + cold or UNKNOWN warmth holds, with reason', () => {
+  const cold = shouldHoldDm({
+    urgent: false, state: 'idle', idleMs: 5 * 3600_000,
+    payload: { linked: true, ts: PV_NOW, warmth: { state: 'cold', remaining_s: null, ttl_s: null } }, now: PV_NOW,
+  });
+  assert.strictEqual(cold.hold, true);
+  assert.match(cold.reason, /idle 5h with a cold cache/);
+  // unknown warmth (no proxy link / codex): long idle still holds — 5h idle is
+  // cold in every realistic TTL regime, and urgent is a one-line retry.
+  const unknown = shouldHoldDm({ urgent: false, state: 'idle', idleMs: 5 * 3600_000, payload: null, now: PV_NOW });
+  assert.strictEqual(unknown.hold, true);
+  assert.doesNotMatch(unknown.reason, /cold cache/); // don't claim what we can't see
 });

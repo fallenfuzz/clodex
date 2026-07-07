@@ -53,6 +53,10 @@
 //                    warmth (W2 step 2): the prefix-ledger stamp record
 //                    (wire/warmth.js) when opts.warmth is set and the
 //                    response confirmed a cache event; null otherwise.
+//                    files: [{ tool, path }] — file-mutating tool calls
+//                    (Edit/Write/NotebookEdit) seen in this response's
+//                    stream (wire/sse.js FileToolCollector). Anthropic SSE
+//                    only; [] elsewhere. Feeds the touched-files UI.
 //   'stream-end'     { agent, reqId }                  → activity: idle
 //   'session'        { agent, sessionId, previous }    → persistence/--resume
 //                    fires on CHANGE only (first sight or /clear rotation),
@@ -76,7 +80,7 @@ const { EventEmitter } = require('events');
 const { URL } = require('url');
 
 const { parseAgentPath, inferProvider } = require('./route');
-const { SSEFramer, anthropicTextDelta, openaiTextDelta, UsageCollector, OpenAIUsageCollector } = require('./sse');
+const { SSEFramer, anthropicTextDelta, openaiTextDelta, UsageCollector, OpenAIUsageCollector, FileToolCollector } = require('./sse');
 const { Decompressor } = require('./decompress');
 const { RoleClassifier, isSubagentRole, isTitleCall, isProbeCall } = require('./role');
 const { billing, billingOpenai, Ledger } = require('./billing');
@@ -534,6 +538,9 @@ class WireProxy extends EventEmitter {
     const { agent, provider, reqId, sessionId, role, sideCall, model, bodyObj, requestId, status } = turnCtx;
     const usage = provider === 'anthropic' ? new UsageCollector() : new OpenAIUsageCollector();
     const extract = provider === 'anthropic' ? anthropicTextDelta : openaiTextDelta;
+    // Touched-files observer (anthropic only; see wire/sse.js). Same containment
+    // as the other collectors: a throw lands in `fail`, never the client path.
+    const ftools = provider === 'anthropic' ? new FileToolCollector() : null;
     let text = '';
     let truncated = false;
     // First guard level: zlib delivers on its own ticks, so an exception
@@ -548,6 +555,7 @@ class WireProxy extends EventEmitter {
     const framer = new SSEFramer((event, data) => {
       try {
         if (usage) usage.onEvent(event, data);
+        if (ftools) ftools.onEvent(event, data);
         const t = extract(event, data);
         if (t && !truncated) {
           if (text.length + t.length > TURN_TEXT_CAP) truncated = true;
@@ -639,6 +647,7 @@ class WireProxy extends EventEmitter {
                 agent, provider, reqId, sessionId, role, sideCall, text,
                 usage: usageRecord, truncated, model, status, billing: bill,
                 stop, sessionTotals, warmth: warmthRec,
+                files: ftools ? ftools.files : [],
               });
             }
           } catch (e) { fail(e); }
@@ -701,7 +710,7 @@ class WireProxy extends EventEmitter {
                 agent, provider, reqId, sessionId, role, sideCall, text: '',
                 usage: null, truncated: false, model, status, billing: bill,
                 stop, sessionTotals: { ...this.billing.session(sessionKey) },
-                warmth: null,
+                warmth: null, files: [],
               });
             }
           } catch (e) { fail(e); }

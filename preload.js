@@ -85,6 +85,14 @@ window.api = {
     ipcRenderer.on('session-ctx', (_e, name, pct, tok, size) => callback(name, pct, tok, size)),
   onSessionProxy: (callback) =>
     ipcRenderer.on('session-proxy', (_e, name, payload) => callback(name, payload)),
+  onSessionFiles: (callback) =>
+    ipcRenderer.on('session-files', (_e, name, files) => callback(name, files)),
+  sessionFiles: (name) => ipcRenderer.invoke('session:files', name),
+  filePeek: (filePath) => ipcRenderer.invoke('file:peek', filePath),
+  fileDiff: (name, filePath) => ipcRenderer.invoke('file:diff', name, filePath),
+  fileOpen: (filePath) => ipcRenderer.invoke('file:open', filePath),
+  onSessionFileView: (callback) =>
+    ipcRenderer.on('session-file-view', (_e, name, filePath) => callback(name, filePath)),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   getProxySnapshot: (name) =>
     ipcRenderer.invoke('proxy:snapshot', name),
@@ -100,6 +108,8 @@ window.api = {
     ipcRenderer.invoke('wire:hold', name, hours, force),
   setStripLevel: (name, level) =>
     ipcRenderer.invoke('proxy:setStripLevel', name, level),
+  setAutoCompact: (name, on) =>
+    ipcRenderer.invoke('session:setAutoCompact', name, on),
   getProxySubagentDetail: (name, child, maxlen) =>
     ipcRenderer.invoke('proxy:subagentDetail', name, child, maxlen),
   onSessionMention: (callback) =>
@@ -136,6 +146,8 @@ window.api = {
   wirescopeStart: () => ipcRenderer.invoke('wirescope:start'),
   wirescopeStop: () => ipcRenderer.invoke('wirescope:stop'),
   wirescopeRestart: () => ipcRenderer.invoke('wirescope:restart'),
+  wirescopePruneInfo: () => ipcRenderer.invoke('wirescope:pruneInfo'),
+  wirescopePrune: (opts) => ipcRenderer.invoke('wirescope:prune', opts),
 
   // Remote access (phone web UI)
   remoteStatus: () => ipcRenderer.invoke('remote:status'),

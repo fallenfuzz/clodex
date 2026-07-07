@@ -155,6 +155,81 @@ class UsageCollector {
   }
 }
 
+// File-touch observer (anthropic streams): collects which files the session's
+// file-mutating tools (Edit/Write/NotebookEdit + legacy MultiEdit) were aimed
+// at, off the same framer feed the text/usage collectors ride. Feeds the
+// touched-files UI — a FACT extractor (tool name + target path), no policy.
+//
+// Hot-path discipline: tool inputs stream as input_json_delta fragments inside
+// content_block_delta — the highest-volume event type. This collector JSON-
+// parses a delta ONLY while a tracked file-tool block is open and its path is
+// still unknown (the path key arrives early in the input object — though not
+// always first: real Edit calls stream `replace_all` ahead of it); outside
+// those windows deltas are dropped on the event-name check alone. A per-block
+// accumulation cap bounds memory even if a path key never shows up.
+//
+// Semantics note: a tool_use in the response is the model's REQUEST to touch
+// the file — the CLI runs it (or the user denies it) after this stream ends.
+// Slight over-report is accepted; the peek/diff UI shows ground truth.
+const FILE_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
+const _FT_EVENTS = new Set(['content_block_start', 'content_block_delta', 'content_block_stop']);
+// Give-up depth. The path key usually leads the input, but not always (real
+// Edit calls stream `replace_all` first, and a big old_string CAN precede
+// file_path) — so the cap is generous; accumulation stops at first match.
+const _FT_BUF_CAP = 65536;
+const _FT_PATH_RE = /"(?:file_path|notebook_path)"\s*:\s*"((?:[^"\\]|\\.)*)"/;
+
+class FileToolCollector {
+  constructor() {
+    this._blocks = new Map(); // index -> { tool, buf, path }
+    this._files = [];         // { tool, path } in stream order
+  }
+
+  _tryExtract(entry) {
+    const m = _FT_PATH_RE.exec(entry.buf);
+    if (!m) return false;
+    try { entry.path = JSON.parse(`"${m[1]}"`); } catch { entry.path = m[1]; }
+    entry.buf = '';
+    this._files.push({ tool: entry.tool, path: entry.path });
+    return true;
+  }
+
+  onEvent(event, data) {
+    if (!data) return;
+    if (event != null && !_FT_EVENTS.has(event)) return;
+    // Nothing tracked and nothing can start here → skip the parse entirely.
+    // (Unnamed events fall through, mirroring UsageCollector's gate.)
+    if (event === 'content_block_delta' && this._blocks.size === 0) return;
+    let obj;
+    try { obj = JSON.parse(data); } catch { return; }
+    const t = obj.type;
+    if (t === 'content_block_start') {
+      const cb = obj.content_block || {};
+      if (cb.type === 'tool_use' && FILE_TOOLS.has(cb.name) && typeof obj.index === 'number') {
+        this._blocks.set(obj.index, { tool: cb.name, buf: '', path: null });
+      }
+    } else if (t === 'content_block_delta') {
+      const entry = this._blocks.get(obj.index);
+      if (!entry || entry.path !== null) return;
+      const d = obj.delta || {};
+      if (d.type !== 'input_json_delta' || typeof d.partial_json !== 'string') return;
+      entry.buf += d.partial_json;
+      if (!this._tryExtract(entry) && entry.buf.length > _FT_BUF_CAP) {
+        this._blocks.delete(obj.index); // unbounded input, no path key — drop
+      }
+    } else if (t === 'content_block_stop') {
+      const entry = this._blocks.get(obj.index);
+      if (entry) {
+        if (entry.path === null && entry.buf) this._tryExtract(entry);
+        this._blocks.delete(obj.index);
+      }
+    }
+  }
+
+  // [{ tool, path }] for every file-tool call whose target path was seen.
+  get files() { return this._files; }
+}
+
 // Codex/openai Responses-API stream: response.completed (or incomplete /
 // failed) carries the FULL response object incl. usage. Port of
 // proxylab codex._parse_openai_response minus the unframed-JSON error
@@ -196,4 +271,4 @@ class OpenAIUsageCollector {
   }
 }
 
-module.exports = { SSEFramer, anthropicTextDelta, openaiTextDelta, UsageCollector, OpenAIUsageCollector };
+module.exports = { SSEFramer, anthropicTextDelta, openaiTextDelta, UsageCollector, OpenAIUsageCollector, FileToolCollector, FILE_TOOLS };

@@ -899,6 +899,14 @@ html, body {
 .cost-chart svg { display: block; width: 100%; height: auto; }
 #cost-popover .px-link-ext { display: inline-block; margin-top: 12px; font-size: 11px; color: var(--accent); cursor: pointer; text-decoration: none; }
 #cost-popover .px-link-ext:hover { text-decoration: underline; }
+/* Per-line cost attribution (main line + subagent shares). */
+.cost-line-list { display: flex; flex-direction: column; gap: 3px; margin-bottom: 4px; }
+.cost-line-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 11px; gap: 10px; }
+.cost-line-label { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cost-line-row.cost-line-main .cost-line-label { font-weight: 600; }
+.cost-line-usd { color: var(--text); font-weight: 600; flex: none; }
+.cost-line-pct { color: var(--text-dim); font-weight: 400; margin-left: 2px; }
+.cost-line-unbilled { color: var(--text-dim); font-weight: 400; font-style: italic; }
 
 /* Cache-bust inspector popover — same shell as the cost popover, narrower. */
 #bust-popover {
@@ -945,6 +953,87 @@ html, body {
 #bust-popover .px-link-ext { font-size: 10px; color: var(--accent); cursor: pointer; text-decoration: none; }
 #bust-popover .px-link-ext:hover { text-decoration: underline; }
 #bust-popover .bust-list + .cost-note { margin-top: 10px; }
+
+/* Touched-files popover — same shell as the bust popover. */
+#files-popover {
+  position: fixed;
+  z-index: 50;
+  width: 480px;
+  max-width: calc(100vw - 16px);
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+#files-popover.hidden { display: none; }
+#files-popover .popover-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+.file-rows { display: flex; flex-direction: column; gap: 2px; }
+.file-row {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+  padding: 5px 8px; border-radius: 4px; cursor: pointer; font-size: 11px;
+}
+.file-row:hover { background: var(--active-bg); }
+.file-row-main { display: flex; align-items: baseline; gap: 6px; overflow: hidden; }
+.file-row-dir { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; }
+.file-row-name { color: var(--text); font-weight: 600; white-space: nowrap; }
+.file-row-meta { color: var(--text-dim); font-size: 10px; flex: none; }
+.file-row-out .file-row-dir, .file-row-out .file-row-name { color: var(--text-dim); font-weight: 400; }
+.file-badge {
+  flex: none; font-size: 9px; padding: 0 5px; border-radius: 8px;
+  background: var(--active-bg); color: var(--text-dim);
+  border: 1px solid var(--text-dim);
+}
+.file-badge-sub { color: #61afef; border-color: #61afef; }
+/* Files button, unseen-changes latch: lit from the moment a touch lands until
+   the popover is opened. The flash class is applied imperatively on arrival
+   (one node, one animation) — the latch style alone survives bar rebuilds. */
+#proxy-actions .px-action.px-files-new { color: var(--accent); border-color: var(--accent); }
+#proxy-actions .px-action.px-files-flash { animation: files-pulse 1s ease-out; }
+@keyframes files-pulse {
+  0% { box-shadow: 0 0 0 0 var(--accent); }
+  100% { box-shadow: 0 0 0 7px transparent; }
+}
+
+/* File peek — read-only Diff/File viewer, report-modal shell. */
+#file-peek-overlay {
+  position: fixed; inset: 0; z-index: 70;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 5vh 16px; background: rgba(0, 0, 0, 0.55);
+}
+#file-peek-overlay.hidden { display: none; }
+#file-peek-modal {
+  width: 860px; max-width: 100%; max-height: 90vh; overflow: hidden;
+  display: flex; flex-direction: column;
+  background: var(--sidebar-bg); border: 1px solid var(--accent);
+  border-radius: 8px; padding: 12px 16px 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+#file-peek-modal .popover-title { font-size: 12px; font-weight: 600; margin-bottom: 10px; flex: none; }
+#file-peek-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.file-peek-controls { display: flex; align-items: center; gap: 6px; flex: none; }
+.file-peek-tab, .file-peek-open {
+  font-size: 10px; padding: 2px 10px; border-radius: 4px; cursor: pointer;
+  background: var(--active-bg); color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+.file-peek-tab.active { color: var(--text); border-color: var(--accent); }
+.file-peek-tab:disabled { opacity: 0.4; cursor: default; }
+.file-peek-open:hover, .file-peek-tab:not(:disabled):hover { color: var(--text); }
+#file-peek-body { overflow-y: auto; min-height: 80px; }
+.file-peek-pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; line-height: 1.45; white-space: pre; overflow-x: auto;
+  background: var(--active-bg); border-radius: 5px; padding: 8px 10px;
+}
+.diff-line { min-height: 1em; }
+.diff-ctx { color: var(--text); }
+.diff-file { color: var(--text-dim); font-weight: 600; }
+.diff-hunk { color: #61afef; }
+.diff-add { color: #4caa6e; background: rgba(76, 170, 110, 0.08); }
+.diff-del { color: #d16969; background: rgba(209, 105, 105, 0.08); }
 .ctx-line-head {
   display: flex; justify-content: space-between; align-items: baseline;
   font-size: 11px; color: var(--text-dim); margin: 8px 0 6px;
@@ -2021,4 +2110,23 @@ html, body {
 ::-webkit-scrollbar-thumb {
   background: var(--border);
   border-radius: 3px;
+}
+
+/* --- Resizable popovers ------------------------------------------------- */
+/* Native CSS resize handles (bottom-right corner) — no JS. Bottom-anchored
+   popovers keep their bottom edge pinned above the bar, so they grow upward/
+   rightward from the handle. The drag writes inline width/height, so a size
+   sticks for that popover until the window reloads. Existing max-width/
+   max-height caps still bound the drag. `resize` needs overflow != visible:
+   the single-scroll shells already have overflow-y:auto; the flex-column
+   shells (fixed header + internally scrolling list) get overflow:hidden. */
+#tools-popover, #skills-popover, #agents-popover, #subagent-popover {
+  overflow: hidden;
+}
+#tools-popover, #skills-popover, #agents-popover, #subagent-popover,
+#ctx-popover, #cost-popover, #bust-popover, #files-popover,
+#file-peek-modal {
+  resize: both;
+  min-width: 260px;
+  min-height: 60px;
 }

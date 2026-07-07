@@ -574,6 +574,8 @@ function removeSession(name) {
   removeSessionFromSidebar(name);
   updateWindowTitle();
   proxyState.delete(name);
+  filesState.delete(name);
+  filesUnseen.delete(name);
 
   if (activeSession === name) {
     const remaining = Array.from(sessions.keys());
@@ -1172,6 +1174,13 @@ window.api.onSessionCtx((name, pct, tok, size) => {
 // when polls stop arriving so it never fakes precision.
 const PROXY_POLL_MS = 5000;
 const proxyState = new Map(); // name -> { payload, at }
+// Touched-files feed: name -> [{ path, tool, ts, count, sub }] newest-first
+// (main.js session ring, pushed on every observed file-tool call; pulled fresh
+// when the Files popover opens, so a detached-window gap loses nothing).
+const filesState = new Map();
+// Sessions whose feed grew since the popover was last opened — drives the
+// files button's unseen-changes highlight (cleared on open, never on poll).
+const filesUnseen = new Set();
 
 function fmtCountdown(remaining_s) {
   const s = Math.max(0, Math.round(remaining_s));
@@ -1208,6 +1217,16 @@ function renderSessionActions(holdHtml = '') {
     btns.push('<button class="px-action" data-act="agents" title="Enable/disable custom + built-in subagents for this session">🤖 agents</button>');
   }
   if (type === 'claude' || type === 'codex') {
+    // Touched-files feed. Fed by the wire (Claude); a Codex session only gets
+    // the button once something lands in its feed (no Codex tap yet).
+    const nFiles = (filesState.get(activeSession) || []).length;
+    if (type === 'claude' || nFiles > 0) {
+      const label = nFiles > 0 ? `📄 ${nFiles} file${nFiles === 1 ? '' : 's'}` : '📄 files';
+      // Unseen-changes latch: accent-lit from the moment a touch lands until
+      // the popover is opened — a count silently ticking is too easy to miss.
+      const unseen = filesUnseen.has(activeSession) ? ' px-files-new' : '';
+      btns.push(`<button class="px-action${unseen}" data-act="files" title="Files this agent's tools touched — click to view or diff">${label}</button>`);
+    }
     btns.push('<button class="px-action" data-act="history" title="Past conversations — resume an earlier session">🕘 history</button>');
     btns.push('<button class="px-action" data-act="reload" title="Hard restart: reload tools/skills/settings from disk in a fresh conversation (the CLI only reads them at launch — /clear and --resume don\'t). The current conversation stays in 🕘 history.">🔄 reload</button>');
     btns.push('<button class="px-action" data-act="edit" title="Edit session settings">⚙ edit</button>');
@@ -1554,9 +1573,16 @@ function applySubagents(name) {
       });
     }
     row.dataset.state = state;
-    row.title = `${s.label || s.key}${s.model ? ' · ' + s.model : ''}${s.requests ? ' · ' + s.requests + ' turn' + (s.requests === 1 ? '' : 's') : ''}\nClick for live activity`;
+    // Per-subagent cost share (wirescope v0.6.22+ est_usd) rides the poll we
+    // already make — null (never 0) = unbilled/pre-.22, so only show it when
+    // present. In the meta it sits after the turn count: "3 · ~$0.42".
+    const costTxt = (typeof s.estUsd === 'number') ? `~${fmtUsd(s.estUsd)}` : '';
+    row.title = `${s.label || s.key}${s.model ? ' · ' + s.model : ''}`
+      + `${s.requests ? ' · ' + s.requests + ' turn' + (s.requests === 1 ? '' : 's') : ''}`
+      + `${costTxt ? ' · ' + costTxt : ''}\nClick for live activity`;
     row.querySelector('.child-label').textContent = s.label || s.key;
-    row.querySelector('.child-meta').textContent = s.requests ? `${s.requests}` : '';
+    row.querySelector('.child-meta').textContent =
+      [s.requests ? `${s.requests}` : '', costTxt].filter(Boolean).join(' · ');
     // Keep DOM order matching proxy order, right after the running anchor.
     if (anchor.nextSibling !== row) anchor.after(row);
     anchor = row;
@@ -1884,6 +1910,7 @@ setInterval(() => {
       else if (action.dataset.act === 'tools') openToolsPopover(activeSession, action);
       else if (action.dataset.act === 'skills') openSkillsPopover(activeSession, action);
       else if (action.dataset.act === 'agents') openAgentsPopover(activeSession, action);
+      else if (action.dataset.act === 'files') openFilesPopover(activeSession, action);
       else if (action.dataset.act === 'history') openHistoryMenu(activeSession, action);
       else if (action.dataset.act === 'reload') doHardRestart(activeSession);
       else if (action.dataset.act === 'strip-menu') {
@@ -1915,13 +1942,24 @@ function openWarmMenu(anchorBtn, held) {
   const items = ['<div class="warm-menu-label">Keep cache warm for</div>'];
   for (const h of [1, 4, 8]) items.push(`<button class="warm-item" data-hours="${h}">${h} hours</button>`);
   if (held) items.push('<button class="warm-item warm-stop" data-act="off">Stop keeping warm</button>');
+  // Auto-compact-before-cold lives here because it's the OTHER answer to the
+  // same moment as keep-warm: the cache is about to expire. Default on; the
+  // authoritative state rides the poll payload (main-side persistence).
+  const acOn = proxyState.get(activeSession)?.payload?.autoCompact !== false;
+  items.push('<div class="warm-menu-label">When cache is about to cool</div>');
+  items.push(`<button class="warm-item warm-autocompact" data-act="autocompact" title="With no keep-warm hold and over 100k context, Clodex runs /compact just before the cache expires — compacting while warm re-reads the context at cache prices instead of paying a full cold re-write later.">Auto-compact: ${acOn ? 'on' : 'off'}</button>`);
   warmMenu.innerHTML = items.join('');
   warmMenu.addEventListener('click', async (e) => {
     const item = e.target.closest('.warm-item');
     if (!item || !activeSession) return;
     const name = activeSession;
     closeWarmMenu();
-    if (item.dataset.act === 'off') await doWarmHold(name, { off: true });
+    if (item.dataset.act === 'autocompact') {
+      await window.api.setAutoCompact(name, !acOn);
+      // Optimistic: the poll confirms within 5s, but a re-open shouldn't lie.
+      const st = proxyState.get(name);
+      if (st && st.payload) st.payload.autoCompact = !acOn;
+    } else if (item.dataset.act === 'off') await doWarmHold(name, { off: true });
     else await doWarmHold(name, { hours: Number(item.dataset.hours) });
   });
   document.body.appendChild(warmMenu);
@@ -2784,6 +2822,44 @@ function renderCostTimeline(d, base, sid) {
     + link;
 }
 
+// Per-line cost attribution (wirescope v0.6.22+ cost_by_line). Sourced from the
+// LIVE status payload — cost.usd (whole tree), cost.mainUsd (main line's own
+// share), subagents[].estUsd (each sub's share) — not the report, so it's free
+// (rides the poll). Answers "where did a fan-out run's cost actually go" that
+// the single whole-tree number couldn't. Rendered only when the capability is
+// advertised and at least one line carries a billed share (null = unbilled/
+// pre-.22, NEVER treated as $0). Sorted by cost desc; unbilled subs listed muted.
+function renderCostByLine(p) {
+  if (!p || !p.capabilities || !p.capabilities.cost_by_line || !p.cost) return '';
+  const whole = typeof p.cost.usd === 'number' ? p.cost.usd : null;
+  const main = typeof p.cost.mainUsd === 'number' ? p.cost.mainUsd : null;
+  const subs = Array.isArray(p.subagents) ? p.subagents : [];
+  const billedSubs = subs.filter((s) => typeof s.estUsd === 'number');
+  if (main == null && !billedSubs.length) return ''; // nothing attributed yet
+  const pct = (v) => (whole && whole > 0 && typeof v === 'number') ? ` · ${Math.round((v / whole) * 100)}%` : '';
+  const rows = [];
+  if (main != null) {
+    rows.push({ label: 'Main line', usd: main, cls: 'cost-line-main' });
+  }
+  for (const s of subs) {
+    rows.push({ label: s.label || s.key, usd: (typeof s.estUsd === 'number' ? s.estUsd : null), cls: '' });
+  }
+  // Billed rows sorted high→low; unbilled (null) sink to the bottom.
+  rows.sort((a, b) => (b.usd == null ? -1 : b.usd) - (a.usd == null ? -1 : a.usd));
+  const body = rows.map((r) => {
+    if (r.usd == null) {
+      return `<div class="cost-line-row ${r.cls}"><span class="cost-line-label">${esc(r.label)}</span>`
+        + `<span class="cost-line-usd cost-line-unbilled">unbilled</span></div>`;
+    }
+    return `<div class="cost-line-row ${r.cls}"><span class="cost-line-label">${esc(r.label)}</span>`
+      + `<span class="cost-line-usd">${fmtUsd(r.usd)}<span class="cost-line-pct">${pct(r.usd)}</span></span></div>`;
+  }).join('');
+  const totalTxt = whole != null ? fmtUsd(whole) : '';
+  return `<div class="cost-sec-title"><span>By line</span><span class="ctx-line-total">${totalTxt}</span></div>`
+    + `<div class="cost-line-list">${body}</div>`
+    + `<div class="cost-note">Whole-tree estimate split across the main line and its subagents. Shares ride the live poll (no extra fetch).</div>`;
+}
+
 async function openCostPopover(name, anchor) {
   const p = (proxyState.get(name) || {}).payload;
   const base = p && p.base, sid = p && p.sessionId;
@@ -2801,7 +2877,11 @@ async function openCostPopover(name, anchor) {
     costPopoverBody.innerHTML = `<div class="cost-note">${esc(res && res.error ? res.error : 'Cost timeline unavailable')}</div>`;
     return;
   }
-  try { costPopoverBody.innerHTML = renderCostTimeline(res.data, base, sid); }
+  // Prepend the live per-line attribution (free — from the poll payload) above
+  // the report-driven main-line timeline. Re-read the payload post-await so the
+  // shares are as fresh as the poll allows.
+  const pNow = (proxyState.get(name) || {}).payload;
+  try { costPopoverBody.innerHTML = renderCostByLine(pNow) + renderCostTimeline(res.data, base, sid); }
   catch (e) { costPopoverBody.innerHTML = `<div class="cost-note">Could not render: ${esc(String((e && e.message) || e))}</div>`; }
 }
 
@@ -2965,6 +3045,212 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !bustPopover.classList.contains('hidden')) closeBustPopover();
 });
 document.getElementById('bust-popover-close').addEventListener('click', closeBustPopover);
+
+// ── Touched files (wire file-tool observer) ────────────────────────────
+// The files this agent's Edit/Write/NotebookEdit calls were aimed at, as
+// clickable rows: row → read-only peek with a Diff view (git is the truth for
+// what actually changed — the feed only records the aim). Fed live via
+// session-files pushes; pulled fresh on popover open so a detached-window gap
+// loses nothing. Facts only — no client-side classification.
+const filesPopover = document.getElementById('files-popover');
+const filesPopoverName = document.getElementById('files-popover-name');
+const filesPopoverBody = document.getElementById('files-popover-body');
+
+window.api.onSessionFiles((name, files) => {
+  filesState.set(name, files || []);
+  // Live-refresh whatever is showing: the bar button's count, and the open
+  // popover's rows (dataset.name pins which session it is showing).
+  const watching = !filesPopover.classList.contains('hidden') && filesPopover.dataset.name === name;
+  // Latch the unseen highlight unless the user is looking at the rows right
+  // now. Set BEFORE the bar re-render so the rebuilt button picks it up.
+  if (!watching) filesUnseen.add(name);
+  if (name === activeSession) {
+    renderProxyBar();
+    // One-shot pulse on the freshly-rebuilt button, so the arrival moment
+    // catches the eye. Imperative (not part of the button markup) on purpose:
+    // the bar is rebuilt on every proxy poll, and a class-borne animation
+    // would replay on each rebuild — this one dies with the node, once.
+    if (!watching) {
+      const btn = document.querySelector('#proxy-actions [data-act="files"]');
+      if (btn) btn.classList.add('px-files-flash');
+    }
+  }
+  if (watching) renderFilesRows(name);
+});
+
+function fmtAgo(ts) {
+  const s = Math.max(0, (Date.now() - ts) / 1000);
+  if (s < 60) return 'now';
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+
+function closeFilesPopover() { filesPopover.classList.add('hidden'); filesPopover.dataset.name = ''; }
+
+function renderFilesRows(name) {
+  const files = filesState.get(name) || [];
+  if (!files.length) {
+    filesPopoverBody.innerHTML = '<div class="cost-note">No file edits observed yet — rows appear as the agent\'s file tools run.</div>';
+    return;
+  }
+  const cwd = filesPopover.dataset.cwd || '';
+  const rows = files.map((f) => {
+    const inCwd = cwd && f.path.startsWith(cwd + '/');
+    const rel = inCwd ? f.path.slice(cwd.length + 1) : f.path;
+    const base = rel.split('/').pop();
+    const dir = rel.slice(0, rel.length - base.length);
+    const badges = []; // aim-count + subagent provenance, not change size
+    if (f.count > 1) badges.push(`<span class="file-badge" title="Touched ${f.count} times">×${f.count}</span>`);
+    if (f.sub) badges.push('<span class="file-badge file-badge-sub" title="Touched via a subagent">sub</span>');
+    return `<div class="file-row${inCwd ? '' : ' file-row-out'}" data-path="${esc(f.path)}" title="${esc(f.path)} — click to view / diff">`
+      + `<span class="file-row-main"><span class="file-row-dir">${esc(dir)}</span><span class="file-row-name">${esc(base)}</span>${badges.join('')}</span>`
+      + `<span class="file-row-meta">${esc(f.tool)} · ${fmtAgo(f.ts)}</span>`
+      + `</div>`;
+  }).join('');
+  filesPopoverBody.innerHTML = `<div class="file-rows">${rows}</div>`
+    + (files.some((f) => !(cwd && f.path.startsWith(cwd + '/')))
+      ? '<div class="cost-note">Dimmed rows are outside the session\'s working directory.</div>' : '');
+}
+
+async function openFilesPopover(name, anchor) {
+  // Toggle off if re-clicking while open for the same session.
+  if (!filesPopover.classList.contains('hidden') && filesPopover.dataset.name === name) {
+    return closeFilesPopover();
+  }
+  // Anchor geometry BEFORE the latch-clear below: renderProxyBar rebuilds the
+  // bar and DETACHES the clicked button, and a detached node's rect is all
+  // zeros — which positioned the popover above the viewport top (the
+  // "3 clicks to open" bug: off-screen open → toggle close → real open).
+  // The rebuild only recolors the button, so the pre-rebuild rect is right.
+  const r = anchor.getBoundingClientRect();
+  filesPopoverName.textContent = name;
+  filesPopover.dataset.name = name;
+  filesPopover.dataset.cwd = '';
+  // Opening IS seeing — drop the unseen latch and unlight the button.
+  if (filesUnseen.delete(name)) renderProxyBar();
+  filesPopoverBody.innerHTML = '<div class="cost-note">Loading…</div>';
+  filesPopover.classList.remove('hidden');
+  const w = filesPopover.offsetWidth;
+  filesPopover.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - w - 8))}px`;
+  filesPopover.style.bottom = `${Math.max(8, window.innerHeight - r.top + 6)}px`;
+  const res = await window.api.sessionFiles(name).catch(() => null);
+  if (filesPopover.dataset.name !== name || filesPopover.classList.contains('hidden')) return;
+  if (!res || !res.ok) {
+    filesPopoverBody.innerHTML = `<div class="cost-note">${esc((res && res.error) || 'Session not running')}</div>`;
+    return;
+  }
+  filesPopover.dataset.cwd = res.cwd || '';
+  filesState.set(name, res.files || []);
+  renderFilesRows(name);
+}
+
+filesPopoverBody.addEventListener('click', (e) => {
+  const row = e.target.closest('.file-row');
+  if (!row || !row.dataset.path) return;
+  openFilePeek(filesPopover.dataset.name, row.dataset.path);
+});
+document.addEventListener('mousedown', (e) => {
+  if (filesPopover.classList.contains('hidden')) return;
+  if (filesPopover.contains(e.target)) return;
+  if (e.target.closest('[data-act="files"]')) return; // toggle handled by the bar
+  if (e.target.closest('#file-peek-overlay')) return; // peek opened from a row stays modal
+  closeFilesPopover();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !filesPopover.classList.contains('hidden')
+      && filePeekOverlay.classList.contains('hidden')) closeFilesPopover();
+});
+document.getElementById('files-popover-close').addEventListener('click', closeFilesPopover);
+
+// --- File peek: read-only Diff / File viewer -----------------------------
+// Diff is HEAD-relative git truth fetched fresh on every open; File is the
+// current on-disk bytes (size-capped, binary-sniffed). Viewing only — editing
+// belongs to a real editor, one click away on the Open button.
+const filePeekOverlay = document.getElementById('file-peek-overlay');
+const filePeekPath = document.getElementById('file-peek-path');
+const filePeekBody = document.getElementById('file-peek-body');
+const filePeekTabDiff = document.getElementById('file-peek-tab-diff');
+const filePeekTabFile = document.getElementById('file-peek-tab-file');
+let filePeek = null; // { path, tab, diffRes, peekRes }
+
+function closeFilePeek() { filePeekOverlay.classList.add('hidden'); filePeek = null; }
+
+function renderDiffHtml(diff) {
+  return diff.split('\n').map((ln) => {
+    let cls = 'diff-ctx';
+    if (ln.startsWith('+++') || ln.startsWith('---') || ln.startsWith('diff ') || ln.startsWith('index ')) cls = 'diff-file';
+    else if (ln.startsWith('@@')) cls = 'diff-hunk';
+    else if (ln.startsWith('+')) cls = 'diff-add';
+    else if (ln.startsWith('-')) cls = 'diff-del';
+    return `<div class="diff-line ${cls}">${esc(ln) || ' '}</div>`;
+  }).join('');
+}
+
+function renderFilePeek() {
+  if (!filePeek) return;
+  const { tab, diffRes, peekRes } = filePeek;
+  filePeekTabDiff.classList.toggle('active', tab === 'diff');
+  filePeekTabFile.classList.toggle('active', tab === 'file');
+  const diffOk = !!(diffRes && diffRes.ok);
+  filePeekTabDiff.disabled = !diffOk;
+  filePeekTabDiff.title = diffOk ? 'Uncommitted changes (git, vs HEAD)' : ((diffRes && diffRes.error) || 'Diff unavailable');
+  if (tab === 'diff') {
+    if (!diffOk) {
+      filePeekBody.innerHTML = `<div class="cost-note">${esc((diffRes && diffRes.error) || 'Diff unavailable')}</div>`;
+    } else if (diffRes.untracked) {
+      filePeekBody.innerHTML = '<div class="cost-note">New file — not tracked by git yet. The File tab shows its full contents.</div>';
+    } else if (!diffRes.diff.trim()) {
+      filePeekBody.innerHTML = '<div class="cost-note">No uncommitted changes — what the agent touched here is already committed (or was reverted).</div>';
+    } else {
+      filePeekBody.innerHTML = `<div class="file-peek-pre">${renderDiffHtml(diffRes.diff)}</div>`;
+    }
+    return;
+  }
+  if (!peekRes || !peekRes.ok) {
+    filePeekBody.innerHTML = `<div class="cost-note">${esc((peekRes && peekRes.error) || 'File unavailable')}</div>`;
+  } else if (peekRes.binary) {
+    filePeekBody.innerHTML = `<div class="cost-note">Binary file (${peekRes.size} bytes) — use Open.</div>`;
+  } else {
+    const note = peekRes.truncated
+      ? `<div class="cost-note">Showing the first ${Math.round(peekRes.content.length / 1024)}KB of ${Math.round(peekRes.size / 1024)}KB.</div>` : '';
+    filePeekBody.innerHTML = `${note}<div class="file-peek-pre">${esc(peekRes.content).split('\n').map((l) => `<div class="diff-line diff-ctx">${l || ' '}</div>`).join('')}</div>`;
+  }
+}
+
+async function openFilePeek(name, filePath) {
+  filePeek = { path: filePath, tab: 'diff', diffRes: null, peekRes: null };
+  filePeekPath.textContent = filePath;
+  filePeekPath.title = filePath;
+  filePeekBody.innerHTML = '<div class="cost-note">Loading…</div>';
+  filePeekOverlay.classList.remove('hidden');
+  const [diffRes, peekRes] = await Promise.all([
+    window.api.fileDiff(name, filePath).catch((e) => ({ ok: false, error: String(e) })),
+    window.api.filePeek(filePath).catch((e) => ({ ok: false, error: String(e) })),
+  ]);
+  if (!filePeek || filePeek.path !== filePath) return; // closed / retargeted mid-fetch
+  filePeek.diffRes = diffRes;
+  filePeek.peekRes = peekRes;
+  // Default to the view with something to say: a real diff → Diff; untracked,
+  // clean, or no git → File.
+  filePeek.tab = (diffRes && diffRes.ok && !diffRes.untracked && diffRes.diff.trim()) ? 'diff' : 'file';
+  renderFilePeek();
+}
+
+filePeekTabDiff.addEventListener('click', () => { if (filePeek) { filePeek.tab = 'diff'; renderFilePeek(); } });
+filePeekTabFile.addEventListener('click', () => { if (filePeek) { filePeek.tab = 'file'; renderFilePeek(); } });
+document.getElementById('file-peek-open').addEventListener('click', () => {
+  if (filePeek) window.api.fileOpen(filePeek.path);
+});
+document.getElementById('file-peek-close').addEventListener('click', closeFilePeek);
+// [agent:file view] — main already vetted the path and focused this window;
+// reuse the touched-files peek modal wholesale (diff tab included, since the
+// name pins the git cwd).
+window.api.onSessionFileView((name, filePath) => { openFilePeek(name, filePath); });
+filePeekOverlay.addEventListener('mousedown', (e) => { if (e.target === filePeekOverlay) closeFilePeek(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !filePeekOverlay.classList.contains('hidden')) closeFilePeek();
+});
 
 // ── Session report (wirescope /_report, report_version 1) ─────────────
 // wirescope owns every number (pricing, cache math, thresholds, verdict
@@ -3600,6 +3886,10 @@ wireBulkToggles(prefsToolsRow, prefsToolsList);
 const wsDot = document.getElementById('ws-dot');
 const wsStatusText = document.getElementById('ws-status-text');
 const wsRestartBtn = document.getElementById('ws-restart-btn');
+const wsLogsBlock = document.getElementById('ws-logs-block');
+const wsLogsSize = document.getElementById('ws-logs-size');
+const wsLogsAge = document.getElementById('ws-logs-age');
+const wsLogsClearBtn = document.getElementById('ws-logs-clear-btn');
 const prefsRemoteEnabled = document.getElementById('prefs-remote-enabled');
 const remoteDot = document.getElementById('remote-dot');
 const remoteStatusText = document.getElementById('remote-status-text');
@@ -3699,6 +3989,103 @@ async function refreshWsStatus() {
   try { renderRemoteStatus(await window.api.remoteStatus()); } catch {}
 }
 
+function fmtBytes(n) {
+  if (!(n > 0)) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
+}
+
+// Capture-log size readout + Clear button with an age picker. Sourced entirely
+// from wirescope's /_prune (no client-side du). A non-ok GET = older proxy
+// without the endpoint → hide the block (presence IS the capability). The total
+// comes from GET; the "reclaimable" teaser + button state follow the selected
+// age via a dry-run POST preview (the fixed GET cutoffs only cover 30/180/7d).
+// The Clear action is always tier=receipts scope=all — billing receipts kept,
+// only /_bust forensics for old sessions + the probe bucket dropped; recent/
+// warm/held skipped server-side regardless of the age chosen.
+let wsLogsTotalBytes = 0;
+let wsLogsPreviewSeq = 0;
+function wsSelectedAge() { return wsLogsAge.value || '30d'; }
+function wsAgeLabel() {
+  const opt = wsLogsAge.options[wsLogsAge.selectedIndex];
+  return opt ? opt.textContent.trim() : wsSelectedAge();
+}
+
+async function refreshWsLogs() {
+  let res;
+  try { res = await window.api.wirescopePruneInfo(); } catch { res = null; }
+  if (!res || !res.ok || !res.data) { wsLogsBlock.style.display = 'none'; return; }
+  wsLogsBlock.style.display = '';
+  wsLogsTotalBytes = res.data.total_bytes || 0;
+  await previewWsLogs();
+}
+
+// Dry-run the selected age to show exactly what a Clear would reclaim, and
+// enable the button only when there's something to collect. Seq-guarded so a
+// fast picker change can't render a stale preview.
+async function previewWsLogs() {
+  const seq = ++wsLogsPreviewSeq;
+  wsLogsClearBtn.disabled = true;
+  wsLogsSize.textContent = `Capture logs: ${fmtBytes(wsLogsTotalBytes)} — checking…`;
+  let pv;
+  try {
+    pv = await window.api.wirescopePrune({ olderThan: wsSelectedAge(), tier: 'receipts', scope: 'all', dryRun: true });
+  } catch { pv = null; }
+  if (seq !== wsLogsPreviewSeq) return; // superseded
+  let line = `Capture logs: ${fmtBytes(wsLogsTotalBytes)}`;
+  if (pv && pv.ok && pv.data && pv.data.bytes_reclaimed > 0) {
+    line += ` — ${fmtBytes(pv.data.bytes_reclaimed)} reclaimable`;
+    wsLogsClearBtn.disabled = false;
+  } else if (pv && pv.ok) {
+    line += ' — nothing to clear at this age';
+  } else {
+    line += (pv && pv.error) ? ` — ${pv.error}` : ' — preview failed';
+  }
+  wsLogsSize.textContent = line;
+}
+
+wsLogsAge.addEventListener('change', previewWsLogs);
+
+let wsLogsClearBusy = false;
+wsLogsClearBtn.addEventListener('click', async () => {
+  if (wsLogsClearBusy) return;
+  const older = wsSelectedAge();
+  wsLogsClearBusy = true;
+  wsLogsClearBtn.disabled = true;
+  try {
+    // Fresh dry-run for the exact numbers in the confirm (age may differ from
+    // the last preview if the poll refreshed in between).
+    const pv = await window.api.wirescopePrune({ olderThan: older, tier: 'receipts', scope: 'all', dryRun: true });
+    if (!pv || !pv.ok || !pv.data) {
+      wsLogsSize.textContent = (pv && pv.error) ? `Error: ${pv.error}` : 'Preview failed';
+      return;
+    }
+    const p = pv.data;
+    if (!(p.bytes_reclaimed > 0)) { await previewWsLogs(); return; }
+    const kept = p.skipped ? p.skipped.recent : 0;
+    const ok = confirm(
+      `Clear capture logs older than ${wsAgeLabel()}?\n\n` +
+      `Reclaims ${fmtBytes(p.bytes_reclaimed)} (${p.files_deleted} files) from ${p.sessions_pruned} sessions.\n\n` +
+      `Billing/cost history is preserved — only detailed request forensics are removed. ` +
+      `Active, warm, and recent sessions are untouched${kept ? ` (${kept} kept)` : ''}.`
+    );
+    if (!ok) return;
+    wsLogsSize.textContent = `Capture logs: ${fmtBytes(wsLogsTotalBytes)} — clearing…`;
+    const r = await window.api.wirescopePrune({ olderThan: older, tier: 'receipts', scope: 'all' });
+    if (!r || !r.ok || !r.data) {
+      wsLogsSize.textContent = (r && r.error) ? `Error: ${r.error}` : 'Clear failed';
+      return;
+    }
+  } catch (e) {
+    wsLogsSize.textContent = `Error: ${(e && e.message) || e}`;
+  } finally {
+    wsLogsClearBusy = false;
+  }
+  await refreshWsLogs();
+});
+
 function renderRemoteStatus(st) {
   if (!st) return;
   if (st.running) {
@@ -3728,6 +4115,7 @@ async function openPrefs() {
   renderToolChecklist(prefsToolsList, new Set(s.defaultToolDeny || []), {});
   prefsOverlay.classList.remove('hidden');
   refreshWsStatus();
+  refreshWsLogs();
   if (wsPollTimer) clearInterval(wsPollTimer);
   wsPollTimer = setInterval(refreshWsStatus, 1500);
 }

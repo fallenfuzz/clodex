@@ -23,6 +23,18 @@ const SSE_BODY = [
   'event: content_block_stop',
   'data: {"type":"content_block_stop","index":0}',
   '',
+  'event: content_block_start',
+  'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_1","name":"Edit","input":{}}}',
+  '',
+  'event: content_block_delta',
+  'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"replace_all\\": false, \\"file_pa"}}',
+  '',
+  'event: content_block_delta',
+  'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"th\\": \\"/tmp/wire-touched.js\\", \\"old_string\\": \\"a\\"}"}}',
+  '',
+  'event: content_block_stop',
+  'data: {"type":"content_block_stop","index":1}',
+  '',
   'event: message_delta',
   'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}',
   '',
@@ -149,6 +161,9 @@ test('e2e: byte-exact pass-through + turn.completed/session/usage events', async
   assert.equal(turn.sideCall, false);
   assert.equal(turn.usage.input_tokens, 10);
   assert.equal(turn.usage.output_tokens, 42);
+  // Touched-files observer: the Edit tool_use streamed alongside the text
+  // (path split across input_json_delta fragments, path key not first).
+  assert.deepEqual(turn.files, [{ tool: 'Edit', path: '/tmp/wire-touched.js' }]);
 
   assert.equal(events.session[0].agent, 'tester');
   assert.equal(events.session[0].sessionId, SESSION_ID);

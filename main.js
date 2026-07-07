@@ -460,6 +460,17 @@ const persistence = {
       this._save(all);
     }
   },
+  // Auto-compact-before-cold is default ON, so only the opt-OUT is stored
+  // (autoCompact:false); enabling deletes the field. Legacy entries without
+  // the field are therefore on — see autoCompactOf.
+  setAutoCompact(name, on) {
+    const all = this._load();
+    const entry = all.find(s => s.name === name);
+    if (entry) {
+      if (on === false) entry.autoCompact = false; else delete entry.autoCompact;
+      this._save(all);
+    }
+  },
   get(name) {
     return this._load().find(s => s.name === name) || null;
   },
@@ -473,6 +484,12 @@ function stripLevelOf(entry) {
   if (entry.stripLevel === 1 || entry.stripLevel === 2) return entry.stripLevel;
   if (entry.stripThinking === 'on') return 1; // legacy boolean field
   return 0;
+}
+
+// Auto-compact-before-cold: default ON; only an explicit false opts out (so
+// every pre-existing entry — and a missing one — is on).
+function autoCompactOf(entry) {
+  return !(entry && entry.autoCompact === false);
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,8 +1226,11 @@ function parseIntent(rawLine) {
   const escMatch = cleaned.match(/^\\(\[agent:.*)/);
   if (escMatch) return { type: 'escape', text: escMatch[1] };
 
-  const dmMatch = cleaned.match(/^\[agent:dm\s+(\S+)\]\s*(.*)/s);
-  if (dmMatch) return { type: 'dm', target: dmMatch[1], body: dmMatch[2] };
+  // Optional `urgent` flag bypasses the idle/cold-cache dm hold (see
+  // shouldHoldDm). Old grammar `[agent:dm target]` is untouched — the flag
+  // only matches as a separate word before the bracket.
+  const dmMatch = cleaned.match(/^\[agent:dm\s+(\S+?)(\s+urgent)?\]\s*(.*)/s);
+  if (dmMatch) return { type: 'dm', target: dmMatch[1], urgent: !!dmMatch[2], body: dmMatch[3] };
 
   if (/^\[agent:who\]\s*$/.test(cleaned)) return { type: 'who' };
 
@@ -1242,6 +1262,15 @@ function parseIntent(rawLine) {
   // = a genuinely new category, so it earns its own top-level verb. Structural
   // creation (sessions.json / sockets / registry) is clodex's job; prompt CONTENT
   // deliberately stays out of the grammar (deferred, see spec Piece 2).
+  // `file` = surface a file on the operator's SCREEN (view = Clodex's peek
+  // modal over the session's workspace window, open = the default local app
+  // via shell.openPath). Path may contain spaces — everything between the
+  // sub-command and the closing bracket. Vetting (cwd-anchored realpath,
+  // regular-file, no-launchables for open) lives in vetFileIntent; the
+  // scanner only parses.
+  const fileMatch = cleaned.match(/^\[agent:file\s+(\S+)\s+(.+?)\]\s*$/);
+  if (fileMatch) return { type: 'file', sub: fileMatch[1].toLowerCase(), path: fileMatch[2].trim() };
+
   const spawnMatch = cleaned.match(/^\[agent:spawn\s+(.+)\]\s*$/);
   if (spawnMatch) {
     const argstr = spawnMatch[1];
@@ -1262,8 +1291,10 @@ function parseIntent(rawLine) {
 // to the same key on both sides). Body capped so a huge dm doesn't bloat
 // the shadow log's keys.
 function shadowIntentKey(agent, intent) {
-  const head = intent.sub || intent.target || intent.name || '';
-  const body = (intent.body || '').trim().slice(0, 200);
+  // urgent is part of the identity: a held dm RESENT with the flag inside the
+  // dedupe TTL must dispatch, not be swallowed as a duplicate of the bounce.
+  const head = (intent.sub || intent.target || intent.name || '') + (intent.urgent ? '+urgent' : '');
+  const body = (intent.body || intent.path || '').trim().slice(0, 200);
   return `${agent}|${intent.type}|${head}|${body}`;
 }
 
@@ -1412,7 +1443,8 @@ HOW TO COMMUNICATE:
 You reply to your operator the normal way — your ordinary response text reaches them as it always does. Inside clodex you additionally can message the other agents and manage your own session. Both work through the intent lines below: include the matching line in your response to trigger it. To reach another agent, write the intent line rather than a plain sentence (a normal "ask bob to …" just goes to your operator; the intent line is what hands it to bob). Write it yourself — no echo/printf or shell wrapper needed.
 
   [agent:dm TARGET] message body   Direct message to TARGET
-  [agent:who]                      List online peers
+  [agent:dm TARGET urgent] body    Deliver even to a long-idle peer. A plain dm to a peer that's been idle a long time without a warm cache bounces back as an [agent:dm] error instead of delivering — waking such a peer re-bills its whole context, so only resend with urgent if it genuinely can't wait for that peer's next turn.
+  [agent:who]                      List online peers with reachability: (working), (idle 12m, warm), (idle 5h, cache cold). Prefer warm/working peers for non-urgent traffic.
   [agent:name]                     Your own wrapper name
   [agent:context compact]          Compact your own context window when it's getting long. Optionally follow with text on the same or following lines — it's injected as your first turn after the compact so you keep working; omit it for a generic continue nudge.
   [agent:context clear]            Clear your own history, keeping the session (drops the conversation)
@@ -1420,6 +1452,8 @@ You reply to your operator the normal way — your ordinary response text reache
   [agent:memory remember] <text>   Save a memory unit (optional leading scope=<tag>); persists across sessions
   [agent:memory recall] <id|query> Surface a saved memory back into your input
   [agent:spawn name:X cwd:Y]       Mint a new peer session named X rooted at Y; it joins your workspace and is DM-able. Result returns in your input as an [agent:spawn] line.
+  [agent:file view PATH]           Show a file on your operator's screen in Clodex's viewer (contents + git diff). Relative paths resolve against your cwd.
+  [agent:file open PATH]           Open a file with the operator's default app for that type (reports, docs, images). Launchable/executable files are refused — use view for those. Use these when your operator asks to see or open a file; errors come back as an [agent:file] line, success is silent.
 
 Replies arrive later as separate \`[agent:from SENDER]\` messages in your input.
 
@@ -1651,8 +1685,9 @@ function resolveProxyBase(proxy) {
 // streaming/refusals, a clodex2 concern).
 // See https://github.com/avirtual/wirescope (INTEGRATION.md).
 
-const { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord } = require('./proxy-util');
+const { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord, shouldAutoCompact, peerStatusLabel, shouldHoldDm } = require('./proxy-util');
 const { parseAgentFrontmatter, buildAgentsArg, denyAgentRules } = require('./agents-util');
+const { extractFileTouches, noteFileTouches, vetFileIntent } = require('./file-touch');
 const { parseSkillFrontmatter, buildSkillPlugin } = require('./skills-util');
 const PROXY_POLL_INTERVAL = 5000; // ms
 const PROXY_HTTP_TIMEOUT = 4000;  // ms — default; keeps polling/handshake snappy
@@ -1811,6 +1846,25 @@ const ProxyClient = {
   async bustSeries(base, sessionId) {
     return this._getJson(base, `/_bust?session=${encodeURIComponent(sessionId)}`, PROXY_REPORT_TIMEOUT);
   },
+
+  // Capture-log retention (wirescope v0.6.23+, gated on capabilities.prune —
+  // presence of a 200/ok GET is the capability signal). MACHINE-WIDE, not
+  // per-session: operates on the whole LOG_DIR. wirescope owns which files are
+  // safe to drop (active/warm/recent skipped server-side); clodex only reads the
+  // size/reclaimable readout and triggers a prune. GET = free size readout +
+  // reclaimable estimate per scope. POST executes; older_than is REQUIRED (1h
+  // floor, 400 if missing/malformed). tier=receipts (default) collapses old
+  // sessions to billing receipts so /_report still prices them (only /_bust
+  // byte-forensics die); tier=full deletes the receipts too. scope=all (default)
+  // = sessions + the no-session probe bucket.
+  pruneInfo(base) { return this._getJson(base, '/_prune', PROXY_REPORT_TIMEOUT); },
+  prune(base, { olderThan, tier, scope, dryRun } = {}) {
+    const qs = new URLSearchParams({ older_than: String(olderThan) });
+    if (tier) qs.set('tier', tier);
+    if (scope) qs.set('scope', scope);
+    if (dryRun) qs.set('dry_run', '1');
+    return this._req(base, `/_prune?${qs.toString()}`, 'POST', PROXY_REPORT_TIMEOUT);
+  },
 };
 
 // App-global poller (one per process, shared across windows): a single
@@ -1837,6 +1891,9 @@ class ProxyPoller {
     // presence is a deployment property, not a per-tick network fact — this is
     // what stops the button from vanishing (or L2 relocking) on a probe hiccup.
     this.stripCapBases = new Map();
+    // session name -> last auto-compact fire ts (cooldown latch — the 5s poll
+    // gets ~12 ticks inside the warmth headroom window; fire once).
+    this.autoCompacted = new Map();
     this._busy = false;
   }
 
@@ -1882,6 +1939,9 @@ class ProxyPoller {
     // Prune telemetry for sessions that have gone away.
     for (const name of this.last.keys()) {
       if (!this.manager.sessions.has(name)) this.last.delete(name);
+    }
+    for (const name of this.autoCompacted.keys()) {
+      if (!this.manager.sessions.has(name)) this.autoCompacted.delete(name);
     }
     if (this.manager._wireTelemetry) {
       this.manager._wireTelemetry.prune(new Set(this.manager.sessions.keys()));
@@ -1932,8 +1992,11 @@ class ProxyPoller {
           payload.base = base; // poller context, not record shape — for the session-page link
           // clodex-side authoritative strip level (the proxy overrides are
           // in-memory and not trustworthy pre-relink). Surfaced for the bar menu.
-          const level = stripLevelOf(persistence.get(s.name));
+          const entry = persistence.get(s.name);
+          const level = stripLevelOf(entry);
           payload.stripLevel = level;
+          // Auto-compact-before-cold state, surfaced for the warm menu toggle.
+          payload.autoCompact = autoCompactOf(entry);
           // Link hysteresis: don't tear the bar down on a single missing record.
           // If we were linked very recently, keep showing the last-good payload
           // (the renderer ages it to stale/dead on its own) and skip this tick's
@@ -2002,11 +2065,46 @@ class ProxyPoller {
               });
             }
           }
+          // Auto-compact-before-cold rides the same tick, on the emitted
+          // payload (the overlay may carry fresher warmth than the raw poll).
+          // Unlinked-grace ticks `continue`d above — stale data never fires.
+          this._maybeAutoCompact(s, emitted, entry);
         }
       }
     } finally {
       this._busy = false;
     }
+  }
+
+  // Fire /compact into a session that is about to go cache-cold with a heavy
+  // context and no keep-warm hold (see shouldAutoCompact in proxy-util for the
+  // full policy + why pre-cold is the cheap moment). Facts come from the poll
+  // payload (wirescope) and the session's wire-stamped prompt state; the
+  // decision is clodex POLICY, per-session, default on.
+  _maybeAutoCompact(s, payload, entry) {
+    try {
+      if (s.agentType !== 'claude' || s._dead) return;
+      const fire = shouldAutoCompact({
+        payload,
+        enabled: autoCompactOf(entry),
+        // Wire-stamped: terminal main-line stop = CLI parked at its prompt.
+        // No wire (legacy jsonl path) → never stamped → never fires. That's
+        // deliberate: without it we can't rule out a pending permission
+        // dialog, where the injected Enter would answer the dialog.
+        atPrompt: !!(s.lastMainStop && s.lastMainStop.isTurn),
+        lastInputTs: s.lastUserInputTs || 0,
+        lastFiredTs: this.autoCompacted.get(s.name) || 0,
+      });
+      if (!fire) return;
+      const cmd = (SessionManager.CONTEXT_COMMANDS[s.type] || {}).compact;
+      if (!cmd) return;
+      this.autoCompacted.set(s.name, Date.now());
+      this.manager._injectText(s, cmd);
+      this.manager._broadcast('ipc-message', {
+        type: 'context', from: s.name, to: s.name,
+        body: `auto-compact → ${cmd} (cache expiring, ~${Math.round(payload.context.inputTokens / 1000)}k context, no keep-warm)`,
+      });
+    } catch { /* policy is observer-grade — never break the poll */ }
   }
 }
 
@@ -2039,6 +2137,11 @@ class WirescopeSupervisor {
   }
 
   _base(port) { return `http://127.0.0.1:${port}`; }
+
+  // Base URL of the configured managed instance (for machine-wide endpoints
+  // like /_prune that aren't tied to a routed session). Doesn't probe — the
+  // caller's request surfaces a down proxy as an error.
+  baseUrl() { return this._base(uiSettings.get().wirescopePort || 7800); }
 
   _dirs() {
     const root = path.join(app.getPath('userData'), 'wirescope');
@@ -2510,6 +2613,17 @@ function claudeProjectDir(cwd) {
   return path.join(os.homedir(), '.claude', 'projects', cwd.replace(/[/.]/g, '-'));
 }
 
+// When was this session last actually active? The resumed transcript's mtime
+// is the last real turn, and it survives GUI restarts (unlike the ~/.clodex
+// symlink, which _cleanup unlinks on exit). Claude-only: codex rollout paths
+// aren't derivable from the sessionId, so those fall back to spawn time.
+function lastTranscriptWrite(agentType, cwd, sessionId) {
+  if (agentType !== 'claude' || !sessionId) return null;
+  const dir = claudeProjectDir(cwd);
+  if (!dir) return null;
+  try { return fs.statSync(path.join(dir, `${sessionId}.jsonl`)).mtimeMs; } catch { return null; }
+}
+
 // Resume-time transcript bake. Before --resume, ask wirescope to bake the
 // session's on-disk transcript down to its safe-to-drop set so the prefix the
 // CLI replays is already slim — moving the strip from per-turn-on-the-wire to
@@ -2914,12 +3028,13 @@ function extractText(obj) {
 }
 
 class JsonlWatcher {
-  constructor(name, onText, onSessionId, onActivity, onCompactSummary) {
+  constructor(name, onText, onSessionId, onActivity, onCompactSummary, onFileTouches) {
     this._name = name;
     this._onText = onText;
     this._onSessionId = onSessionId || (() => {});
     this._onActivity = onActivity || (() => {});
     this._onCompactSummary = onCompactSummary || (() => {});
+    this._onFileTouches = onFileTouches || (() => {});
     this._stopped = false;
     this._timer = null;
     this._fd = null;
@@ -3023,6 +3138,12 @@ class JsonlWatcher {
         try { this._onCompactSummary(); } catch {}
         continue;
       }
+
+      // Touched-files tap for the legacy path (wire-routed sessions get these
+      // off turn.completed instead — this watcher isn't running steady-state
+      // there, and sentinel-made watchers pass no callback).
+      const touches = extractFileTouches(obj);
+      if (touches.length) { try { this._onFileTouches(touches); } catch {} }
 
       const text = extractText(obj);
       if (text) {
@@ -3167,6 +3288,13 @@ class SessionManager {
             this._activity.turnCompleted(t.agent, { reqId: t.reqId, sideCall: t.sideCall, stop: t.stop });
           }
         }
+        // Touched files ride every non-side-call receipt — subagent turns
+        // included (their edits are real file touches; the jsonl path never
+        // saw them cleanly, the wire does).
+        if (!t.sideCall && Array.isArray(t.files) && t.files.length) {
+          const s = this.sessions.get(t.agent);
+          if (s) this._noteFileTouches(s, t.files, isSubagentRole(t.role));
+        }
         if (t.sideCall || isSubagentRole(t.role)) return; // intents: main line only
         const intents = this._extractIntents(t.text);
         this._shadowLog({
@@ -3175,6 +3303,12 @@ class SessionManager {
           intents: intents.length,
         });
         const s = this.sessions.get(t.agent);
+        // Prompt-state fact for auto-compact-before-cold: only a terminal
+        // main-line stop (stop.is_turn) parks the CLI at its input prompt. A
+        // non-terminal stop that then goes quiet is a PAUSED turn — typically
+        // a permission dialog, where an injected Enter would answer the
+        // dialog. shouldAutoCompact requires this latch to be terminal.
+        if (s) s.lastMainStop = { isTurn: !!(t.stop && t.stop.is_turn), ts: Date.now() };
         if (s && s.intentSource === 'wire') {
           // W3 LIVE path: dispatch off the wire receipt. A healthy main-line
           // turn also ends any tee-failure recovery window (the sentinel's
@@ -3612,6 +3746,26 @@ class SessionManager {
       workspaceId,
       proxyAgent, proxyBase,
       intentSource, wireRouted, sentinel: null,
+      // Touched-files feed (file-touch.js ring): which files this session's
+      // file tools were aimed at. In-memory, session-lifetime — like activity.
+      fileTouches: [],
+      // Peer-visibility facts ([agent:who] labels, dm hold gate): state +
+      // since-when, updated in _emitActivity. Restores seed from the resumed
+      // transcript's mtime (= last real turn) — seeding "now" would make every
+      // GUI restart reset idle clocks, mislabeling long-cold peers as fresh
+      // and letting DMs to them past the hold gate for 30 minutes.
+      activityState: 'idle',
+      activityTs: lastTranscriptWrite(agentType, cwd, resumeId) || Date.now(),
+      // Auto-compact atPrompt seed. A freshly spawned or resumed CLI is by
+      // definition parked at its input prompt — permission dialogs don't
+      // survive PTY death. Without this seed, a GUI restart wipes the
+      // in-memory turn.completed stamp and an idle restored session can NEVER
+      // pass the atPrompt guard (its next turn would re-warm the cache,
+      // mooting the compact). Invalidated on any keystroke (write()) or turn
+      // start (_emitActivity) — only a fresh terminal wire receipt re-proves
+      // the prompt after that. Unproxied sessions are still blocked by the
+      // payload.linked guard, so seeding unconditionally is safe.
+      lastMainStop: { isTurn: true, ts: Date.now(), seeded: true },
     };
     this.sessions.set(name, session);
 
@@ -3671,6 +3825,7 @@ class SessionManager {
         onSessionId,
         (state) => this._emitActivity(name, state, state === 'idle'),
         () => this._fireCompactContinuation(session),
+        (touches) => this._noteFileTouches(session, touches),
       );
       session.watcher.start();
     }
@@ -3735,6 +3890,14 @@ class SessionManager {
   write(name, data) {
     const s = this.sessions.get(name);
     if (!s || s._dead) return;
+    // A human touched this pane — auto-compact's quiet-window fact (injecting
+    // /compact starts with Ctrl-U, which would eat a half-typed draft).
+    s.lastUserInputTs = Date.now();
+    // And drop the atPrompt latch: a user at the keyboard can open dialog UIs
+    // WITHOUT an API turn (/permissions et al.) — the quiet window only covers
+    // 2 minutes, a dialog can sit until warmth expiry. Only the next terminal
+    // wire receipt re-proves the prompt. Fails toward a missed compact.
+    s.lastMainStop = null;
     // node-pty throws Napi::Error from C++ if the fd closed under us; never
     // let it escape — an unhandled native throw aborts the app.
     try { s.pty.write(data); } catch {}
@@ -3822,10 +3985,31 @@ class SessionManager {
     }
   }
 
+  // Touched-files fan-in shared by both observation paths (wire turn receipts
+  // + legacy JsonlWatcher tap): fold into the session's ring and push the
+  // fresh list to the owning window. Detached windows just drop the event —
+  // the Files popover pulls session:files on open, so nothing is lost.
+  _noteFileTouches(session, touches, sub = false) {
+    try {
+      noteFileTouches(session.fileTouches, touches, {
+        cwd: session.cwd, ts: Date.now(), sub, resolve: path.resolve,
+      });
+      this._sendToSession(session.name, 'session-files', session.name, session.fileTouches);
+    } catch { /* observer-grade — never near the PTY/intent path */ }
+  }
+
   // Activity fan-out shared by both observation paths (wire tracker + legacy
   // JsonlWatcher callback): renderer event + optional "finished" notification
   // when the owning window isn't focused.
   _emitActivity(name, state, notify) {
+    // Stamp peer-visibility facts (both intent paths funnel through here).
+    const s = this.sessions.get(name);
+    if (s && s.activityState !== state) { s.activityState = state; s.activityTs = Date.now(); }
+    // A turn starting means the CLI is NOT parked at its prompt — drop the
+    // atPrompt latch (covers injected turns too, which bypass write()); the
+    // turn's terminal wire receipt re-stamps it. Invariant: atPrompt holds
+    // iff a turn completed more recently than anything else happened.
+    if (s && state !== 'idle') s.lastMainStop = null;
     this._sendToSession(name, 'session-activity', name, state);
     // notify is only ever true on a real end-of-turn idle, so it doubles as
     // the remote client's "refetch the transcript now" signal.
@@ -3942,6 +4126,25 @@ class SessionManager {
         // Only deliver to agent sessions; bash sessions can't process intents
         const localTarget = this.sessions.get(intent.target);
         if (localTarget && localTarget.agentType) {
+          // Cost gate: a dm injection into a long-idle, not-warm peer re-bills
+          // that peer's whole context. Bounce with resend-as-urgent
+          // instructions — the SENDER judges whether it's worth the wake-up.
+          const verdict = shouldHoldDm({
+            urgent: intent.urgent === true,
+            state: localTarget.activityState || 'idle',
+            idleMs: Date.now() - (localTarget.activityTs || Date.now()),
+            payload: this._proxyPoller ? this._proxyPoller.snapshot(intent.target) : null,
+          });
+          if (verdict.hold) {
+            if (session) {
+              this._injectText(session, `[agent:dm] NOT delivered to ${intent.target}: ${verdict.reason}. If it can't wait, resend as \`[agent:dm ${intent.target} urgent] <message>\`; otherwise it'll be cheapest right after ${intent.target}'s next turn.`);
+            }
+            this._broadcast('ipc-message', {
+              type: 'dm', from: senderName, to: intent.target,
+              body: `HELD (${verdict.reason}): ${intent.body}`,
+            });
+            break;
+          }
           this._deliverMessage(intent.target, senderName, intent.body, 'dm');
         } else if (!localTarget) {
           const peer = registry.getPeer(intent.target);
@@ -3957,16 +4160,26 @@ class SessionManager {
         break;
       }
       case 'who': {
-        // Only agent sessions in the sender's workspace — bash can't process intents
+        // Only agent sessions in the sender's workspace — bash can't process
+        // intents. Each local peer carries a reachability status (working /
+        // idle-for + cache warmth when known) so senders can weigh whether a
+        // dm is worth waking a cold peer — the same facts the dm hold gate
+        // reads. External socket peers stay bare names: no visibility.
         const localAgents = Array.from(this.sessions.values())
           .filter(s => s.agentType && (!senderWs || s.workspaceId === senderWs))
-          .map(s => s.name);
+          .map(s => ({ name: s.name, label: peerStatusLabel({
+            state: s.activityState || 'idle',
+            idleMs: Date.now() - (s.activityTs || Date.now()),
+            payload: this._proxyPoller ? this._proxyPoller.snapshot(s.name) : null,
+          }) }));
         const externalNames = registry.listPeers()
           .map(p => p.name)
-          .filter(n => !this.sessions.has(n));
-        const allNames = [...localAgents, ...externalNames];
-        const others = allNames.filter(n => n !== senderName);
-        const list = others.length ? others.join(', ') : '(none)';
+          .filter(n => !this.sessions.has(n))
+          .map(n => ({ name: n, label: null }));
+        const others = [...localAgents, ...externalNames].filter(p => p.name !== senderName);
+        const list = others.length
+          ? others.map(p => p.label ? `${p.name} (${p.label})` : p.name).join(', ')
+          : '(none)';
         if (session) this._injectText(session, `[agent:peers] ${list}`);
         break;
       }
@@ -3996,7 +4209,51 @@ class SessionManager {
         this._handleSpawnIntent(session, intent);
         break;
       }
+      case 'file': {
+        // Agent surfacing a file on the operator's screen. Agent sessions only.
+        if (!session || !session.agentType) break;
+        this._handleFileIntent(session, intent.sub, intent.path);
+        break;
+      }
     }
+  }
+
+  // [agent:file view|open <path>] — put a file in front of the operator without
+  // them having to switch workspaces and hunt for it ("open the report you just
+  // wrote"). view = the touched-files peek modal (diff + contents) over this
+  // session's workspace window; open = shell.openPath, so the OS default app
+  // comes to the foreground regardless of which Clodex window is focused.
+  // Vetting (cwd-anchored realpath, regular-file only, launchables refused for
+  // open) is vetFileIntent in file-touch.js. Errors inject back as an
+  // [agent:file] line; success is silent — the file appearing IS the ack, and
+  // an inject costs the agent a turn. Every attempt logs to the IPC drawer.
+  _handleFileIntent(session, sub, rawPath) {
+    const reply = (msg) => this._injectText(session, `[agent:file] ${msg}`);
+    // Token bucket, not min-gap: "open all three reports" is one legitimate
+    // burst; a confused agent machine-gunning windows is not.
+    const now = Date.now();
+    const times = (session._fileIntentTs = (session._fileIntentTs || []).filter(t => now - t < 30000));
+    if (times.length >= 5) { reply('error: rate limit — at most 5 files per 30s'); return; }
+    const vet = vetFileIntent({
+      sub, rawPath, cwd: session.cwd,
+      resolve: path.resolve, extname: path.extname,
+      realpath: fs.realpathSync, stat: fs.statSync,
+    });
+    this._broadcast('ipc-message', {
+      type: 'file', from: session.name, to: session.name,
+      body: `file ${sub} ${rawPath} → ${vet.ok ? vet.path : `REFUSED: ${vet.error}`}`,
+    });
+    if (!vet.ok) { reply(`error: ${vet.error}`); return; }
+    times.push(now);
+    if (sub === 'open') {
+      shell.openPath(vet.path).then((err) => { if (err) reply(`error: ${err}`); }).catch(() => {});
+      return;
+    }
+    const win = this.windowForSession(session.name);
+    if (!win) { reply('error: your workspace window is closed — [agent:file open] still works'); return; }
+    win.show();
+    win.focus();
+    win.webContents.send('session-file-view', session.name, vet.path);
   }
 
   // Memory MANAGEMENT intents (spec §10): list / remember / recall, keyed by the
@@ -4926,6 +5183,10 @@ function refreshAppMenu() {
 
 const manager = new SessionManager();
 const proxyPoller = new ProxyPoller(manager);
+// Back-ref for the intent handlers: [agent:who] labels and the dm hold gate
+// read warmth off the poller's last-emitted payloads (facts only — the policy
+// is peerStatusLabel/shouldHoldDm in proxy-util).
+manager._proxyPoller = proxyPoller;
 
 // ---------------------------------------------------------------------------
 // Remote access server (remote.js) — phone web UI on 127.0.0.1. Module-level
@@ -5247,6 +5508,7 @@ app.whenReady().then(() => {
   ipcMain.handle('session:kill', (_e, name) => manager.kill(name));
   ipcMain.handle('session:resize', (_e, name, cols, rows) => manager.resize(name, cols, rows));
   ipcMain.handle('session:setLabel', (_e, name, label) => persistence.setLabel(name, label));
+  ipcMain.handle('session:setAutoCompact', (_e, name, on) => persistence.setAutoCompact(name, on !== false));
 
   ipcMain.handle('dialog:selectDirectory', async () => {
     const result = await dialog.showOpenDialog({
@@ -5595,6 +5857,56 @@ app.whenReady().then(() => {
     out.sort((a, b) => (Date.parse(b.lastActive || 0) || 0) - (Date.parse(a.lastActive || 0) || 0));
     return { ok: true, sessions: out, activeId };
   });
+  // --- Touched-files feed + peek/diff -----------------------------------
+  // The feed is the session's in-memory ring (facts: tool + path + when, from
+  // the wire receipts or the legacy jsonl tap). Peek/diff are read-only looks
+  // at the CURRENT disk/git state — created-vs-modified truth comes from git
+  // here, never from the feed.
+  ipcMain.handle('session:files', (_e, name) => {
+    const s = manager.sessions.get(name);
+    if (!s) return { ok: false, error: 'Session not running' };
+    return { ok: true, cwd: s.cwd || null, files: s.fileTouches || [] };
+  });
+  ipcMain.handle('file:peek', (_e, filePath) => {
+    const PEEK_MAX_BYTES = 512 * 1024;
+    try {
+      const st = fs.statSync(filePath);
+      if (!st.isFile()) return { ok: false, error: 'Not a regular file' };
+      const fd = fs.openSync(filePath, 'r');
+      let buf;
+      try {
+        const n = Math.min(st.size, PEEK_MAX_BYTES);
+        buf = Buffer.alloc(n);
+        fs.readSync(fd, buf, 0, n, 0);
+      } finally { fs.closeSync(fd); }
+      // NUL in the head = binary; the viewer shows a stub instead of garbage.
+      const binary = buf.subarray(0, 8192).includes(0);
+      return {
+        ok: true, size: st.size, mtime: st.mtimeMs,
+        truncated: st.size > PEEK_MAX_BYTES, binary,
+        content: binary ? null : buf.toString('utf-8'),
+      };
+    } catch (e) { return { ok: false, error: e.message }; }
+  });
+  ipcMain.handle('file:diff', async (_e, name, filePath) => {
+    const s = manager.sessions.get(name);
+    const cwd = (s && s.cwd) || path.dirname(filePath);
+    const git = (args) => new Promise((resolve) => {
+      require('child_process').execFile('git', ['-C', cwd, ...args],
+        { maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout));
+    });
+    const status = await git(['status', '--porcelain', '--', filePath]);
+    if (status == null) return { ok: false, error: 'Not in a git repository (or git unavailable)' };
+    if (status.startsWith('??')) return { ok: true, untracked: true, clean: false, diff: '' };
+    // HEAD-relative catches staged edits too; fresh repos without a HEAD
+    // degrade to worktree-vs-index.
+    let diff = await git(['diff', 'HEAD', '--no-color', '--', filePath]);
+    if (diff == null) diff = await git(['diff', '--no-color', '--', filePath]);
+    if (diff == null) return { ok: false, error: 'git diff failed' };
+    return { ok: true, untracked: false, clean: !status.trim(), diff };
+  });
+  ipcMain.handle('file:open', (_e, filePath) => shell.openPath(filePath));
+
   // Focused per-session tool gating: persist disabledTools only (leaves
   // extraArgs/proxy/posture/agents untouched). Takes effect on next spawn;
   // the renderer calls session:restart afterward if the user wants it now.
@@ -5799,6 +6111,8 @@ app.whenReady().then(() => {
       proxyUrl: s.proxyUrl,
       wirescopeDir: s.wirescopeDir,
       wirescopePort: s.wirescopePort,
+      disableClaudeDesignMcp: s.disableClaudeDesignMcp,
+      compactOnResume: s.compactOnResume,
       theme: s.theme,
       remoteEnabled: s.remoteEnabled,
       remotePort: s.remotePort,
@@ -5840,6 +6154,36 @@ app.whenReady().then(() => {
   ipcMain.handle('wirescope:start', () => wirescope.start());
   ipcMain.handle('wirescope:stop', () => wirescope.stop());
   ipcMain.handle('wirescope:restart', () => wirescope.restart());
+  // Capture-log size/reclaimable readout. A non-200 / missing-endpoint result
+  // (older proxy without /_prune) comes back ok:false → the renderer hides the
+  // whole capture-logs affordance (presence IS the capability).
+  ipcMain.handle('wirescope:pruneInfo', async () => {
+    try {
+      const r = await ProxyClient.pruneInfo(wirescope.baseUrl());
+      if (r.status !== 200 || !r.json || r.json.ok === false) {
+        return { ok: false, error: (r.json && r.json.error) || `proxy returned ${r.status}` };
+      }
+      return { ok: true, data: r.json };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  });
+  // Execute (or dry-run) a prune. opts: { olderThan, tier, scope, dryRun }.
+  // wirescope enforces the safety guards (skips active/warm/recent); clodex just
+  // relays and surfaces the result body.
+  ipcMain.handle('wirescope:prune', async (_e, opts) => {
+    const o = opts || {};
+    if (!o.olderThan) return { ok: false, error: 'older_than required' };
+    try {
+      const r = await ProxyClient.prune(wirescope.baseUrl(), o);
+      if (r.status !== 200 || !r.json) {
+        return { ok: false, error: (r.json && r.json.error) || `proxy returned ${r.status}` };
+      }
+      return { ok: true, data: r.json };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  });
 
   ipcMain.handle('session:exportMarkdown', async (_e, name) => {
     const s = manager.sessions.get(name);

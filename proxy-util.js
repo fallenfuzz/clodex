@@ -62,6 +62,21 @@ function pickProxyRecord(candidates, sessionId) {
 // between the proxy and us); we fall back to our own clock only on a pre-add
 // proxy that doesn't emit it yet. Running/idle/done + aging are POLICY and live
 // entirely renderer-side — we surface raw facts only (same split as /_health).
+// Child-row label, most-specific-first: an explicit display_name; else the
+// name part of agent_id (a spawn named through the agent-id header carries the
+// given name there — the `@session-…` suffix is a per-spawn disambiguator,
+// noise for display) unless that part is just a UUID/hex blob; else the role
+// (informative for built-ins like Plan/Explore, whose agent_id IS a bare
+// UUID); else the key. Presentation only — no classification happens here.
+function subagentLabel(s, key) {
+  if (typeof s.display_name === 'string' && s.display_name) return s.display_name;
+  const idName = typeof s.agent_id === 'string' ? s.agent_id.split('@')[0] : '';
+  if (idName && !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(idName)
+      && !/^[0-9a-f]{16,}$/i.test(idName)) return idName;
+  if (typeof s.role === 'string' && s.role) return s.role;
+  return key;
+}
+
 function shapeSubagent(s, now) {
   if (!s || typeof s !== 'object') return null;
   const key = typeof s.key === 'string' && s.key ? s.key
@@ -75,13 +90,112 @@ function shapeSubagent(s, now) {
     key,
     agentId: typeof s.agent_id === 'string' ? s.agent_id : null,
     role: typeof s.role === 'string' ? s.role : null,
-    label: (typeof s.display_name === 'string' && s.display_name) ? s.display_name
-      : (typeof s.role === 'string' && s.role ? s.role : key),
+    label: subagentLabel(s, key),
     model: typeof s.model === 'string' ? s.model : null,
     requests: typeof s.requests === 'number' ? s.requests : null,
+    // This subagent's own cost share (wirescope v0.6.22+, gated on
+    // capabilities.cost_by_line). null (NEVER 0) = unbilled instance or pre-.22
+    // traffic — the renderer must distinguish "no data" from "$0.00".
+    estUsd: typeof s.est_usd === 'number' ? s.est_usd : null,
     firstSeen: typeof s.first_seen === 'number' ? s.first_seen : null,
     lastSeen,
     lastActiveS,
+  };
+}
+
+// --- Auto-compact-before-cold ------------------------------------------------
+// The moment before the prompt cache expires is the cheapest possible time to
+// compact: the compact turn re-reads the big context at cache-READ prices, and
+// the next real turn cache-writes only the small summary. Doing nothing pays a
+// full cache-write over the whole context on wake-up anyway — so when a session
+// is about to go cold with a heavy context and no keep-warm hold, fire /compact
+// preemptively. Policy (clodex-side; wirescope only supplies the warmth/context
+// FACTS in the poll payload):
+//   - enabled: per-session, default ON (opt-out persisted as autoCompact:false)
+//   - warm and expiring within WARMTH_HEADROOM_S, no hold (keep-warm owns that
+//     moment — the two are alternatives for the same event)
+//   - context >= MIN_INPUT_TOKENS (small contexts aren't worth a lossy compact)
+//   - atPrompt: the last main-line stop was terminal (stop.is_turn). A paused
+//     turn that went quiet is usually a PERMISSION DIALOG — an injected Enter
+//     there would answer the dialog, so never fire without this latch.
+//   - INPUT_QUIET_MS since the user's last keystroke in that pane (the Ctrl-U
+//     in _injectText would eat a half-typed draft)
+//   - COOLDOWN_MS between fires (the 5s poll must not machine-gun /compact)
+const AUTO_COMPACT = {
+  MIN_INPUT_TOKENS: 100_000,
+  WARMTH_HEADROOM_S: 60,
+  INPUT_QUIET_MS: 120_000,
+  COOLDOWN_MS: 600_000,
+};
+
+function shouldAutoCompact({ payload, enabled, atPrompt, lastInputTs = 0, lastFiredTs = 0, now = Date.now() }) {
+  if (!enabled || !atPrompt) return false;
+  if (!payload || !payload.linked || payload.hold) return false;
+  const w = payload.warmth;
+  if (!w || w.state !== 'warm' || typeof w.remaining_s !== 'number') return false;
+  if (w.remaining_s > AUTO_COMPACT.WARMTH_HEADROOM_S) return false;
+  const ctx = payload.context;
+  if (!ctx || typeof ctx.inputTokens !== 'number' || ctx.inputTokens < AUTO_COMPACT.MIN_INPUT_TOKENS) return false;
+  if (now - lastInputTs < AUTO_COMPACT.INPUT_QUIET_MS) return false;
+  if (now - lastFiredTs < AUTO_COMPACT.COOLDOWN_MS) return false;
+  return true;
+}
+
+// --- Peer visibility ([agent:who] labels + dm hold gate) ----------------------
+// A DM injection into a long-idle peer with a cold cache re-bills that peer's
+// ENTIRE context as a cache write — often dollars for a one-line message. So:
+// [agent:who] tells agents which peers are cheap to reach, and a non-urgent DM
+// to an expensive one bounces with instructions to resend `urgent` (sender's
+// judgment call, not ours). Facts: activityState/activityTs (stamped in
+// _emitActivity, both intent paths) + the poller's last payload for warmth.
+
+const DM_HOLD_IDLE_MS = 30 * 60_000;
+
+// Effective cache state NOW from a poll payload: remaining_s decays between
+// polls, so age it by payload.ts before trusting 'warm'. 'unknown' (unlinked /
+// no proxy / codex) is NOT 'cold' — the two are labeled differently and only
+// verifiable warmth counts as cheap-to-reach.
+function warmthNow(payload, now = Date.now()) {
+  if (!payload || !payload.linked || !payload.warmth) return 'unknown';
+  const w = payload.warmth;
+  if (w.state === 'warm' && typeof w.remaining_s === 'number') {
+    return (w.remaining_s - (now - (payload.ts || now)) / 1000 > 0) ? 'warm' : 'cold';
+  }
+  return w.state === 'cold' ? 'cold' : 'unknown';
+}
+
+function fmtIdle(ms) {
+  const m = Math.floor(ms / 60_000);
+  if (m < 1) return '<1m';
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return m % 60 ? `${h}h${m % 60}m` : `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+// One peer's [agent:who] status suffix: 'working' | 'idle 5h, cache cold' |
+// 'idle 12m, warm' | 'idle 3m'. Warmth only shown when known.
+function peerStatusLabel({ state, idleMs, payload, now = Date.now() }) {
+  if (state === 'thinking') return 'working';
+  const w = warmthNow(payload, now);
+  let label = `idle ${fmtIdle(idleMs)}`;
+  if (w === 'warm') label += ', warm';
+  else if (w === 'cold') label += ', cache cold';
+  return label;
+}
+
+// Hold a DM? Only when ALL of: not urgent, target not mid-turn, idle past the
+// threshold, and not verifiably warm (a kept-warm peer is cheap no matter how
+// long it's been idle — that's what keep-warm is FOR). Unknown warmth on a
+// long-idle peer holds: 5h idle is cold in every realistic TTL regime, and
+// urgent is a one-line retry if the sender disagrees.
+function shouldHoldDm({ urgent, state, idleMs, payload, now = Date.now() }) {
+  if (urgent || state === 'thinking' || idleMs < DM_HOLD_IDLE_MS) return { hold: false };
+  if (warmthNow(payload, now) === 'warm') return { hold: false };
+  const w = warmthNow(payload, now);
+  return {
+    hold: true,
+    reason: `idle ${fmtIdle(idleMs)}${w === 'cold' ? ' with a cold cache' : ''} — waking it re-bills its full context`,
   };
 }
 
@@ -98,7 +212,16 @@ function shapeProxyRecord(r, probe, now = Date.now()) {
     model: r.model || null,
     title: r.title || null,
     summary: r.summary || null,
-    cost: r.cost ? { usd: r.cost.est_usd ?? null, requests: r.cost.requests ?? null } : null,
+    // `usd` = whole-tree cost (unchanged semantics). `mainUsd` = the main line's
+    // OWN share (wirescope v0.6.22+ cost.main_est_usd, gated on cost_by_line);
+    // null (never 0) on pre-.22. With per-subagent estUsd, this lets the popover
+    // attribute where a fan-out run's cost actually went instead of one opaque
+    // whole-tree number.
+    cost: r.cost ? {
+      usd: r.cost.est_usd ?? null,
+      mainUsd: typeof r.cost.main_est_usd === 'number' ? r.cost.main_est_usd : null,
+      requests: r.cost.requests ?? null,
+    } : null,
     turns: typeof r.turns_completed === 'number' ? r.turns_completed : null,
     refusals: typeof r.refusals === 'number' ? r.refusals : 0,
     // Armed holds only fire pings once a real turn donates auth + a cache to
@@ -146,4 +269,8 @@ function shapeProxyRecord(r, probe, now = Date.now()) {
   };
 }
 
-module.exports = { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord, shapeSubagent };
+module.exports = {
+  PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord, shapeSubagent,
+  AUTO_COMPACT, shouldAutoCompact,
+  DM_HOLD_IDLE_MS, peerStatusLabel, shouldHoldDm,
+};
