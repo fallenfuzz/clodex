@@ -30,7 +30,18 @@ class PeerConnection {
     this.label = label;
     this.url = url.replace(/\/+$/, '');
     this._emit = emit;
-    this._agent = new http.Agent({ keepAlive: true, maxSockets: 4 });
+    // Two deliberately-separate socket pools. SSE streams (events + every
+    // attach) never end while live, so pooling them alongside short requests
+    // lets a few attached sessions pin every socket and starve the request
+    // traffic that shares this origin (hello/control/input/resize/query). That
+    // was the live-control bug: with one 4-socket pool, 4 attaches held all
+    // sockets and control/input queued INSIDE the agent — keystrokes dropped,
+    // and a momentary SSE reconnect freed a socket that let a stale queued
+    // acquire through minutes late. So: short requests keep a small keep-alive
+    // pool; streams get their own uncapped, un-pooled agent (a socket each,
+    // closed on stream end) and never compete with requests.
+    this._reqAgent = new http.Agent({ keepAlive: true, maxSockets: 8 });
+    this._sseAgent = new http.Agent({ keepAlive: false, maxSockets: Infinity });
     this.online = false;
     this.hello = null;                // { host, version, caps }
     this.sessions = [];               // last fetched session list
@@ -51,7 +62,11 @@ class PeerConnection {
     clearTimeout(this._helloTimer);
     if (this._eventsReq) { try { this._eventsReq.destroy(); } catch {} this._eventsReq = null; }
     for (const name of [...this._attachments.keys()]) this.detach(name);
-    this._agent.destroy();
+    // Destroy both pools. The SSE agent's .destroy() also reaps any stream
+    // whose request was still mid-open (req not yet captured for a per-req
+    // destroy), keeping teardown airtight.
+    this._reqAgent.destroy();
+    this._sseAgent.destroy();
     this._setOnline(false);
   }
 
@@ -253,7 +268,7 @@ class PeerConnection {
     const req = http.request({
       hostname: u.hostname, port: u.port || 80,
       path: u.pathname + u.search, method,
-      agent: this._agent, timeout,
+      agent: this._reqAgent, timeout,
       headers: body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } : {},
     }, (res) => {
       let buf = '';
@@ -275,7 +290,7 @@ class PeerConnection {
     const req = http.request({
       hostname: u.hostname, port: u.port || 80,
       path: u.pathname + u.search, method: 'GET',
-      agent: this._agent,
+      agent: this._sseAgent,
       headers: { Accept: 'text/event-stream' },
     }, (res) => {
       if (res.statusCode !== 200) { req.destroy(); return; }

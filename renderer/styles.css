@@ -507,6 +507,15 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
+  /* position:fixed makes #main its own stacking context. Its fixed-position
+     children (popovers, full-screen modals) can extend LEFT over the sidebar
+     (e.g. the peer-select ⋯ popover, anchored in the sidebar header), so #main
+     must sit above the sidebar (z-index:10) or those overlays paint under it,
+     however high their own z-index. #main and the sidebar are geometrically
+     disjoint otherwise, so this can't hide any sidebar content. Root-level
+     chrome that must stay above popovers (drawers z15, context-menu z200)
+     exceeds this, so it's unaffected. */
+  z-index: 11;
 }
 
 #search-bar {
@@ -2226,6 +2235,13 @@ html, body {
 #peer-bar.hidden { display: none; }
 #peer-bar .peer-bar-name { color: var(--text); }
 #peer-bar .peer-bar-state { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+/* Transient failed-control banner (e.g. acquire timed out). Uses the theme's
+   semantic --error accent, like the status-bar warnings. */
+#peer-bar .peer-bar-error {
+  flex: none;
+  color: var(--error);
+  font-style: italic;
+}
 #peer-bar button {
   font: inherit;
   font-size: 10px;

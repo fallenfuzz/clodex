@@ -1371,9 +1371,11 @@ function renderPeerBar() {
     stateText = 'read-only';
     btn = '<button id="peer-control-btn">Take control</button>';
   }
+  const errText = entry.peer.controlError
+    ? `<span class="peer-bar-error">${esc(entry.peer.controlError)}</span>` : '';
   peerBar.innerHTML =
     `<span class="peer-bar-name">${esc(entry.peer.name)}@${esc(host)}</span>` +
-    `<span class="peer-bar-state">${stateText}</span>${btn}`;
+    `<span class="peer-bar-state">${stateText}</span>${errText}${btn}`;
   peerBar.classList.remove('hidden');
   const b = document.getElementById('peer-control-btn');
   if (b) b.addEventListener('click', togglePeerControl);
@@ -1383,17 +1385,47 @@ async function togglePeerControl() {
   const entry = activeSession ? sessions.get(activeSession) : null;
   if (!entry || !entry.peer) return;
   const on = !entry.peer.controlled;
-  const res = await window.api.peerControl(entry.peer.id, entry.peer.name, on);
-  if (on && res && res.ok) {
-    entry.peer.controlled = true;
-    // Control mode carries resize authority: fit to our pane and push it.
-    entry.fitAddon.fit();
-    window.api.peerResize(entry.peer.id, entry.peer.name, entry.terminal.cols, entry.terminal.rows);
-    entry.terminal.focus();
-  } else if (!on) {
+  const peerId = entry.peer.id;
+  const peerName = entry.peer.name;
+  // Any fresh attempt clears a stale error banner.
+  clearPeerControlError(entry.peer);
+  const res = await window.api.peerControl(peerId, peerName, on);
+  if (on) {
+    if (res && res.ok) {
+      entry.peer.controlled = true;
+      // Control mode carries resize authority: fit to our pane and push it.
+      entry.fitAddon.fit();
+      window.api.peerResize(peerId, peerName, entry.terminal.cols, entry.terminal.rows);
+      entry.terminal.focus();
+    } else {
+      // Acquire failed or (with the pre-fix socket-starvation bug) timed out.
+      // Never silent: show a transient banner instead of snapping back to a
+      // "Take control" button that looks like nothing happened.
+      setPeerControlError(entry.peer, (res && res.error) || 'could not take control');
+    }
+  } else {
     entry.peer.controlled = false;
   }
   renderPeerBar();
+}
+
+// Transient control-error banner on a peer entry. Auto-clears so it never
+// sticks past the moment; re-renders the bar if the session is still active.
+function setPeerControlError(peer, msg) {
+  peer.controlError = msg;
+  clearTimeout(peer.controlErrorTimer);
+  peer.controlErrorTimer = setTimeout(() => {
+    peer.controlError = null;
+    peer.controlErrorTimer = null;
+    const cur = activeSession ? sessions.get(activeSession) : null;
+    if (cur && cur.peer === peer) renderPeerBar();
+  }, 4000);
+}
+
+function clearPeerControlError(peer) {
+  peer.controlError = null;
+  clearTimeout(peer.controlErrorTimer);
+  peer.controlErrorTimer = null;
 }
 
 window.api.onPeerState((id, status) => {

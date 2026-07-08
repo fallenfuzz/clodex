@@ -206,6 +206,58 @@ test('query: unknown kinds and throwing sources answer as errors, never hang', a
   assert.equal(gone.ok, false);
 });
 
+test('attach fan-out does not starve control/input (separate socket pools)', async () => {
+  // Regression: peer-client once shared ONE http.Agent (maxSockets:4) between
+  // the never-ending attach SSE streams and the short request traffic. Attach
+  // more sessions than the pool and every socket is pinned by a stream, so a
+  // control acquire + each keystroke's input POST queue INSIDE the agent —
+  // exactly the live two-laptop failure (control looked stuck, a stale acquire
+  // landed minutes late when a reconnect briefly freed a socket). With streams
+  // moved to their own uncapped, un-pooled agent this round-trips promptly; on
+  // the pre-fix code the replays/acquire never get a socket and this times out.
+  const N = 6; // > the old maxSockets of 4
+  const names = Array.from({ length: N }, (_, i) => `sess${i}`);
+  const localInputs = [];
+  const srv = new RemoteServer({
+    port: 0,
+    pagePath: '/nonexistent',
+    getSessions: () => names.map((name) => ({ name, type: 'claude', cwd: '/tmp', workspace: 'w', stats: {} })),
+    getTranscript: () => ({ ok: true, messages: [] }),
+    send: () => ({ ok: true }),
+    hostLabel: 'starve', version: '0.0.0-test',
+    getAttachInfo: (name) => (names.includes(name)
+      ? { ok: true, scrollback: Buffer.from(name), cols: 80, rows: 24, telemetry: {} }
+      : { ok: false }),
+    sendInput: (name, data) => { localInputs.push([name, data]); return { ok: true }; },
+    resizePty: () => ({ ok: true }),
+    onControlChange: () => {},
+  });
+  await srv.start();
+  const evs = [];
+  const c = new PeerConnection({
+    id: 'starve', label: 'lab', url: `http://127.0.0.1:${srv.port}`,
+    emit: (channel, ...args) => evs.push({ channel, args }),
+  });
+  c.start();
+  try {
+    await waitFor(() => evs.some((x) => x.channel === 'peer-state' && x.args[1] && x.args[1].online), 'online');
+    // Attach every session; waiting for all N replays proves N concurrent SSE
+    // streams are established (each holding a live socket).
+    for (const name of names) c.attach(name);
+    await waitFor(
+      () => names.every((name) => evs.some((x) => x.channel === 'peer-replay' && x.args[1] === name)),
+      'all attach replays', 4000);
+    // Streams now hold sockets; control + input must still get through fast.
+    await new Promise((resolve, reject) =>
+      c.control(names[0], true, (r) => (r && r.ok ? resolve() : reject(new Error((r && r.error) || 'acquire failed')))));
+    await new Promise((resolve) => c.input(names[0], 'ping\r', resolve));
+    assert.deepEqual(localInputs[localInputs.length - 1], [names[0], 'ping\r']);
+  } finally {
+    c.stop();
+    srv.stop();
+  }
+});
+
 test('exit: attachers hear it and the stream tears down', async () => {
   server.notifyExit('alpha', 0);
   const ev = await waitFor(() => events.find((x) => x.channel === 'peer-exit'), 'peer-exit');
