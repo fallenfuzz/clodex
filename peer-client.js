@@ -186,6 +186,22 @@ class PeerConnection {
           });
         } else if (event === 'output') {
           this._emit('peer-data', this.id, name, Buffer.from(data.b64 || '', 'base64'));
+        } else if (event === 'resize') {
+          // Owner PTY resized: mirror its geometry onto our letterbox so new
+          // output stops wrapping into a stale box. Resize-in-place (no reset/
+          // re-replay) — same as a local terminal resize; old scrollback won't
+          // reflow but that's acceptable and avoids a clear/flash per fit.
+          this._emit('peer-resize', this.id, name, { cols: data.cols, rows: data.rows });
+        } else if (event === 'ui') {
+          // Owner surfaced a session-scoped component (e.g. a remote agent's
+          // [agent:file view]): forward the small {kind, args} trigger so the
+          // viewer renders its own copy. Content is NOT here — the viewer pulls
+          // it via the query RPC. An unknown/malformed kind from a newer or
+          // stale owner is passed through verbatim; the renderer's dispatch
+          // ignores kinds it doesn't know.
+          if (data && typeof data.kind === 'string') {
+            this._emit('peer-ui', this.id, name, { kind: data.kind, args: data.args || {} });
+          }
         } else if (event === 'telemetry') {
           // Owner's status-bar view (partial: {proxy} and/or {ctx}); the
           // renderer merges it into its normal per-session telemetry state.

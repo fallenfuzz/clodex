@@ -1263,6 +1263,20 @@ function renderPeers() {
         if (e.target.classList.contains('session-close')) return;
         openPeerSession(id, s.name);
       });
+      // Right-click: native peer-flavored menu (Attach / Take·Release control /
+      // Detach / Hide). State is read from entry.peer here — the SAME source the
+      // peer bar renders from — so the two control paths can't drift.
+      item.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        const entry = sessions.get(key);
+        window.api.showPeerContextMenu({
+          id, name: s.name,
+          online: !!st.online,
+          attached: sessions.has(key),
+          controlled: !!(entry && entry.peer && entry.peer.controlled),
+          holder: (entry && entry.peer && entry.peer.holder) || null,
+        });
+      });
       const closeBtn = item.querySelector('.session-close');
       if (closeBtn) closeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -1381,12 +1395,16 @@ function renderPeerBar() {
   if (b) b.addEventListener('click', togglePeerControl);
 }
 
-async function togglePeerControl() {
+function togglePeerControl() {
   const entry = activeSession ? sessions.get(activeSession) : null;
   if (!entry || !entry.peer) return;
-  const on = !entry.peer.controlled;
-  const peerId = entry.peer.id;
-  const peerName = entry.peer.name;
+  applyPeerControl(entry, !entry.peer.controlled);
+}
+
+// Acquire/release control on a specific peer entry — shared by the peer-bar
+// button and the row context menu, so both drive the same state transition.
+async function applyPeerControl(entry, on) {
+  const { id: peerId, name: peerName } = entry.peer;
   // Any fresh attempt clears a stale error banner.
   clearPeerControlError(entry.peer);
   const res = await window.api.peerControl(peerId, peerName, on);
@@ -1407,6 +1425,59 @@ async function togglePeerControl() {
     entry.peer.controlled = false;
   }
   renderPeerBar();
+}
+
+// Row context-menu actions from main. Verbs mirror the peer-bar's state
+// transitions plus attach/detach/hide; taking control from an unattached row
+// attaches first so it's one gesture.
+window.api.onPeerContextAction(async ({ action, id, name }) => {
+  const key = peerKey(id, name);
+  switch (action) {
+    case 'attach':
+      openPeerSession(id, name);
+      break;
+    case 'takeControl': {
+      if (!sessions.has(key)) openPeerSession(id, name); else switchSession(key);
+      const entry = sessions.get(key);
+      if (entry && entry.peer && !entry.peer.controlled) await applyPeerControl(entry, true);
+      break;
+    }
+    case 'releaseControl': {
+      const entry = sessions.get(key);
+      if (entry && entry.peer && entry.peer.controlled) await applyPeerControl(entry, false);
+      break;
+    }
+    case 'detach':
+      if (sessions.has(key)) { removeSession(key); renderPeers(); }
+      break;
+    case 'hide':
+      await peerHideFromList(id, name);
+      break;
+  }
+});
+
+// Remove one session from the peer's visible selection (context-menu "Hide from
+// list"). Mirrors the peer-select popover's semantics: no selection yet ⇒
+// materialize an explicit all-known-minus-this list; an existing selection ⇒
+// drop the name. Pairs with Apply-detaches — a hidden attached tab is detached
+// too, so "hidden" always means "gone from the sidebar".
+async function peerHideFromList(id, name) {
+  const st = peerStatuses.get(id);
+  const sel = peerVisibleMap[id];
+  let next;
+  if (Array.isArray(sel)) {
+    next = sel.filter((n) => n !== name);
+  } else {
+    const liveNames = st && st.online ? (st.sessions || []).map((s) => s.name) : [];
+    const attachedNames = [...sessions.entries()]
+      .filter(([, e]) => e.peer && e.peer.id === id).map(([, e]) => e.peer.name);
+    next = [...new Set([...liveNames, ...attachedNames])].filter((n) => n !== name);
+  }
+  const res = await window.api.peerSetVisible(id, next);
+  if (res && res.ok) peerVisibleMap = res.peerVisible || {};
+  const key = peerKey(id, name);
+  if (sessions.has(key)) removeSession(key);
+  renderPeers();
 }
 
 // Transient control-error banner on a peer entry. Auto-clears so it never
@@ -1457,6 +1528,57 @@ window.api.onPeerReplay((id, name, info) => {
 window.api.onPeerData((id, name, data) => {
   const entry = sessions.get(peerKey(id, name));
   if (entry) entry.terminal.write(data);
+});
+
+// Owner PTY resized: follow its geometry live so new output stops rendering
+// into a stale letterbox. Owner geometry is canonical even in control mode —
+// a controlling viewer's own resize echoes back the same (or PTY-clamped) dims,
+// and applying them is an idempotent resize-in-place, never a feedback loop
+// (viewers push geometry only on explicit fit, not on an applied resize).
+window.api.onPeerResize((id, name, geom) => {
+  const entry = sessions.get(peerKey(id, name));
+  if (!entry || !entry.peer) return;
+  if (!(geom.cols > 0 && geom.rows > 0)) return;
+  entry.peer.cols = geom.cols; entry.peer.rows = geom.rows;
+  if (entry.terminal.cols !== geom.cols || entry.terminal.rows !== geom.rows) {
+    entry.terminal.resize(geom.cols, geom.rows);
+  }
+});
+
+// Owner-initiated UI mirroring: the owner surfaced a session-scoped component
+// (a remote agent's [agent:file view], today) and wants attached viewers to
+// render their own copy. The event carries only a small {kind, args} trigger —
+// content is pulled locally through popoverApi (the query RPC), so it stays on
+// the owner's vetted path. Kinds are dispatched through a registry so new
+// mirrorable components are one entry, not new plumbing.
+//
+// Intrusiveness gate: a remote agent must NOT be able to slam a full-screen
+// modal over whatever the operator is doing in another tab. So a mirrored
+// component renders immediately ONLY when its peer tab is the active one;
+// otherwise it becomes an unobtrusive, session-scoped toast whose click
+// switches to that tab and then renders. `present` is the "act now" path,
+// `announce` the deferred one — every kind supplies both.
+const PEER_UI_KINDS = {
+  fileView: {
+    label: 'shared a file',
+    detail: (args) => (args && args.path ? args.path.split('/').pop() : 'a file'),
+    present: (key, args) => { if (args && args.path) openFilePeek(key, args.path); },
+  },
+};
+
+window.api.onPeerUi((id, name, evt) => {
+  const key = peerKey(id, name);
+  if (!sessions.has(key)) return;             // only attached viewers act
+  const spec = evt && PEER_UI_KINDS[evt.kind];
+  if (!spec) return;                          // unknown/stale kind — ignore gracefully
+  const args = evt.args || {};
+  if (activeSession === key) { spec.present(key, args); return; }
+  // Not looking at that tab: announce, don't intrude. Click switches + renders.
+  const disp = `${name}@${peerDisplayHost(peerStatuses.get(id))}`;
+  showToast(`${disp}: ${spec.label} — ${spec.detail(args)}`, {
+    kind: 'peer-ui',
+    onClick: () => { if (sessions.has(key)) { switchSession(key); spec.present(key, args); } },
+  });
 });
 
 // Status-bar telemetry for an attached peer session, streamed from the
@@ -2279,10 +2401,15 @@ function showToast(msg, opts = {}) {
     setTimeout(() => el.remove(), 220);
   };
   close.addEventListener('click', (e) => { e.stopPropagation(); dismiss(); });
-  // Clicking the body of a session-scoped toast jumps to that session.
-  if (opts.name) {
+  // Clicking the body runs opts.onClick if given (it owns the action), else the
+  // session-scoped default: jump to opts.name's session.
+  if (opts.onClick || opts.name) {
     el.classList.add('toast-clickable');
-    el.addEventListener('click', () => { if (sessions.has(opts.name)) switchSession(opts.name); dismiss(); });
+    el.addEventListener('click', () => {
+      if (opts.onClick) opts.onClick();
+      else if (sessions.has(opts.name)) switchSession(opts.name);
+      dismiss();
+    });
   }
   host.appendChild(el);
   requestAnimationFrame(() => el.classList.add('show'));
@@ -2785,6 +2912,17 @@ document.getElementById('peer-select-popover-apply').addEventListener('click', a
   const res = await window.api.peerSetVisible(id, allChecked ? null : checked);
   if (res && res.ok) peerVisibleMap = res.peerVisible || {};
   else peerVisibleMap = (await window.api.peerVisible().catch(() => peerVisibleMap)) || peerVisibleMap;
+  // Apply is authoritative for attached tabs too: any session excluded by this
+  // selection that's currently open gets detached (same path as the X — removeSession
+  // forgets persistence + re-homes focus if it was active). This deliberately
+  // overrides the attached-always-wins RENDER rule, but only for an explicit
+  // Apply exclusion; a tab that becomes attached by other means (auto-reattach
+  // of a later-unchecked name) still renders, since nothing re-runs this.
+  for (const [key, entry] of [...sessions.entries()]) {
+    if (entry.peer && entry.peer.id === id && !peerNameVisible(id, entry.peer.name)) {
+      removeSession(key);
+    }
+  }
   renderPeers();
 });
 // Dismiss on outside click / Escape.

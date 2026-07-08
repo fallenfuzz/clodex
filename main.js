@@ -4107,6 +4107,14 @@ class SessionManager {
     const s = this.sessions.get(name);
     if (!s || s._dead) return;
     try { s.pty.resize(cols, rows); } catch {}
+    // Mirror the new geometry to any read-only peer viewers so their letterbox
+    // follows the owner's. This is the single resize choke point — both the
+    // owner's own refit (session:resize IPC) and a controlling viewer's resize
+    // (resizePty callback) land here — so one notify covers every case. Read
+    // back the PTY's actual dims (canonical) rather than the requested ones.
+    if (remoteServer) {
+      try { remoteServer.notifyResize(name, s.pty.cols, s.pty.rows); } catch {}
+    }
   }
 
   async kill(name) {
@@ -4613,6 +4621,13 @@ class SessionManager {
     win.show();
     win.focus();
     win.webContents.send('session-file-view', session.name, vet.path);
+    // Mirror the surfaced component to any attached peer viewers — the same
+    // trigger point, just fanned to remote screens. Small {kind, args} only;
+    // the viewer pulls contents through the query RPC. `open` never reaches
+    // here (it returned above), so external launches never mirror.
+    if (remoteServer) {
+      try { remoteServer.pushUiEvent(session.name, 'fileView', { path: vet.path }); } catch {}
+    }
   }
 
   // Digest-ledger birth marking: any conversation id OTHER than the one this
@@ -7052,6 +7067,36 @@ app.whenReady().then(() => {
       },
     ]);
     menu.popup({ window: win });
+  });
+
+  // Peer session rows get their own menu — the verbs (attach/control/detach/
+  // hide) differ entirely from a local session's, so it's a separate template
+  // rather than an overload. State is supplied by the renderer (the source of
+  // truth for attach/control lives there, not in persistence); we only render.
+  ipcMain.on('peer:context-menu', (e, st) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const { id, name, online, attached, controlled, holder } = st || {};
+    const act = (action) => () => e.sender.send('peer:context-action', { action, id, name });
+    const template = [];
+    // Who holds it, when it's not us — informational, like the peer bar. Take
+    // control stays enabled (acquire is last-wins), matching the bar.
+    if (holder && !controlled) {
+      template.push({ label: `Controlled by ${holder}`, enabled: false });
+      template.push({ type: 'separator' });
+    }
+    if (!attached) {
+      template.push({ label: 'Attach', click: act('attach') });
+      template.push({ label: 'Take control', enabled: !!online, click: act('takeControl') });
+    } else if (controlled) {
+      template.push({ label: 'Release control', click: act('releaseControl') });
+      template.push({ label: 'Detach', click: act('detach') });
+    } else {
+      template.push({ label: 'Take control', enabled: !!online, click: act('takeControl') });
+      template.push({ label: 'Detach', click: act('detach') });
+    }
+    template.push({ type: 'separator' });
+    template.push({ label: 'Hide from list', click: act('hide') });
+    Menu.buildFromTemplate(template).popup({ window: win });
   });
 
   ipcMain.handle('dialog:confirmKill', async (_e, name) => {

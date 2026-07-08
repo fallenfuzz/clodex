@@ -1496,6 +1496,11 @@ html, body {
   border-left-color: #7cc7ff;
 }
 
+/* Owner-mirrored UI event (e.g. a remote agent shared a file for viewing). */
+.toast-peer-ui {
+  border-left-color: var(--accent);
+}
+
 .toast-clickable {
   cursor: pointer;
 }

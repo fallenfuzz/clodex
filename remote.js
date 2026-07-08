@@ -24,6 +24,9 @@ const SSE_HEARTBEAT_MS = 25000;
 // An attach stream whose socket can't drain this much is a dead/half-open
 // tunnel; kill it and let the client reconnect + replay.
 const ATTACH_MAX_BUFFERED = 4 * 1024 * 1024;
+// Trailing-debounce window for mirroring owner resizes to viewers: long enough
+// to coalesce a window-drag burst into one frame, short enough to feel live.
+const RESIZE_DEBOUNCE_MS = 80;
 
 class RemoteServer {
   constructor({ port, pagePath, getSessions, getTranscript, send, restartApp,
@@ -52,6 +55,12 @@ class RemoteServer {
     this._control = new Map();       // name -> { token, client } single holder
     this._activity = new Map();      // name -> 'thinking' | 'idle'
     this._heartbeat = null;
+    // Owner-geometry propagation to read-only viewers. Owner fit() can fire in
+    // bursts (window drags), so resizes are coalesced per session: the latest
+    // dims win, flushed on a short trailing debounce, and identical dims are
+    // dropped (last-sent dedup). _resizePending holds { cols, rows, timer }.
+    this._resizePending = new Map(); // name -> { cols, rows, timer }
+    this._resizeLast = new Map();    // name -> 'colsxrows' last flushed
   }
 
   get running() { return !!this._server; }
@@ -98,6 +107,9 @@ class RemoteServer {
     }
     this._attach.clear();
     this._control.clear();
+    for (const p of this._resizePending.values()) clearTimeout(p.timer);
+    this._resizePending.clear();
+    this._resizeLast.clear();
     try { this._server.close(); } catch {}
     this._server = null;
   }
@@ -153,6 +165,60 @@ class RemoteServer {
     }
   }
 
+  // Owner-initiated UI event — mirror a session-scoped component the owner just
+  // surfaced (in response to an agent intent) to that session's attached
+  // viewers, so a remote agent's `[agent:file view]` popup appears on the
+  // viewer's screen too. Carries a SMALL trigger {kind, args}, never rendered
+  // content: the viewer maps kind→its own local render and pulls content back
+  // through the query RPC (filePeek/fileDiff), keeping content on the owner's
+  // vetted code path and the no-reach-back principle intact. Session-scoped by
+  // construction (only THIS name's attach set hears it). Same cheap-no-op
+  // discipline as pushOutput. `[agent:file open]` (external launch) is never
+  // routed here — view-only surfaces mirror.
+  pushUiEvent(name, kind, args) {
+    if (!kind || typeof kind !== 'string') return;
+    const set = this._attach.get(name);
+    if (!set || set.size === 0) return;
+    const frame = `event: ui\ndata: ${JSON.stringify({ kind, args: args || {} })}\n\n`;
+    for (const res of set) { try { res.write(frame); } catch {} }
+  }
+
+  // Owner PTY resized — mirror the new letterbox to read-only viewers so their
+  // terminal follows the owner's geometry instead of rendering new output into
+  // a stale box (staircase-wrapped garble). Owner geometry is canonical; a
+  // controlling viewer's own resize round-trips through here too and echoes
+  // back the same dims, which is an idempotent term.resize on that viewer (no
+  // feedback loop — viewers only push geometry on explicit fit, not on an
+  // applied resize). Coalesced per session (trailing debounce + dedup) so a
+  // drag-burst of fit()s doesn't flood the stream. Cheap no-op with no
+  // attachers, like pushOutput.
+  notifyResize(name, cols, rows) {
+    if (!(cols > 0 && rows > 0)) return;
+    const set = this._attach.get(name);
+    if (!set || set.size === 0) return;
+    const pending = this._resizePending.get(name);
+    if (pending) {
+      pending.cols = cols; pending.rows = rows;
+      return;                          // timer already scheduled; latest wins
+    }
+    const entry = { cols, rows, timer: null };
+    entry.timer = setTimeout(() => this._flushResize(name), RESIZE_DEBOUNCE_MS);
+    this._resizePending.set(name, entry);
+  }
+
+  _flushResize(name) {
+    const entry = this._resizePending.get(name);
+    this._resizePending.delete(name);
+    if (!entry) return;
+    const set = this._attach.get(name);
+    if (!set || set.size === 0) { this._resizeLast.delete(name); return; }
+    const key = `${entry.cols}x${entry.rows}`;
+    if (this._resizeLast.get(name) === key) return;   // dedup: no real change
+    this._resizeLast.set(name, key);
+    const frame = `event: resize\ndata: ${JSON.stringify({ cols: entry.cols, rows: entry.rows })}\n\n`;
+    for (const res of set) { try { res.write(frame); } catch {} }
+  }
+
   // PTY exited — tell attachers, then tear the streams down.
   notifyExit(name, exitCode) {
     const set = this._attach.get(name);
@@ -167,6 +233,9 @@ class RemoteServer {
     const set = this._attach.get(name);
     if (set) { for (const res of set) { try { res.end(); } catch {} } }
     this._attach.delete(name);
+    const pending = this._resizePending.get(name);
+    if (pending) { clearTimeout(pending.timer); this._resizePending.delete(name); }
+    this._resizeLast.delete(name);
     this._setControl(name, null);
   }
 

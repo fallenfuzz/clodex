@@ -177,6 +177,70 @@ test('resize dimensions are bounded', async () => {
   assert.equal(resizes.length, n);
 });
 
+test('owner resize propagates to attached viewers (debounced + deduped)', async () => {
+  // Regression: owner geometry shipped only in the attach replay, so an owner
+  // refit (its own fit() -> pty resize) left read-only viewers in a stale
+  // letterbox and new output rendered staircase-garbled. notifyResize now
+  // mirrors the live geometry down the attach stream. alpha is still attached
+  // from the attach test above.
+  const notResize = (dims) => events.some(
+    (x) => x.channel === 'peer-resize' && x.args[1] === 'alpha'
+      && x.args[2].cols === dims[0] && x.args[2].rows === dims[1]);
+
+  server.notifyResize('alpha', 132, 43);
+  const ev = await waitFor(
+    () => events.find((x) => x.channel === 'peer-resize' && x.args[1] === 'alpha'
+      && x.args[2].cols === 132 && x.args[2].rows === 43),
+    'peer-resize 132x43');
+  assert.equal(ev.args[0], 'p1');
+
+  // A drag-burst coalesces to the final geometry (trailing debounce): fire
+  // several synchronously, only the last should surface.
+  server.notifyResize('alpha', 100, 30);
+  server.notifyResize('alpha', 110, 33);
+  server.notifyResize('alpha', 120, 36);
+  await waitFor(() => notResize([120, 36]), 'coalesced to final 120x36');
+  assert.ok(!notResize([100, 30]) && !notResize([110, 33]),
+    'intermediate drag frames were coalesced away, never emitted');
+
+  // Dedup: repeating the current dims emits nothing new.
+  const settled = events.filter((x) => x.channel === 'peer-resize').length;
+  server.notifyResize('alpha', 120, 36);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(events.filter((x) => x.channel === 'peer-resize').length, settled,
+    'identical resize was deduped');
+});
+
+test('owner UI event mirrors to attached viewers (generic {kind, args})', async () => {
+  // Owner surfaced a session-scoped component (a remote agent's [agent:file
+  // view]) — attached viewers get a small {kind, args} trigger on the attach
+  // stream and render their own copy (content pulled via the query RPC, not
+  // shipped here). alpha is still attached from the attach test above.
+  server.pushUiEvent('alpha', 'fileView', { path: '/tmp/x/a.js' });
+  const ev = await waitFor(
+    () => events.find((x) => x.channel === 'peer-ui' && x.args[1] === 'alpha'),
+    'peer-ui fileView');
+  assert.equal(ev.args[0], 'p1');
+  assert.equal(ev.args[2].kind, 'fileView');
+  assert.equal(ev.args[2].args.path, '/tmp/x/a.js');
+
+  // Forward-compat: an unknown kind from a newer owner still reaches the client
+  // verbatim (the renderer's dispatch is what ignores kinds it doesn't know).
+  server.pushUiEvent('alpha', 'futureThing', { x: 1 });
+  const future = await waitFor(
+    () => events.find((x) => x.channel === 'peer-ui' && x.args[2].kind === 'futureThing'),
+    'peer-ui unknown kind forwarded');
+  assert.equal(future.args[2].args.x, 1);
+
+  // Malformed: an empty/non-string kind is dropped owner-side and never emits.
+  const before = events.filter((x) => x.channel === 'peer-ui').length;
+  server.pushUiEvent('alpha', '', { path: 'nope' });
+  server.pushUiEvent('alpha', null, { path: 'nope' });
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(events.filter((x) => x.channel === 'peer-ui').length, before,
+    'empty/non-string kinds emitted nothing');
+});
+
 test('query: popover pulls round-trip with kind + args', async () => {
   const files = await new Promise((r) => conn.query('alpha', 'files', null, r));
   assert.ok(files.ok);
