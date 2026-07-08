@@ -1280,7 +1280,10 @@ function renderPeers() {
       const closeBtn = item.querySelector('.session-close');
       if (closeBtn) closeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (sessions.has(key)) { removeSession(key); renderPeers(); }
+        // X means "gone": detach AND drop from the visibility selection, so the
+        // row leaves the list (same end state as "Hide from list"). The
+        // keep-browsing case lives on the context menu ("Detach (keep listed)").
+        if (sessions.has(key)) peerHideFromList(id, s.name);
       });
       sessionList.appendChild(item);
       // Badges survive the row rebuild: attached rows are owned by the live
@@ -4483,9 +4486,9 @@ document.addEventListener('keydown', (e) => {
       const target = activeSession;
       const entry = sessions.get(target);
       if (entry && entry.peer) {
-        // Peer tabs detach locally; the session keeps running on its owner.
-        removeSession(target);
-        renderPeers();
+        // Same gesture as the X: "gone" = detach + drop from the visibility
+        // selection (the session keeps running on its owner regardless).
+        peerHideFromList(entry.peer.id, entry.peer.name);
       } else {
         window.api.confirmKill(target).then((ok) => {
           if (ok) window.api.killSession(target);
@@ -4834,7 +4837,10 @@ function renderRemoteStatus(st) {
 
 // Peers editor rows: label + url + remove. IDs stay stable across edits so
 // main can reconcile connections instead of restarting them all.
-const prefsPeersBox = document.getElementById('prefs-peers');
+// Peer add/edit/remove now lives in its own dialog (opened from Window > Peers >
+// Manage Peered Clodexes…), not Preferences — keeps the prefs dialog lean.
+const peersListBox = document.getElementById('peers-list');
+const peersOverlay = document.getElementById('peers-overlay');
 
 function addPeerRow(peer) {
   const row = document.createElement('div');
@@ -4847,12 +4853,12 @@ function addPeerRow(peer) {
     <input type="text" class="peer-row-url" placeholder="or URL (advanced)" value="${esc(peer.url || '')}">
     <button type="button" class="secondary peer-row-remove" title="Remove peer">&times;</button>`;
   row.querySelector('.peer-row-remove').addEventListener('click', () => row.remove());
-  prefsPeersBox.appendChild(row);
+  peersListBox.appendChild(row);
 }
 
 function collectPeers() {
   const out = [];
-  for (const row of prefsPeersBox.querySelectorAll('.peer-row')) {
+  for (const row of peersListBox.querySelectorAll('.peer-row')) {
     const sshHost = row.querySelector('.peer-row-ssh').value.trim();
     const url = row.querySelector('.peer-row-url').value.trim();
     if (!sshHost && !url) continue;
@@ -4868,12 +4874,29 @@ function collectPeers() {
   return out;
 }
 
-document.getElementById('prefs-peer-add').addEventListener('click', () => addPeerRow({}));
+document.getElementById('peers-add').addEventListener('click', () => addPeerRow({}));
+
+async function openPeersDialog() {
+  const s = await window.api.getSettings();
+  peersListBox.innerHTML = '';
+  for (const p of s.peers || []) addPeerRow(p);
+  peersOverlay.classList.remove('hidden');
+}
+
+function closePeersDialog() { peersOverlay.classList.add('hidden'); }
+
+document.getElementById('btn-peers-cancel').addEventListener('click', closePeersDialog);
+document.getElementById('btn-peers-save').addEventListener('click', async () => {
+  await window.api.setSettings({ peers: collectPeers() });
+  closePeersDialog();
+});
+peersOverlay.addEventListener('mousedown', (e) => { if (e.target === peersOverlay) closePeersDialog(); });
+window.api.onRequestOpenPeersDialog(() => openPeersDialog());
+// Window > Peers > <peer> > <session>: attach in this (focused) window.
+window.api.onRequestOpenPeerSession((id, name) => openPeerSession(id, name));
 
 async function openPrefs() {
   const s = await window.api.getSettings();
-  prefsPeersBox.innerHTML = '';
-  for (const p of s.peers || []) addPeerRow(p);
   renderPrefsCheckboxes(prefsClaudeBox, s.claudeComponents, s.statusline.claude, CLAUDE_LABELS);
   prefsClaudeCmd.value = s.statusline.claudeCommand || '';
   renderPrefsCheckboxes(prefsCodexBox, s.codexComponents, s.statusline.codex, CODEX_LABELS);
@@ -4913,7 +4936,6 @@ document.getElementById('btn-prefs-save').addEventListener('click', async () => 
     disableClaudeDesignMcp: prefsDisableDesignMcp.checked,
     compactOnResume: prefsCompactOnResume.checked,
     remoteEnabled: prefsRemoteEnabled.checked,
-    peers: collectPeers(),
   });
   // Default tool denies live in a separate store (the "*" agent-default), so
   // persist them via their own setter. collectToolChecklist returns the

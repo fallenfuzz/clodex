@@ -5663,6 +5663,38 @@ function buildAppMenu() {
         });
       }
     }
+
+    // Peers section: configured peers with an online/offline indicator, each
+    // expanding to its live sessions (click = attach in the focused window,
+    // matching how peer tabs live today). No control verbs — sessions + manage
+    // only, to keep the menu light. "Manage Peered Clodexes…" owns the add/
+    // edit/remove UI that used to sit in Preferences.
+    const peerList = peerManager ? peerManager.statuses() : [];
+    wsMenu.submenu.push({ type: 'separator' }, { label: 'Peers', enabled: false });
+    if (peerList.length === 0) {
+      wsMenu.submenu.push({ label: '(no peers configured)', enabled: false });
+    } else {
+      for (const st of peerList) {
+        const indicator = st.online ? '●' : '○';
+        const label = st.label || st.host || st.id;
+        let sub;
+        if (!st.online) {
+          sub = [{ label: 'offline', enabled: false }];
+        } else if (!st.sessions || st.sessions.length === 0) {
+          sub = [{ label: '(no sessions)', enabled: false }];
+        } else {
+          sub = st.sessions.map((s) => ({
+            label: s.name,
+            click: () => sendToFocused('request-open-peer-session', st.id, s.name),
+          }));
+        }
+        wsMenu.submenu.push({ label: `${indicator}  ${label}`, submenu: sub });
+      }
+    }
+    wsMenu.submenu.push({
+      label: 'Manage Peered Clodexes…',
+      click: () => sendToFocused('request-open-peers-dialog'),
+    });
   }
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -5670,6 +5702,26 @@ function buildAppMenu() {
 
 function refreshAppMenu() {
   buildAppMenu();
+}
+
+// Route a menu action to the window the user is looking at (falling back to any
+// open window), matching how Preferences and workspace actions already resolve.
+function sendToFocused(channel, ...args) {
+  const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+  if (win) win.webContents.send(channel, ...args);
+}
+
+// Peer online/offline (and add/remove) flips the Window > Peers indicators and
+// session lists. peer-state can fire in bursts (hello wake + session refresh),
+// so debounce like the tray — one rebuild per burst. (macOS snapshots an
+// already-open menu, so a rebuild never yanks it out from under the user.)
+let appMenuRefreshTimer = null;
+function scheduleAppMenuRefresh() {
+  if (appMenuRefreshTimer) return;
+  appMenuRefreshTimer = setTimeout(() => {
+    appMenuRefreshTimer = null;
+    refreshAppMenu();
+  }, 500);
 }
 
 // ---------------------------------------------------------------------------
@@ -6003,7 +6055,11 @@ function syncPeerManager() {
   if (!peerManager) {
     const { PeerManager } = require('./peer-client');
     peerManager = new PeerManager({
-      emit: (channel, ...args) => { try { manager._broadcast(channel, ...args); } catch {} },
+      emit: (channel, ...args) => {
+        try { manager._broadcast(channel, ...args); } catch {}
+        // Keep the Window > Peers menu's indicators + session lists fresh.
+        if (channel === 'peer-state' || channel === 'peer-removed') scheduleAppMenuRefresh();
+      },
     });
   }
   if (!tunnelManager) {
@@ -6033,6 +6089,10 @@ function syncPeerManager() {
     if (changed) patch[field] = next;
   }
   if (Object.keys(patch).length) uiSettings.set(patch);
+  // Reflect add/edit/remove in the Window > Peers menu right away: a newly-added
+  // OFFLINE peer never emits peer-state (its initial state is already offline),
+  // so the emit-driven refresh wouldn't pick it up on its own.
+  if (typeof scheduleAppMenuRefresh === 'function') scheduleAppMenuRefresh();
 }
 
 // Managed-tunnel peers ride their tunnel's current local port; while the
@@ -7089,10 +7149,10 @@ app.whenReady().then(() => {
       template.push({ label: 'Take control', enabled: !!online, click: act('takeControl') });
     } else if (controlled) {
       template.push({ label: 'Release control', click: act('releaseControl') });
-      template.push({ label: 'Detach', click: act('detach') });
+      template.push({ label: 'Detach (keep listed)', click: act('detach') });
     } else {
       template.push({ label: 'Take control', enabled: !!online, click: act('takeControl') });
-      template.push({ label: 'Detach', click: act('detach') });
+      template.push({ label: 'Detach (keep listed)', click: act('detach') });
     }
     template.push({ type: 'separator' });
     template.push({ label: 'Hide from list', click: act('hide') });

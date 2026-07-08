@@ -1226,7 +1226,7 @@ html, body {
 
 /* Dialog */
 
-#dialog-overlay, #prefs-overlay, #args-overlay {
+#dialog-overlay, #prefs-overlay, #args-overlay, #peers-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
@@ -1236,7 +1236,7 @@ html, body {
   z-index: 100;
 }
 
-#dialog-overlay.hidden, #prefs-overlay.hidden, #args-overlay.hidden {
+#dialog-overlay.hidden, #prefs-overlay.hidden, #args-overlay.hidden, #peers-overlay.hidden {
   display: none;
 }
 
@@ -1287,10 +1287,40 @@ html, body {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 24px;
-  width: 420px;
-  max-height: 80vh;
-  overflow-y: auto;
+  /* Wider default so the statusline command field and peer url rows fit without
+     horizontal scrolling; resizable both ways for anyone who wants more room.
+     min-height keeps a drag-shrink from clipping the action bar; the caps stay
+     inside the viewport. Content stays a single scrolling column (overflow-y). */
+  width: 620px;
+  min-width: 420px;
+  max-width: calc(100vw - 32px);
+  min-height: 200px;
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  resize: both;
 }
+/* Full-width form controls so long values wrap/scroll inside the field instead
+   of widening the dialog (the horizontal-scroll cause at the old fixed width). */
+#prefs-dialog input[type="text"],
+#prefs-dialog select { width: 100%; }
+
+/* Manage Peered Clodexes dialog — sized for the wide peer rows (label + ssh +
+   url), resizable for anyone who wants more room. */
+#peers-dialog {
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 620px;
+  min-width: 420px;
+  max-width: calc(100vw - 32px);
+  min-height: 160px;
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  resize: both;
+}
+#peers-dialog h3 { margin-bottom: 12px; font-size: 16px; }
+#peers-dialog .hint-text { margin-bottom: 8px; display: block; }
 #prefs-dialog h3 { margin-bottom: 16px; font-size: 16px; }
 #prefs-dialog h4 { margin: 12px 0 4px; font-size: 13px; text-transform: uppercase; opacity: 0.7; letter-spacing: 0.5px; }
 #prefs-dialog section { margin-bottom: 16px; }
@@ -2261,17 +2291,17 @@ html, body {
 #peer-bar button:hover { border-color: var(--accent); }
 #peer-bar button.controlling { border-color: var(--accent); color: var(--accent); }
 
-/* Prefs: peer rows (label + url + remove). */
-#prefs-peers .peer-row {
+/* Manage Peered Clodexes: peer rows (label + ssh + url + remove). */
+#peers-list .peer-row {
   display: flex;
   gap: 6px;
   margin-top: 6px;
   align-items: center;
 }
-#prefs-peers .peer-row-label { flex: 0 0 110px; }
-#prefs-peers .peer-row-ssh { flex: 1; }
-#prefs-peers .peer-row-url { flex: 1; }
-#prefs-peers .peer-row-remove { flex: none; padding: 2px 8px; }
+#peers-list .peer-row-label { flex: 0 0 110px; }
+#peers-list .peer-row-ssh { flex: 1; }
+#peers-list .peer-row-url { flex: 1; }
+#peers-list .peer-row-remove { flex: none; padding: 2px 8px; }
 
 /* Peer bar reserves the terminal's top edge the same way the proxy bar
    reserves the bottom — never overlay terminal rows. */
