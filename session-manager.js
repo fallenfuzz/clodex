@@ -74,6 +74,7 @@ function createSessionManager(deps) {
     collectSystemDiagnostics,
     composeDigest,
     ctxReminderFor,
+    diagSummary,
     diagWarning,
     draftChunkSignal,
     drainPending,

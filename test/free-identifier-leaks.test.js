@@ -27,6 +27,10 @@ const ROOT = path.join(__dirname, '..');
 // modules here (M5: ipc-handlers, remote-wiring, peer-wiring, app-menus).
 const SCANNED_MODULES = [
   'session-manager.js',
+  'app-menus.js',
+  'ipc-handlers.js',
+  'remote-wiring.js',
+  'peer-wiring.js',
   'jsonl-watcher.js',
   'wirescope-proxy.js',
   'wirescope-supervisor.js',
@@ -49,11 +53,22 @@ const WHITELIST = {};
 function moduleScopeNames(src) {
   const names = new Set();
   for (const m of src.matchAll(/^(?:async )?function (\w+)/gm)) names.add(m[1]);
-  for (const m of src.matchAll(/^(?:const|let) (\w+)/gm)) names.add(m[1]);
-  for (const m of src.matchAll(/^(?:const|let) \{([^}]+)\}/gm)) {
+  // Declaration lists, possibly multi-line: `let a, b,\n  c;` and `const x = …`.
+  // The single-`\w+` form this replaced missed continuation lines — that is how
+  // the seven stores declared as `let persistence, templates,\n …, uiSettings;`
+  // stayed invisible and let ipc-handlers.js leak them all.
+  for (const m of src.matchAll(/^(?:const|let) ([\w\s,]+?)(?:;|=)/gm)) {
+    for (const n of m[1].split(',')) {
+      const t = n.trim();
+      if (/^\w+$/.test(t)) names.add(t);
+    }
+  }
+  // Destructures, possibly multi-line — `const { a, b } =`, `let { a } =`, and
+  // the whenReady reassignment `({ persistence, … } = initStores(...))`.
+  for (const m of src.matchAll(/^(?:const|let)? ?\(?\{([\s\S]*?)\}\s*=/gm)) {
     for (const p of m[1].split(',')) {
-      const n = p.split(':')[0].trim();
-      if (/^\w+$/.test(n)) names.add(n);
+      const t = p.split(':')[0].trim();
+      if (/^\w+$/.test(t)) names.add(t);
     }
   }
   return names;
@@ -93,49 +108,63 @@ function ownDefinitions(rawSrc) {
   return defs;
 }
 
-// Single left-to-right pass replacing strings, template literals, comments,
-// and regex literals with blanks. Regex ordering can't do this correctly —
-// `'http://x'` defeats comments-first (the // inside the string is eaten,
-// unbalancing every quote after it), apostrophes in comments defeat
-// strings-first. A regex literal is assumed when `/` follows a token that
-// cannot end an expression (so `a / b` division survives).
+// Single left-to-right pass replacing strings, comments, and regex literals
+// with blanks — but template literals are lexed structurally, not blanked
+// wholesale. A `${…}` interpolation recurses back into code mode with brace-
+// depth tracking, so (a) nested backticks inside an interpolation (e.g.
+// `shellEsc(`…`)`) no longer flip the lexer state and silently drop the rest of
+// the file from the scan, and (b) the interpolation EXPRESSION itself is kept as
+// code — a `${diagSummary(...)}` reference is a real use and must be seen.
+// Regex ordering can't do this correctly — `'http://x'` defeats comments-first
+// (the // inside the string is eaten, unbalancing every quote after it),
+// apostrophes in comments defeat strings-first. A regex literal is assumed when
+// `/` follows a token that cannot end an expression (so `a / b` division
+// survives).
 function stripCommentsStringsAndKeys(src) {
   let out = '';
   let i = 0;
   let lastSig = ''; // last significant (non-space) char emitted
   const isRegexPos = () => lastSig === '' || '=(,:;!&|?{}[+-*%<>~^'.includes(lastSig);
-  while (i < src.length) {
-    const c = src[i], n = src[i + 1];
-    if (c === "'" || c === '"' || c === '`') {
-      const q = c;
-      i++;
-      while (i < src.length && src[i] !== q) i += src[i] === '\\' ? 2 : 1;
-      i++;
-      out += q === '`' ? '``' : "''";
-      lastSig = q;
-    } else if (c === '/' && n === '/') {
-      while (i < src.length && src[i] !== '\n') i++;
-    } else if (c === '/' && n === '*') {
-      i += 2;
-      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++;
-      i += 2;
-    } else if (c === '/' && isRegexPos()) {
-      i++;
-      let inClass = false;
-      while (i < src.length && (inClass || src[i] !== '/')) {
-        if (src[i] === '\\') i += 2;
-        else { if (src[i] === '[') inClass = true; else if (src[i] === ']') inClass = false; i++; }
-      }
-      i++;
-      while (i < src.length && /[gimsuy]/.test(src[i])) i++;
-      out += '""';
-      lastSig = '"';
-    } else {
-      out += c;
-      if (!/\s/.test(c)) lastSig = c;
-      i++;
+  // Consume code until the matching close of the current `${…}` (end === '}')
+  // or end of source (end === null). Braces balance so object/block braces
+  // inside an interpolation don't terminate it early.
+  function code(end) {
+    let depth = 0;
+    while (i < src.length) {
+      const c = src[i], n = src[i + 1];
+      if (end === '}' && c === '}' && depth === 0) return;
+      if (c === '{') depth++;
+      else if (c === '}') depth--;
+      if (c === "'" || c === '"') { str(c); continue; }
+      if (c === '`') { tpl(); continue; }
+      if (c === '/' && n === '/') { while (i < src.length && src[i] !== '\n') i++; continue; }
+      if (c === '/' && n === '*') { i += 2; while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++; i += 2; continue; }
+      if (c === '/' && isRegexPos()) { rex(); continue; }
+      out += c; if (!/\s/.test(c)) lastSig = c; i++;
     }
   }
+  function str(q) { i++; while (i < src.length && src[i] !== q) i += src[i] === '\\' ? 2 : 1; i++; out += q + q; lastSig = q; }
+  function tpl() {
+    i++;
+    while (i < src.length && src[i] !== '`') {
+      if (src[i] === '\\') { i += 2; continue; }
+      if (src[i] === '$' && src[i + 1] === '{') { i += 2; out += '('; lastSig = '('; code('}'); i++; out += ')'; lastSig = ')'; continue; }
+      i++;
+    }
+    i++; out += '``'; lastSig = '`';
+  }
+  function rex() {
+    i++;
+    let inClass = false;
+    while (i < src.length && (inClass || src[i] !== '/')) {
+      if (src[i] === '\\') i += 2;
+      else { if (src[i] === '[') inClass = true; else if (src[i] === ']') inClass = false; i++; }
+    }
+    i++;
+    while (i < src.length && /[gimsuy]/.test(src[i])) i++;
+    out += '""'; lastSig = '"';
+  }
+  code(null);
   return out
     // Property accesses (`intent.path`, `pty.spawn`) never resolve against
     // module scope — drop the `.name` part, keep the receiver.
@@ -165,3 +194,42 @@ for (const mod of SCANNED_MODULES) {
     );
   });
 }
+
+// Scanner self-tests — lock in the two defects whose fix caught the M5 escape.
+// Each reproduces the exact shape that let a real leak hide: without the fix the
+// asserted token is absent and the module scan silently passes over the leak.
+const tokensOf = (s) =>
+  new Set(stripCommentsStringsAndKeys(s).match(/\b[a-zA-Z_$][\w$]*\b/g) || []);
+
+test('stripper keeps interpolation expressions as code', () => {
+  // `${diagSummary(d)}` is a real reference — blanking template interiors is how
+  // diagSummary leaked from session-manager.js unseen for a whole phase.
+  const toks = tokensOf('const s = `cwd=${cwd} ${diagSummary(d)}`;');
+  assert.ok(toks.has('diagSummary'), 'reference inside ${…} was dropped');
+  assert.ok(toks.has('cwd'), 'reference inside ${…} was dropped');
+});
+
+test('stripper survives a nested backtick inside an interpolation', () => {
+  // The shellEsc shape from ipc-handlers.js — a template within a ${…} within a
+  // template. Whole-literal blanking flipped the lexer on the inner backtick and
+  // dropped the rest of the file (that is how the `workspaces` use hid).
+  const toks = tokensOf('const a = `x${shellEsc(`y`)}z`; afterMarker;');
+  assert.ok(toks.has('shellEsc'), 'token inside a nested template was dropped');
+  assert.ok(toks.has('afterMarker'), 'code after a nested template was dropped');
+});
+
+test('moduleScopeNames collects a multi-line declaration list', () => {
+  // `let persistence, templates,\n  …, uiSettings;` — the seven-store shape.
+  const names = moduleScopeNames('let persistence, templates,\n  agentLibrary, uiSettings;');
+  for (const n of ['persistence', 'templates', 'agentLibrary', 'uiSettings']) {
+    assert.ok(names.has(n), `multi-line let list missed ${n}`);
+  }
+});
+
+test('moduleScopeNames collects a multi-line destructure', () => {
+  // The whenReady store reassignment shape `({ a, b,\n c } = initStores(x))`.
+  const names = moduleScopeNames('({ persistence, templates,\n  skillLibrary, uiSettings } = initStores(x));');
+  for (const n of ['persistence', 'templates', 'skillLibrary', 'uiSettings']) {
+    assert.ok(names.has(n), `multi-line destructure missed ${n}`);
+  }
+});
