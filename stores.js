@@ -1,0 +1,785 @@
+// stores.js — the persistence layer as a single factory. initStores() builds
+// the eight on-disk stores and returns them; main.js calls it once in
+// app.whenReady() and destructures the result.
+//
+// DI seam: initStores(userDataPath, { log, registryDir }).
+//   - userDataPath  — app.getPath('userData'); the six JSON stores live here.
+//   - registryDir   — ~/.clodex; the prompt/agent/skill libraries live under it
+//                     (passed in to keep a single REGISTRY_DIR source of truth
+//                     in main.js rather than re-deriving os.homedir() here).
+//   - log           — reserved; the moved bodies keep their verbatim
+//                     console.error on save failure (move-only), so it is
+//                     currently unused.
+//
+// Why a factory: the store file paths are derived INSIDE it from userDataPath,
+// so the stores simply do not exist until whenReady runs — which structurally
+// retires the old PERSIST_FILE-before-whenReady landmine (there is no module-
+// scope *_FILE global left to read too early). createMemoryStore in
+// memory-store.js is the in-repo shape template this mirrors.
+//
+// Gotchas owned:
+//   - The legacy prompts.json -> library/prompts migration is one-shot and runs
+//     during construction (it used to be an explicit whenReady call after
+//     PROMPTS_FILE was assigned); it only touches PROMPTS_FILE + the prompt dir,
+//     so its position relative to the other stores is immaterial.
+//   - Save failures are swallowed (console.error) exactly as before; a torn
+//     write is prevented by fs-util's atomicWriteFileSync, and persistence keeps
+//     an extra validated .bak snapshot.
+
+const fs = require('fs');
+const path = require('path');
+const { ensureDir, atomicWriteFileSync } = require('./fs-util');
+const { parseAgentFrontmatter } = require('./agents-util');
+const { parseSkillFrontmatter } = require('./skills-util');
+const {
+  DEFAULT_WORKSPACE_ID, AGENT_NAME_RE, THEME_KEYS,
+  CLAUDE_TOOLS, DEFAULT_TOOL_DENY_FLOOR,
+} = require('./catalogs');
+
+const PROMPT_KINDS = ['system', 'append'];
+const PROMPT_NAME_RE = /^[a-zA-Z0-9._-]{1,64}$/; // mirrors session/agent name rule
+
+const DEFAULT_UI_SETTINGS = {
+  statusline: {
+    claude: ['model', 'context', 'cost', 'cwd'],
+    claudeCommand: '',
+    codex: ['context-used', 'model-name', 'project-root', 'git-branch', 'five-hour-limit', 'current-dir'],
+  },
+  // ON by default since the proxy became self-contained (vendored copy +
+  // managed venv + autostart): "off" existed to protect users from a manual
+  // setup burden that no longer exists. The Traffic optimization toggle is
+  // the opt-out; missing python3 degrades to unrouted sessions, no breakage.
+  // Users who saved prefs before the flip keep their persisted choice.
+  proxyEnabled: true,
+  // 7800 — wirescope's conventional port, ON PURPOSE (revisited 2026-07-03):
+  // since the managed instance detaches and survives GUI restarts it is a
+  // machine-level service, so OTHER agentic systems on this machine sharing
+  // it is a feature, not contamination. Detect-first adoption still means an
+  // already-running 7800 wins and we never double-spawn.
+  proxyUrl: 'http://127.0.0.1:7800',
+  // wirescope source override: empty = the vendored copy bundled with Clodex;
+  // a power user can point at their own checkout (settings-file-only, no UI).
+  wirescopeDir: '',
+  wirescopePort: 7800,
+  // Cold-resume compaction: when a parked session is resumed (GUI relaunch =
+  // cold by construction), ask wirescope to BAKE its transcript down to the
+  // safe-to-drop set before --resume. The re-cache is unavoidable on a cold
+  // resume, so baking just makes it cheaper + permanently slimmer. OFF by
+  // default — it mutates the on-disk transcript (wirescope backs up + integrity-
+  // gates; clodex fails safe to the original on any error). Needs a live proxy.
+  compactOnResume: false,
+  // Built-in Claude Design MCP: the CLI auto-injects the claude.ai `claude_design`
+  // connector (20 `mcp__claude_design__*` tools, ~4k tok/turn cache carriage) on
+  // every launch for entitled accounts, with no honored global opt-out. The PRIMARY
+  // fix is surgical and lives on the wire: a routed wirescope strips ONLY the design
+  // tools and keeps every real project/user MCP. This setting is just the no-proxy
+  // FALLBACK — `--strict-mcp-config`, which makes the CLI ignore ALL mcp config. That
+  // is a nuclear option: on an unrouted session sitting in a repo with a real
+  // `.mcp.json` it would silently drop those servers too, just to shed claude_design.
+  // So it is OFF by default — we don't impose the all-or-nothing flag on anyone who
+  // might have real MCPs. Turn it on only if you run unrouted clodex agents that use
+  // no MCP and want the ~4k/turn back without a proxy. Claude-only (Codex has no such
+  // connector). When routed through a strip-capable wire the gate ignores this entirely
+  // and lets the wire do the surgical strip regardless.
+  disableClaudeDesignMcp: false,
+  // UI theme key (see THEMES in renderer.js). Canonical copy lives here so the
+  // View > Theme menu can show the right radio; the renderer mirrors it to
+  // localStorage for instant pre-paint application.
+  theme: 'midnight',
+  // Remote access: phone-friendly web UI served on 127.0.0.1 only. OFF by
+  // default — it's a door into every agent session, so the user opens it
+  // deliberately and pairs it with `tailscale serve` (or an SSH tunnel) for
+  // off-machine reach. Port is settings-file-only (no UI), like wirescopePort.
+  remoteEnabled: false,
+  remotePort: 7900,
+  // Peered Clodexes on other machines: [{ id, label, sshHost?, remotePort?,
+  // url? }]. The friendly path is sshHost — Clodex spawns and supervises the
+  // `ssh -N -L` forward itself (remotePort = peer's phone-access port,
+  // settings-file-only like other ports). url is the manual escape hatch
+  // (tailnet, custom tunnel): a loopback endpoint reaching the peer's
+  // server. sshHost wins when both are set.
+  peers: [],
+  // Auto-reattach of peer tabs across app restarts: { [peerId]: [name, ...] }.
+  // Kept OUTSIDE the peers array on purpose — the prefs dialog rebuilds that
+  // array via collectPeers/sanitizePeers and would clobber any extra fields.
+  // Written by the peer:attach / peer:detach handlers, pruned by syncPeerManager.
+  peerAttached: {},
+  // Per-peer session visibility: { [peerId]: [name, ...] }. NO key for a peer =
+  // show all (default, zero behavior change); a key restricts the sidebar to
+  // just those names. Unlike peerAttached an EMPTY array is meaningful here
+  // ("show none") and is kept. Same out-of-band-from-`peers` reasoning as
+  // peerAttached. Written by peer:setVisible, pruned by syncPeerManager.
+  peerVisible: {},
+  // Auto-re-take control of peer tabs across restarts (yours OR the box's via
+  // remote restart/update): { [peerId]: [name, ...] }. Same out-of-band-from-
+  // `peers` reasoning as peerAttached (empty arrays dropped). Written by the
+  // peer:control / peer:detach / peer:forgetControlled handlers, pruned by
+  // syncPeerManager. Controlled implies attached, so a name here is always a
+  // subset of peerAttached.
+  peerControlled: {},
+};
+
+function sanitizePeers(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const p of raw) {
+    if (!p || typeof p.id !== 'string') continue;
+    const url = typeof p.url === 'string' && /^https?:\/\//.test(p.url) ? p.url : null;
+    // ssh host or user@host — same charset ssh_config aliases allow.
+    const sshHost = typeof p.sshHost === 'string' && /^[a-zA-Z0-9._@-]{1,128}$/.test(p.sshHost) ? p.sshHost : null;
+    if (!url && !sshHost) continue;
+    // Optional per-peer deploy folder override (the clone dir on the box). Kept
+    // as the raw operator string (~/… or /abs) — validated/rendered at deploy
+    // time by classifyDeployFolder, not here; a blank/invalid value just falls
+    // back to the script's own $HOME/wb-wrap-ui default. Cap length defensively.
+    const deployFolder = typeof p.deployFolder === 'string' && p.deployFolder.trim()
+      ? p.deployFolder.trim().slice(0, 256) : null;
+    out.push({
+      id: p.id,
+      label: typeof p.label === 'string' && p.label ? p.label : (sshHost || url),
+      url, sshHost,
+      remotePort: Number.isInteger(p.remotePort) ? p.remotePort : 7900,
+      deployFolder,
+    });
+  }
+  return out;
+}
+
+// Shared shape for the per-peer name maps (peerAttached, peerVisible): a plain
+// object of peerId -> array of session names held to the same regex sessions
+// use elsewhere. `keepEmpty` distinguishes the two callers: peerAttached drops
+// empty arrays (an empty attach set is just noise), peerVisible keeps them (an
+// empty array means "show none", which is meaningful). A non-object returns
+// null so the caller can fall back to {}.
+function sanitizePeerNameMap(raw, { keepEmpty }) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  for (const [id, names] of Object.entries(raw)) {
+    if (!Array.isArray(names)) continue;
+    const clean = names.filter((n) => typeof n === 'string' && /^[a-zA-Z0-9._-]{1,64}$/.test(n));
+    if (clean.length || keepEmpty) out[id] = clean;
+  }
+  return out;
+}
+
+// Persisted peer-tab attachments: empty arrays dropped (see keepEmpty above).
+function sanitizePeerAttached(raw) {
+  return sanitizePeerNameMap(raw, { keepEmpty: false });
+}
+
+// Persisted per-peer visibility selection: empty arrays kept ("show none").
+function sanitizePeerVisible(raw) {
+  return sanitizePeerNameMap(raw, { keepEmpty: true });
+}
+
+// Persisted control claims: empty arrays dropped, like peerAttached.
+function sanitizePeerControlled(raw) {
+  return sanitizePeerNameMap(raw, { keepEmpty: false });
+}
+
+function initStores(userDataPath, { log, registryDir } = {}) {
+  // Path locals — derived here so nothing needs app.getPath before whenReady.
+  const PERSIST_FILE = path.join(userDataPath, 'sessions.json');
+  const TEMPLATES_FILE = path.join(userDataPath, 'templates.json');
+  const WORKSPACES_FILE = path.join(userDataPath, 'workspaces.json');
+  const PROMPTS_FILE = path.join(userDataPath, 'prompts.json'); // legacy — migration only
+  const AGENT_DEFAULTS_FILE = path.join(userDataPath, 'agent-defaults.json');
+  const UI_SETTINGS_FILE = path.join(userDataPath, 'ui-settings.json');
+  const PROMPTS_DIR = path.join(registryDir, 'library', 'prompts');
+  const AGENTS_DIR = path.join(registryDir, 'agents');
+  const SKILLS_LIB_DIR = path.join(registryDir, 'skills');
+
+  // ---------------------------------------------------------------------------
+  // Persistence — remember sessions across app restarts
+  // ---------------------------------------------------------------------------
+  const persistence = {
+    _load() {
+      let all;
+      try {
+        all = JSON.parse(fs.readFileSync(PERSIST_FILE, 'utf-8'));
+      } catch {
+        // Primary missing or corrupt — fall back to the last known-good copy
+        // before giving up (catches a bad hand-edit, not just a torn write).
+        try {
+          all = JSON.parse(fs.readFileSync(PERSIST_FILE + '.bak', 'utf-8'));
+          console.error('sessions.json unreadable; recovered from .bak');
+        } catch {
+          return [];
+        }
+      }
+      if (!Array.isArray(all)) return [];
+      // Migrate entries without a workspaceId → assign to default
+      let changed = false;
+      for (const e of all) {
+        if (!e.workspaceId) { e.workspaceId = DEFAULT_WORKSPACE_ID; changed = true; }
+      }
+      if (changed) this._save(all);
+      return all;
+    },
+    _save(entries) {
+      try {
+        // Snapshot the current known-good file to .bak before overwriting, so a
+        // logically-bad-but-valid write (or a hand-edit slip) stays recoverable —
+        // atomicWriteFileSync only protects against torn writes. Validate first
+        // so we never back up garbage.
+        try {
+          const cur = fs.readFileSync(PERSIST_FILE, 'utf-8');
+          JSON.parse(cur);
+          atomicWriteFileSync(PERSIST_FILE + '.bak', cur);
+        } catch {}
+        atomicWriteFileSync(PERSIST_FILE, JSON.stringify(entries, null, 2));
+      } catch (e) {
+        console.error('persistence save failed:', e);
+      }
+    },
+    list() {
+      return this._load();
+    },
+    listForWorkspace(workspaceId) {
+      return this._load().filter(s => s.workspaceId === workspaceId);
+    },
+    upsert(entry) {
+      const all = this._load();
+      const idx = all.findIndex(s => s.name === entry.name);
+      if (idx >= 0) all[idx] = { ...all[idx], ...entry };
+      else all.push(entry);
+      this._save(all);
+    },
+    remove(name) {
+      this._save(this._load().filter(s => s.name !== name));
+    },
+    setSessionId(name, sessionId) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry && entry.sessionId !== sessionId) {
+        entry.sessionId = sessionId;
+        // Ordered history of observed conversation ids (oldest → newest). Each
+        // /clear mints a new id and JsonlWatcher reports it here, so this chain
+        // accumulates every conversation the agent has had — authoritative, no
+        // cwd guessing. Dedup + move-to-end so re-resuming an old id marks it
+        // most-recent. Powers the session picker (session:history).
+        const hist = (Array.isArray(entry.sessionIds) ? entry.sessionIds : []).filter((id) => id !== sessionId);
+        hist.push(sessionId);
+        entry.sessionIds = hist;
+        this._save(all);
+      }
+    },
+    setLabel(name, label) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        entry.label = label;
+        this._save(all);
+      }
+    },
+    setExtraArgs(name, extraArgs) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        entry.extraArgs = extraArgs;
+        this._save(all);
+      }
+    },
+    setProxy(name, proxy) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        entry.proxy = proxy;
+        this._save(all);
+      }
+    },
+    setSystemPrompt(name, body) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        entry.systemPrompt = body || null;
+        this._save(all);
+      }
+    },
+    setPromptRefs(name, systemPromptFile, appendPromptFiles) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        entry.systemPromptFile = systemPromptFile || null;
+        entry.appendPromptFiles = Array.isArray(appendPromptFiles) ? appendPromptFiles : [];
+        this._save(all);
+      }
+    },
+    setAgents(name, agents, denyBuiltins) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        entry.agents = Array.isArray(agents) ? agents : [];
+        entry.denyBuiltins = Array.isArray(denyBuiltins) ? denyBuiltins : [];
+        this._save(all);
+      }
+    },
+    setDisabledTools(name, disabledTools) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        entry.disabledTools = Array.isArray(disabledTools) ? disabledTools : [];
+        this._save(all);
+      }
+    },
+    setDisabledSkills(name, disabledSkills) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        entry.disabledSkills = Array.isArray(disabledSkills) ? disabledSkills : [];
+        this._save(all);
+      }
+    },
+    setInjectSkills(name, injectSkills) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        entry.injectSkills = Array.isArray(injectSkills) ? injectSkills : [];
+        this._save(all);
+      }
+    },
+    // Per-session wirescope strip-aggressiveness LEVEL (a cumulative ladder, not
+    // independent toggles): 0 = off, 1 = strip prior thinking, 2 = + strip
+    // superseded tool results. Each level is a superset of the one below. clodex
+    // is authoritative — the proxy's overrides are in-memory, so the poller
+    // re-asserts the level's wire state on relink (see ProxyPoller._tick).
+    setStripLevel(name, level) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        const lvl = (level === 1 || level === 2) ? level : 0;
+        if (lvl > 0) entry.stripLevel = lvl; else delete entry.stripLevel;
+        delete entry.stripThinking; // migrate off the old boolean field
+        this._save(all);
+      }
+    },
+    // Auto-compact-before-cold is default ON, so only the opt-OUT is stored
+    // (autoCompact:false); enabling deletes the field. Legacy entries without
+    // the field are therefore on — see autoCompactOf.
+    setAutoCompact(name, on) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        if (on === false) entry.autoCompact = false; else delete entry.autoCompact;
+        this._save(all);
+      }
+    },
+    // Boot-digest ledger: conversation ids that have received the memory digest
+    // (via the SessionStart hook at birth, or the append-once path). Durable so
+    // GUI restarts — which --resume the same conversation — never re-deliver.
+    // Capped like a ring: an evicted ancient id would at worst earn a harmless
+    // duplicate digest if that conversation is ever resumed again.
+    markDigested(name, sessionId) {
+      if (!sessionId) return;
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (!entry) return;
+      const d = (Array.isArray(entry.digested) ? entry.digested : []).filter((id) => id !== sessionId);
+      d.push(sessionId);
+      entry.digested = d.slice(-50);
+      this._save(all);
+    },
+    get(name) {
+      return this._load().find(s => s.name === name) || null;
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+  // Templates — saved session configurations (type, cwd, args)
+  // ---------------------------------------------------------------------------
+  const templates = {
+    _load() {
+      try {
+        return JSON.parse(fs.readFileSync(TEMPLATES_FILE, 'utf-8'));
+      } catch {
+        return [];
+      }
+    },
+    _save(entries) {
+      try {
+        atomicWriteFileSync(TEMPLATES_FILE, JSON.stringify(entries, null, 2));
+      } catch (e) {
+        console.error('templates save failed:', e);
+      }
+    },
+    list() {
+      return this._load();
+    },
+    save(template) {
+      // template: { id, name, type, cwd, extraArgs }
+      const all = this._load();
+      const idx = all.findIndex(t => t.id === template.id);
+      if (idx >= 0) all[idx] = template;
+      else all.push(template);
+      this._save(all);
+    },
+    remove(id) {
+      this._save(this._load().filter(t => t.id !== id));
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+  // Workspaces — each window owns one, sessions are scoped to workspaces
+  // ---------------------------------------------------------------------------
+  const workspaces = {
+    _load() {
+      try {
+        const all = JSON.parse(fs.readFileSync(WORKSPACES_FILE, 'utf-8'));
+        return Array.isArray(all) ? all : [];
+      } catch { return []; }
+    },
+    _save(entries) {
+      try {
+        atomicWriteFileSync(WORKSPACES_FILE, JSON.stringify(entries, null, 2));
+      } catch (e) { console.error('workspaces save failed:', e); }
+    },
+    list() {
+      const all = this._load();
+      // Ensure at least one workspace exists
+      if (all.length === 0) {
+        const def = { id: DEFAULT_WORKSPACE_ID, name: 'Workspace', bounds: null };
+        this._save([def]);
+        return [def];
+      }
+      return all;
+    },
+    get(id) { return this._load().find(w => w.id === id) || null; },
+    upsert(ws) {
+      const all = this._load();
+      const idx = all.findIndex(w => w.id === ws.id);
+      if (idx >= 0) all[idx] = { ...all[idx], ...ws };
+      else all.push(ws);
+      this._save(all);
+    },
+    remove(id) {
+      const all = this._load().filter(w => w.id !== id);
+      this._save(all);
+    },
+    setName(id, name) {
+      const all = this._load();
+      const w = all.find(x => x.id === id);
+      if (w) { w.name = name; this._save(all); }
+    },
+    setBounds(id, bounds) {
+      const all = this._load();
+      const w = all.find(x => x.id === id);
+      if (w) { w.bounds = bounds; this._save(all); }
+    },
+    touch(id) {
+      const all = this._load();
+      const w = all.find(x => x.id === id);
+      if (w) { w.lastFocusedAt = Date.now(); this._save(all); }
+    },
+    sortedByRecent() {
+      return this.list().slice().sort((a, b) =>
+        (b.lastFocusedAt || 0) - (a.lastFocusedAt || 0),
+      );
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+  // Prompts library — user-authored prompts as plain .md files under
+  // ~/.clodex/library/prompts/{system,append}/*.md. On-disk (not a JSON blob) so
+  // they're human-inspectable, portable, and — crucially — REFERENCEABLE: a
+  // session points at a prompt by its filename stem, so one shared prompt (e.g.
+  // the clodex syntax) can be reused across many sessions and edited once.
+  //
+  //   kind = subfolder, not frontmatter — so a `system` prompt file can be handed
+  //   to the CLI verbatim via --system-prompt-file with nothing to strip.
+  //     system — REPLACES the CLI's default system prompt (a full base persona)
+  //     append — a composable fragment appended (non-system) on every spawn
+  //
+  // Spawn ordering for appends = filename sort, so prefix a stem (00-, 50-) to
+  // control order; shared/stable appends first keeps the cache prefix aligned
+  // across sessions. The IPC protocol is always prepended ahead of all of them.
+  // ---------------------------------------------------------------------------
+  const promptLibrary = {
+    _dir(kind) { return path.join(PROMPTS_DIR, kind); },
+    _file(kind, stem) { return path.join(this._dir(kind), `${stem}.md`); },
+    // Every *.md across both kinds (or one kind if given). Identity is the
+    // filename stem; save() keys by it so the file and the ref stay in sync.
+    list(kind) {
+      const kinds = kind ? [kind] : PROMPT_KINDS;
+      const out = [];
+      for (const k of kinds) {
+        let files;
+        try { files = fs.readdirSync(this._dir(k)); }
+        catch { continue; }
+        for (const f of files) {
+          if (!f.endsWith('.md')) continue;
+          const stem = f.replace(/\.md$/, '');
+          let body = '';
+          try { body = fs.readFileSync(path.join(this._dir(k), f), 'utf-8'); }
+          catch { continue; }
+          out.push({ name: stem, kind: k, body, file: f });
+        }
+      }
+      return out.sort((a, b) => a.name.localeCompare(b.name));
+    },
+    raw(kind, stem) {
+      try { return fs.readFileSync(this._file(kind, stem), 'utf-8'); }
+      catch { return null; }
+    },
+    save(kind, stem, content) {
+      if (!PROMPT_KINDS.includes(kind)) throw new Error(`invalid prompt kind: ${kind}`);
+      if (!PROMPT_NAME_RE.test(stem)) throw new Error(`invalid prompt name: ${stem}`);
+      ensureDir(this._dir(kind));
+      fs.writeFileSync(this._file(kind, stem), String(content ?? ''), { mode: 0o600 });
+      return this.list();
+    },
+    remove(kind, stem) {
+      try { fs.unlinkSync(this._file(kind, stem)); } catch {}
+      return this.list();
+    },
+  };
+
+  // Slugify a legacy prompt title into a valid filename stem for migration.
+  function slugifyPromptName(s) {
+    const slug = String(s || '').trim().toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+    return slug || `prompt-${Date.now()}`;
+  }
+
+  // One-shot migration: the pre-library prompts.json held {id,title,body} entries,
+  // all append-kind by nature (they were --append-system-prompt material). Write
+  // each out as append/<slug>.md, then rename the JSON aside so this never re-runs.
+  // Non-destructive: never clobbers a file that already exists.
+  function migratePromptsJson() {
+    let entries;
+    try { entries = JSON.parse(fs.readFileSync(PROMPTS_FILE, 'utf-8')); }
+    catch { return; }
+    if (!Array.isArray(entries) || !entries.length) return;
+    ensureDir(promptLibrary._dir('append'));
+    for (const p of entries) {
+      const stem = slugifyPromptName(p.title || p.id);
+      const dest = promptLibrary._file('append', stem);
+      if (fs.existsSync(dest)) continue;
+      try { fs.writeFileSync(dest, String(p.body ?? ''), { mode: 0o600 }); } catch {}
+    }
+    try { fs.renameSync(PROMPTS_FILE, `${PROMPTS_FILE}.migrated`); } catch {}
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-agent defaults — standing preferences keyed by agent NAME that outlive
+  // any single session. Unlike sessions.json (whose entry a kill-from-UI
+  // deletes), this store survives kill/recreate, so a strip level the user picks
+  // in the bottom-bar menu becomes the default every FUTURE session of that name
+  // is seeded with — applied only at (cold) session birth, never re-imposed on a
+  // reload. Shape: { [name]: { strip: 1|2 } }, room to grow other per-agent prefs.
+  // ---------------------------------------------------------------------------
+  const agentDefaults = {
+    _load() {
+      try {
+        const obj = JSON.parse(fs.readFileSync(AGENT_DEFAULTS_FILE, 'utf-8'));
+        return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : {};
+      } catch { return {}; }
+    },
+    _save(map) {
+      try {
+        atomicWriteFileSync(AGENT_DEFAULTS_FILE, JSON.stringify(map, null, 2));
+      } catch (e) { console.error('agent-defaults save failed:', e); }
+    },
+    // Standing strip level for an agent name (0 if never set).
+    getStrip(name) {
+      const e = this._load()[name];
+      return (e && (e.strip === 1 || e.strip === 2)) ? e.strip : 0;
+    },
+    // Record the agent's standing strip level; level 0 clears it (and prunes the
+    // entry when no other prefs remain).
+    setStrip(name, level) {
+      const map = this._load();
+      const lvl = (level === 1 || level === 2) ? level : 0;
+      const e = map[name] || {};
+      if (lvl > 0) e.strip = lvl; else delete e.strip;
+      if (Object.keys(e).length) map[name] = e; else delete map[name];
+      this._save(map);
+    },
+    // Global default tool-deny set that NEW sessions inherit when the create
+    // dialog didn't pass an explicit one. Keyed by "*" (not a legal session name,
+    // so it can't collide with a per-agent entry). A uniform deny set across
+    // sessions yields a byte-identical, lean first cache segment (tools[] sits
+    // before the M1 cache breakpoint), so sessions share one warm tools segment
+    // instead of each cold-writing its own — measured cross-instance + cross-type.
+    //
+    // Tri-state: key ABSENT -> the in-code DEFAULT_TOOL_DENY_FLOOR (shipped
+    // default); key PRESENT with a deny array (incl. EMPTY) -> the user's explicit
+    // choice wins, so "" means "deny nothing" not "fall back to the floor".
+    getDefaultDeny() {
+      const e = this._load()['*'];
+      if (e && Array.isArray(e.deny)) return e.deny.filter((t) => CLAUDE_TOOLS.includes(t));
+      return DEFAULT_TOOL_DENY_FLOOR.slice();
+    },
+    // Persist the global default deny set. An explicit [] is recorded as-is (the
+    // user opting out of the floor), distinct from clearing the key.
+    setDefaultDeny(list) {
+      const map = this._load();
+      const clean = Array.isArray(list)
+        ? [...new Set(list.filter((t) => CLAUDE_TOOLS.includes(t)))]
+        : [];
+      const e = map['*'] || {};
+      e.deny = clean;
+      map['*'] = e;
+      this._save(map);
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+  // Custom subagent library — user-authored agents as markdown-with-frontmatter
+  // files under ~/.clodex/agents/. On-disk (not in a JSON blob) so they're
+  // human-inspectable and portable into a project's .claude/agents or
+  // ~/.claude/agents. At spawn the enabled subset becomes the CLI's inline
+  // --agents flag (see agents-util.js). Claude-only; Codex has no equivalent.
+  // ---------------------------------------------------------------------------
+
+  const agentLibrary = {
+    _file(name) { return path.join(AGENTS_DIR, `${name}.md`); },
+    // Parsed metadata for every *.md in the folder. Identity is the frontmatter
+    // `name` (falling back to the filename); save() keys the file by name so the
+    // two stay in sync and duplicates can't arise by construction.
+    list() {
+      let files;
+      try { files = fs.readdirSync(AGENTS_DIR); }
+      catch { return []; }
+      const out = [];
+      for (const f of files) {
+        if (!f.endsWith('.md')) continue;
+        try {
+          const raw = fs.readFileSync(path.join(AGENTS_DIR, f), 'utf-8');
+          const { meta, body } = parseAgentFrontmatter(raw);
+          // Identity is the filename stem (canonical: raw()/remove() and the
+          // --agents JSON key all use it). Frontmatter `name` stays purely
+          // informational/portable (it matters when a file is copied into a
+          // real .claude/agents dir, but clodex never keys off it).
+          const name = f.replace(/\.md$/, '');
+          out.push({
+            name,
+            description: meta.description || '',
+            model: meta.model || '',
+            tools: meta.tools || '',
+            disallowedTools: meta.disallowedTools || '',
+            file: f, meta, body,
+          });
+        } catch { /* skip unreadable/garbled file */ }
+      }
+      return out.sort((a, b) => a.name.localeCompare(b.name));
+    },
+    raw(name) {
+      try { return fs.readFileSync(this._file(name), 'utf-8'); } catch { return null; }
+    },
+    save(name, content) {
+      if (!AGENT_NAME_RE.test(name)) throw new Error(`invalid agent name: ${name}`);
+      ensureDir(AGENTS_DIR);
+      fs.writeFileSync(this._file(name), String(content ?? ''), { mode: 0o600 });
+      return this.list();
+    },
+    remove(name) {
+      try { fs.unlinkSync(this._file(name)); } catch {}
+      return this.list();
+    },
+  };
+
+  // Skill-injection library — same fs shape as agentLibrary, over
+  // ~/.clodex/skills/*.md. Each file is a SKILL.md (frontmatter name/description
+  // + instruction body); identity is the filename stem (the frontmatter `name`
+  // is normalized to it at scaffold time, see skills-util.skillMd).
+  const skillLibrary = {
+    _file(name) { return path.join(SKILLS_LIB_DIR, `${name}.md`); },
+    list() {
+      let files;
+      try { files = fs.readdirSync(SKILLS_LIB_DIR); }
+      catch { return []; }
+      const out = [];
+      for (const f of files) {
+        if (!f.endsWith('.md')) continue;
+        try {
+          const raw = fs.readFileSync(path.join(SKILLS_LIB_DIR, f), 'utf-8');
+          const { meta } = parseSkillFrontmatter(raw);
+          const name = f.replace(/\.md$/, '');
+          out.push({ name, description: meta.description || '', content: raw, file: f });
+        } catch { /* skip unreadable */ }
+      }
+      return out.sort((a, b) => a.name.localeCompare(b.name));
+    },
+    raw(name) {
+      try { return fs.readFileSync(this._file(name), 'utf-8'); } catch { return null; }
+    },
+    save(name, content) {
+      if (!AGENT_NAME_RE.test(name)) throw new Error(`invalid skill name: ${name}`);
+      ensureDir(SKILLS_LIB_DIR);
+      fs.writeFileSync(this._file(name), String(content ?? ''), { mode: 0o600 });
+      return this.list();
+    },
+    remove(name) {
+      try { fs.unlinkSync(this._file(name)); } catch {}
+      return this.list();
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+  // UI preferences — statusline components per CLI, global
+  // ---------------------------------------------------------------------------
+  const uiSettings = {
+    _load() {
+      try {
+        const raw = JSON.parse(fs.readFileSync(UI_SETTINGS_FILE, 'utf-8'));
+        return {
+          statusline: {
+            claude: Array.isArray(raw?.statusline?.claude) ? raw.statusline.claude : DEFAULT_UI_SETTINGS.statusline.claude,
+            claudeCommand: typeof raw?.statusline?.claudeCommand === 'string' ? raw.statusline.claudeCommand : '',
+            codex: Array.isArray(raw?.statusline?.codex) ? raw.statusline.codex : DEFAULT_UI_SETTINGS.statusline.codex,
+          },
+          proxyEnabled: typeof raw?.proxyEnabled === 'boolean' ? raw.proxyEnabled : DEFAULT_UI_SETTINGS.proxyEnabled,
+          proxyUrl: typeof raw?.proxyUrl === 'string' ? raw.proxyUrl : DEFAULT_UI_SETTINGS.proxyUrl,
+          wirescopeDir: typeof raw?.wirescopeDir === 'string' ? raw.wirescopeDir : DEFAULT_UI_SETTINGS.wirescopeDir,
+          wirescopePort: Number.isInteger(raw?.wirescopePort) ? raw.wirescopePort : DEFAULT_UI_SETTINGS.wirescopePort,
+          compactOnResume: typeof raw?.compactOnResume === 'boolean' ? raw.compactOnResume : DEFAULT_UI_SETTINGS.compactOnResume,
+          disableClaudeDesignMcp: typeof raw?.disableClaudeDesignMcp === 'boolean' ? raw.disableClaudeDesignMcp : DEFAULT_UI_SETTINGS.disableClaudeDesignMcp,
+          theme: THEME_KEYS.includes(raw?.theme) ? raw.theme : DEFAULT_UI_SETTINGS.theme,
+          remoteEnabled: typeof raw?.remoteEnabled === 'boolean' ? raw.remoteEnabled : DEFAULT_UI_SETTINGS.remoteEnabled,
+          remotePort: Number.isInteger(raw?.remotePort) ? raw.remotePort : DEFAULT_UI_SETTINGS.remotePort,
+          peers: sanitizePeers(raw?.peers) ?? DEFAULT_UI_SETTINGS.peers,
+          peerAttached: sanitizePeerAttached(raw?.peerAttached) ?? {},
+          peerVisible: sanitizePeerVisible(raw?.peerVisible) ?? {},
+          peerControlled: sanitizePeerControlled(raw?.peerControlled) ?? {},
+        };
+      } catch { return DEFAULT_UI_SETTINGS; }
+    },
+    get() { return this._load(); },
+    set(partial) {
+      const cur = this._load();
+      const next = {
+        statusline: {
+          claude: partial?.statusline?.claude ?? cur.statusline.claude,
+          claudeCommand: partial?.statusline?.claudeCommand ?? cur.statusline.claudeCommand,
+          codex: partial?.statusline?.codex ?? cur.statusline.codex,
+        },
+        proxyEnabled: partial?.proxyEnabled ?? cur.proxyEnabled,
+        proxyUrl: partial?.proxyUrl ?? cur.proxyUrl,
+        wirescopeDir: partial?.wirescopeDir ?? cur.wirescopeDir,
+        wirescopePort: partial?.wirescopePort ?? cur.wirescopePort,
+        compactOnResume: partial?.compactOnResume ?? cur.compactOnResume,
+        disableClaudeDesignMcp: partial?.disableClaudeDesignMcp ?? cur.disableClaudeDesignMcp,
+        theme: THEME_KEYS.includes(partial?.theme) ? partial.theme : cur.theme,
+        remoteEnabled: partial?.remoteEnabled ?? cur.remoteEnabled,
+        remotePort: Number.isInteger(partial?.remotePort) ? partial.remotePort : cur.remotePort,
+        peers: sanitizePeers(partial?.peers) ?? cur.peers,
+        peerAttached: sanitizePeerAttached(partial?.peerAttached) ?? cur.peerAttached,
+        peerVisible: sanitizePeerVisible(partial?.peerVisible) ?? cur.peerVisible,
+        peerControlled: sanitizePeerControlled(partial?.peerControlled) ?? cur.peerControlled,
+      };
+      try {
+        atomicWriteFileSync(UI_SETTINGS_FILE, JSON.stringify(next, null, 2));
+      } catch (e) { console.error('ui-settings save failed:', e); }
+      return next;
+    },
+  };
+
+  migratePromptsJson(); // one-shot: prompts.json -> library/prompts/append/*.md
+
+  return {
+    persistence, templates, workspaces, promptLibrary,
+    agentDefaults, agentLibrary, skillLibrary, uiSettings,
+  };
+}
+
+module.exports = { initStores };
