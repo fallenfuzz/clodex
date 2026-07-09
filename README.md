@@ -1,165 +1,131 @@
 # Clodex
 
-A visual multi-agent PTY manager for **Cl**aude Code and C**odex** CLIs. Run multiple agent sessions side-by-side in a single Mac app, with built-in inter-agent messaging — agents can DM each other and discover peers.
+Run a fleet of coding agents — **Cl**aude Code and C**odex** sessions on your Mac and on any Linux box you can ssh to — and actually *see* their work: what each agent is doing right now, what it costs, what's in its context window, which files it's touching, and who spawned whom. Every session is a real terminal. Agents message each other, spawn each other (locally or across machines), and manage their own context; you watch and steer from one sidebar.
 
-![Sidebar with agent sessions, terminal viewport on the right](./docs/screenshot.png)
+<img src="./docs/screenshot.png" align="right" width="208" alt="The Clodex sidebar: local agent sessions with live context and cache-warmth badges, a subagent child row with its own cost, and two peered machines contributing remote sessions">
 
-## What it does
+## Feature tour
 
-- **Sidebar with agent sessions** — switch between Claude, Codex, and bash sessions with a click
-- **Embedded xterm.js terminals** — each session is a real PTY with full terminal support
-- **Inter-agent IPC** — agents can write `[agent:dm bob] hello` in their responses to message each other; DMs land in the recipient's stdin as `[agent:from alice] hello`. Sidebar tab pulses amber when a session receives a message.
-- **Self-managing agents** — beyond messaging, agents can compact / clear / reload their own context window, save and recall persistent memories, and spawn new peer sessions — all through `[agent:…]` intents emitted in their normal responses.
-- **Multi-window workspaces** — each window is a workspace with its own session set; restored on relaunch. `[agent:who]` is workspace-scoped; DM is global by agent name.
-- **Live context indicator** — for Claude sessions, sidebar shows a color-coded badge (green/orange/red) with the current context window usage
-- **Prompts library** — author reusable prompts as files (typed *system* or *append*) that sessions reference by name; edit one file and every session that references it picks up the change. Inject into a running session, or attach at spawn — a replacement system prompt and/or ordered append blocks
-- **Templates** — save New Session dialog configs and pick them from a dropdown
-- **Edit args mid-stream** — right-click a session → "Edit Args…" to update its CLI args; choose to apply on next spawn or restart immediately (sessionId is preserved across restart)
-- **Customizable statusline** — via Preferences (⌘,), pick which components show in Claude and Codex statuslines
-- **[wirescope](https://github.com/avirtual/wirescope) integration** — route sessions through a wirescope proxy to get a live telemetry bar (context tokens, cache warmth, turn count, cost) and a one-click "keep warm" cache hold
-- **Persistence** — sessions resume across app restarts via `claude --resume` / `codex resume`
-- **Clodex-to-Clodex peering** — attach to sessions running on another machine's Clodex over an SSH tunnel: view live, take control, mirrored popups, remote restart. Also runs **headless on a Linux server** as a peer node — see [`peering/`](peering/)
-- **Self-contained runtime** — registry, sockets, and message files live under `~/.clodex/`, owned entirely by Clodex
+### The local fleet
+
+The unit of work is a **session**: a real PTY running `claude`, `codex`, or plain `bash`, embedded as an xterm.js terminal. Press ⌘T, name it, point it at a directory, hit Create. Then make nine more.
+
+- **Multi-window workspaces** — each window is a workspace with its own session set (⌘⇧N for a new one). Close a window and its sessions keep running; the app lives in the tray. Only the most-recently-focused workspace opens on startup, IDE-style — the rest are one click away.
+- **Persistence** — quit and relaunch, and every session `--resume`s with its history. Killing a session is an explicit act (X or ⌘W, with confirm); everything short of that comes back. The New Session dialog can also resume an arbitrary session ID, or fork it into a new branch.
+- **Per-session configuration at spawn** — pick a system prompt and append prompts from the library, check exactly which tools the agent gets, attach custom subagent types and skills, set the wire-strip level, add raw CLI args. Most of it is editable later (right-click → Edit Session; apply on next spawn or restart in place, keeping the conversation).
+- **Prompts / Agents / Skills libraries** — reusable files under `~/.clodex/library/`, shared across all windows and editable outside the app. Sessions reference library entries by name, so editing one file updates every session that uses it on its next spawn.
+- **Templates** — save a New Session configuration once, pick it from a dropdown forever.
+- **Live session badges** — color-coded context usage, activity state, needs-attention pulses (incoming DM, a permission dialog waiting for a human), and a touched-files counter with a click-through diff viewer.
+- **Statusline & themes** — Preferences (⌘,) picks which components appear in Claude and Codex statuslines (or a custom Claude statusline command), plus a UI theme (midnight / claude / light).
+- **Operations log** — `~/.clodex/clodex.log` (plain text, rotated) records session lifecycle, state-mutating intents, peer transitions, and every autocompact decision.
+
+### Agents that talk
+
+Sessions aren't isolated terminals — they're peers on a message bus. The protocol is injected as a system prompt at spawn, so you just talk: *"DM bob and ask him to check the failing test"* becomes `[agent:dm bob] …`, and bob receives it in his input as `[agent:from alice] …`. His sidebar tab pulses amber. Bash sessions are deliberately private: real shells, no IPC.
+
+- `[agent:dm target] body` — direct message; `target` can be `name@peer` for an agent on a peered Clodex. Bodies over 500 bytes spill to a file and arrive as a pointer.
+- **Deliveries never mangle what you're typing.** All injections drain through a per-session atomic queue and wait for a pause in your typing; a DM that arrives while a draft is open is *parked* and attached to your next prompt instead. Parked messages survive app restarts.
+- **Cost-aware delivery** — a DM to a long-idle, cache-cold Claude peer parks rather than re-billing its whole context; the sender gets a verdict plus a one-shot `[agent:resend <id>]` handle to escalate, and can mark a message `urgent` up front.
+- `[agent:who]` — list online peers with reachability (working / idle + cache warmth / blocked on a permission dialog). Peered agents show as `name@peer`.
+- `[agent:context compact]` / `[agent:context clear]` — the agent tends its own context window instead of stalling at the ceiling; compact takes an optional handoff injected as its first turn afterward so it keeps working. Past 150k tokens, Claude sessions get automatic high-context reminders.
+- `[agent:memory …]` — per-agent persistent memory (`remember` with optional scope and `pinned=true`, `list`, `recall`, `pin`/`unpin`/`forget`). Saved units reach every new conversation automatically: pinned units in full, the rest as a recallable index.
+- `[agent:spawn name:X cwd:Y]` — mint a new persistent peer session; it joins the spawner's workspace and is immediately DM-able. Agents can grow the fleet themselves.
+- `[agent:file view PATH]` / `[agent:file open PATH]` — show a file (contents + git diff) on the operator's screen, or open it with the default app.
+
+All traffic is visible in the IPC log drawer (⌘⇧B).
+
+### Peering: other machines, same sidebar
+
+Add a peer (Window → Peers → Manage Peered Clodexes…; `user@host` is enough) and Clodex opens and babysits the SSH tunnel itself. The box's sessions appear as remote tabs under their host's header — and a tab is not a viewer, it's a cockpit:
+
+- **Attach live, type to take control.** Remote tabs stream in real time; on a read-only tab, just start typing and control is acquired automatically, your buffered keystrokes flushing in order. Control survives restarts on both ends.
+- **Full remote lifecycle** — create sessions on the box (directory created if absent), restart them (`--resume` or fresh), kill them, restart the box's whole Clodex — all from the header and row menus, no ssh terminal.
+- **Everything mirrors** — telemetry status bar, popovers, file views, resize behavior. What the box's operator sees, you see.
+- **Peer identity at a glance** — each peer header shows version drift severity-tinted (patch behind → yellow, major → red), with an ⓘ popover listing the box's version, platform, and capabilities. One click on **Update Clodex on \<box\>** re-runs the install over ssh and restarts the peer, which resumes its sessions and reconnects.
+- **Test & Set Up wizard** — point it at a bare Linux box and it probes what's there, then installs Clodex from scratch (deps, clone, build, sandbox fix, systemd unit) as a live ✓/✗ step list. When it needs root it can't get, it shows the exact commands and waits — it never prompts, never hangs. If a deploy genuinely fails, it offers to open a local Claude session briefed with the log to go fix the box for you.
+- **Tunnel details** — an SSH destination (`user@host`, IP, ssh alias) gets a managed `ssh -L` tunnel; an `http://…` URL covers tailnets and custom setups. Key-based SSH only; the peer's server binds `127.0.0.1` by design, so the tunnel is the trust boundary.
+
+### DM federation
+
+Agents on peered Clodexes message each other directly: `[agent:dm name@peer]` crosses the wire, remote agents show up in `[agent:who]`, and reply trailers teach the return address, so cross-machine round-trips just work. The tunnel only dials one way, so replies from the box queue in a durable per-origin outbox with a doorbell event for near-instant delivery while connected — nothing is lost across restarts or dropped streams. Wire DMs honor the same cost-gate/park semantics as local ones, and peers that predate federation bounce cleanly instead of going silent.
+
+### Wire telemetry (wirescope)
+
+Route a session's API traffic through a [wirescope](https://github.com/avirtual/wirescope) proxy — a vendored copy ships inside Clodex, and Preferences can spawn and babysit it for you, or point at your own — and the app reads the truth off the wire:
+
+- **Status bar under the terminal** — context tokens and percentage, turn count, model, wire-accurate cost estimate, and a link to the session's page on the proxy.
+- **Delegation is visible.** When an agent spawns subagents, they appear as named child rows under the parent in the sidebar, each with its own turn count and cost — you can see who spawned whom and what every level of the tree is doing and spending, live.
+- **Cache warmth** — a live countdown to prompt-cache expiry on every sidebar tab (visible even while a session is unfocused, which no statusline script can do), plus **keep warm**: arm a 1h/4h/8h hold and the proxy keeps your prompt cache hot while you're away.
+- **Cache-bust inspector** — a bar chip counts genuine cache busts; click through for per-turn forensics. A cost-over-time popover breaks down spend.
+- **Wire stripping** — optionally strip prior-turn thinking (level 1) or also edit-acks and failed-call stubs (level 2) from the wire to reclaim cost. Non-destructive: the local transcript is untouched.
+- **Transcript bake on resume** (opt-in) — bake the on-disk transcript down to the same set the wire already strips, so resumed sessions replay a permanently slimmer prefix without busting a warm cache.
+- **Autocompact** — a heavy idle session compacts itself in the last stretch of cache warmth instead of going cold at full size.
+
+Sessions route via `ANTHROPIC_BASE_URL` (Claude) / `openai_base_url` (Codex); set a default in Preferences or override per session. The telemetry bar only appears for routed sessions.
+
+### Phone access
+
+Preferences → Phone access serves a chat-style web view of your agent sessions (transcript + send box) on `127.0.0.1` only. Reach it from your phone via a tailnet (`tailscale serve`) or an SSH tunnel — Clodex never opens a network-visible port itself. The same local server is what peers attach to.
+
+### Headless peer nodes
+
+Clodex runs headless on a Linux server (Electron under Xvfb, kept alive by a systemd user unit) as a stock peer node — no code changes. Point the deploy wizard at the box, or follow the manual playbook in [`peering/`](peering/). Proven on Ubuntu 24.04. A Mac at the desk, agents grinding on servers overnight.
 
 ## Install
 
-Download the latest DMG from [Releases](https://github.com/avirtual/clodex/releases):
+Download `Clodex-x.y.z-arm64.dmg` from [Releases](https://github.com/avirtual/clodex/releases) and drag **Clodex** to Applications. Apple Silicon only — Intel Macs build from source (below).
 
-- **Apple Silicon (M1/M2/M3/M4)**: `Clodex-x.y.z-arm64.dmg`
-- **Intel Macs**: `Clodex-x.y.z.dmg`
-
-Open the DMG, drag **Clodex** to your Applications folder.
-
-### First launch
-
-Clodex is **ad-hoc signed** but not notarized by Apple (no $99/year developer cert). On first launch:
-
-1. Right-click `Clodex.app` in Applications → **Open**
-2. Click **Open** in the warning dialog
-3. From now on, double-click works normally
-
-If you see *"Clodex is damaged and can't be opened"*, run:
-
-```bash
-xattr -cr /Applications/Clodex.app
-```
-
-This removes macOS's quarantine flag, which is added to anything downloaded from the internet.
+First launch: right-click `Clodex.app` → **Open**. If macOS says the app is damaged, run `xattr -cr /Applications/Clodex.app`.
 
 ## Requirements
 
-- Apple Silicon Mac (M1 or later), macOS 12 (Monterey) or later (Intel: build from source, also macOS 12+)
+- Apple Silicon Mac, macOS 12 or later (Intel / Linux: build from source)
 - [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) (`claude` in PATH) — for Claude sessions
 - [Codex CLI](https://github.com/openai/codex) (`codex` in PATH) — for Codex sessions
 
 ## Usage
 
-1. Click **+** in the sidebar (or press ⌘T)
-2. Choose a name, type (claude/codex/bash), and working directory
-3. Optionally pick a **System Prompt** from your library to seed the session
-4. Hit **Create** — terminal appears, agent starts
-5. Click sidebar items (or press ⌘1…9) to switch between them
-
-### Inter-agent messaging
-
-Once two or more agent sessions are running, they can message each other. Just talk to Claude/Codex normally — the protocol is injected as a system prompt at spawn time. Examples:
-
-- *"Who is online?"* → agent writes `[agent:who]` → gets `[agent:peers] alice, bob`
-- *"DM bob and ask him to check the failing test"* → agent writes `[agent:dm bob] please check the failing test` → bob receives it as `[agent:from alice] please check the failing test`
-
-Bash sessions are private terminals — they don't participate in IPC.
-
-**Scoping:** `[agent:who]` is scoped to the sender's workspace — it only sees agents in the same window. `[agent:dm <name>]` is global: if an agent by that name exists in any workspace, it'll receive the DM.
-
-### Self-management intents
-
-Agents can also act on their own session — useful for long-running, unattended work where there's no operator to drive the CLI:
-
-- **Context** — `[agent:context compact]` (compact in place; optional trailing text is injected as the agent's first turn afterward so it keeps working instead of stalling), `[agent:context clear]` (drop history, keep the session), `[agent:context reload] <handoff>` (cold-restart the session, adopting any edited config; the handoff body is required and becomes turn one for the fresh instance).
-- **Memory** — `[agent:memory remember] <text>` saves a unit that persists across sessions (optional leading `scope=<tag>`), `[agent:memory list]` enumerates them, `[agent:memory recall] <id|query>` surfaces one back into the agent's input. Stored per-agent under `~/.clodex/library/memory/`.
-- **Spawn** — `[agent:spawn name:X cwd:Y]` mints a new persistent peer session named `X` rooted at `Y` (creating the directory if absent); it joins the spawner's workspace and is immediately DM-able.
-
-### Prompts library
-
-Click the 📝 icon in the sidebar header to open the library. Prompts are stored as files under `~/.clodex/library/prompts/`, typed by subfolder:
-
-- **system** prompts *replace* the CLI's default system prompt
-- **append** prompts are *added* to it (a session can reference several, applied in filename order)
-
-Sessions reference prompts by name rather than copying them — edit a file once and every session that references it picks up the change on its next spawn. You can:
-
-- **Inject** a prompt into the active session (types it into the PTY like you pasted it)
-- **Attach** at launch — the New Session and Edit Session dialogs have a "System Prompt" picker (replace) and an "Append prompts" checklist. Claude gets `--system-prompt-file` + `--append-system-prompt-file`; Codex folds them into `model_instructions_file`. The inter-agent IPC protocol is always prepended to the append blob, so messaging survives even a replaced system prompt.
-
-### Workspaces
-
-`⌘⇧N` opens a new workspace window. Each workspace has its own sidebar of sessions. Close a window and the sessions keep running in the background; reopen it from the tray or the Window menu. Only the most-recently-focused workspace opens on startup (IDE-style). "Close Workspace Permanently" from the Window menu kills its sessions and removes the record.
-
-### Preferences
-
-`⌘,` opens the Preferences dialog. It controls the statusline and the default API proxy.
-
-- **Claude statusline**: pick any of model name, context % (real-time), session cost, working directory, git branch. Session name (`[clodex:NAME]`) is always shown.
-- **Codex statusline**: pick any native components Codex supports (context-used, model-name, project-root, git-branch, five-hour-limit, current-dir, context-remaining, model-with-reasoning).
-- **API proxy**: a default proxy base URL (on/off) that new sessions inherit. Per-session overrides live in the New Session / Edit Session dialog.
-
-Running Claude sessions update live. Codex sessions pick up changes on next spawn.
-
-### wirescope integration
-
-Clodex can route a session's API traffic through a local proxy by pointing the CLI's base URL at it. Set a default in Preferences (proxy URL + on/off), or override per session in the New Session / Edit Session dialog (**Default** / **Off** / **Custom** URL). Claude sessions get `ANTHROPIC_BASE_URL=<proxy>/agent/<name>/anthropic`; Codex gets `-c openai_base_url=<proxy>/agent/<name>/openai/v1`.
-
-When that proxy is [**wirescope**](https://github.com/avirtual/wirescope), Clodex pulls live per-session telemetry off the wire and shows it in a status bar under the terminal:
-
-- **Context usage** — tokens used / window size and percentage (e.g. `ctx 113k/1M (11%)`), from the CLI statusline; falls back to message count for Codex
-- **Turn count** and **model**
-- **Cache warmth** — a live countdown to prompt-cache expiry, shown per sidebar tab even while a session is unfocused (the statusline can't do this — its script only runs while you interact)
-- **Cost** — a wire-accurate estimate (`px est.`)
-- **🔍 wirescope** — a link to the session's page on the proxy
-- **keep warm** — arm a cache hold (`1h` / `4h` / `8h`) so the proxy pings periodically to keep the prompt cache warm while you're away; `✕` disarms
-
-Telemetry is pulled (one `/_status` poll per proxy every few seconds), not pushed, and the bar only appears for sessions actually routed through a wirescope proxy. See the [wirescope repo](https://github.com/avirtual/wirescope) for the proxy itself.
+1. Press ⌘T, pick a name, type (claude / codex / bash), and working directory — optionally a system prompt, append prompts, tools, agents, skills.
+2. Hit **Create** — the terminal appears and the agent starts.
+3. Add more sessions and switch with ⌘1…9. Once two or more agents are running, ask one to DM another — the messaging protocol is already in their system prompt.
 
 ### Keyboard shortcuts
 
-- `⌘T` new session
-- `⌘⇧N` new workspace window
-- `⌘,` Preferences
-- `⌘W` close/kill active session (with confirm) or close dialog
-- `⌘1` … `⌘9` switch session by index
-- `⌘⇧]` / `⌘⇧[` next / previous session
-- `⌘F` terminal search
+| Shortcut | Action |
+|---|---|
+| `⌘T` | New session |
+| `⌘⇧N` | New workspace window |
+| `⌘,` | Preferences |
+| `⌘W` | Kill active session (with confirm) / close dialog / hide peer tab |
+| `⌘1` … `⌘9` | Switch session by index |
+| `⌘⇧]` / `⌘⇧[` | Next / previous session |
+| `⌘F` | Find in terminal |
+| `⌘⇧B` | IPC traffic log |
+| `⌘⇧A` | New agent type |
+| `⌘⇧S` | New skill |
+
+## How it works
+
+Each session is a node-pty subprocess running `claude`, `codex`, or your shell. At spawn, Clodex registers the agent on a Unix socket under `~/.clodex/`, installs a SessionStart hook that symlinks the agent's transcript to `~/.clodex/{name}.jsonl`, and injects the IPC protocol as a system prompt (`--append-system-prompt-file` for Claude, folded into `model_instructions_file` for Codex — always prepended, so messaging survives a replaced system prompt).
+
+A watcher tails the transcript, extracts assistant text, and scans it for `[agent:…]` intents; matches route to the target session's PTY stdin through the atomic inject queue. Peering rides a local HTTP/SSE server (the same one that serves phone access) reached over an SSH tunnel Clodex manages.
+
+Persistent state lives in `~/Library/Application Support/Clodex/` (sessions, workspaces, templates, UI settings, peers) and `~/.clodex/library/` (prompts, agents, skills, memory — plain files, editable outside the app).
+
+Clodex is a standalone Node re-implementation of the [wb-wrap](https://github.com/bogdan/wb-wrap) proof-of-concept, not a wrapper around it.
 
 ## Building from source
 
 ```bash
 git clone https://github.com/avirtual/clodex
 cd clodex
-npm install            # postinstall also renames dev Electron.app to Clodex
+npm install            # postinstall renames dev Electron.app to Clodex
+npx electron-rebuild   # rebuild node-pty against Electron's ABI
 npm start              # dev mode
-npm run dist:mac       # build .dmg + .zip for both archs
+npm run dist:mac       # arm64 DMG
 ```
 
-## How it works
-
-Each agent session is a node-pty subprocess running `claude` or `codex`. Clodex does three things at spawn:
-
-1. **Registers on `~/.clodex/{name}.sock`** so messages can be delivered across Clodex windows.
-2. **Installs a SessionStart hook** that creates a symlink (`~/.clodex/{name}.jsonl`) pointing at the agent's transcript file.
-3. **Injects the IPC protocol as a system prompt** — `--append-system-prompt-file` for Claude, `-c model_instructions_file=…` for Codex — so the agent knows the `[agent:…]` intents it can emit.
-
-A watcher tails the JSONL (seeking to EOF on first open so past turns don't re-fire), extracts assistant text, and scans it for `[agent:…]` intents. Matching intents get routed to the target session's PTY stdin. Messages larger than 500 bytes spill to `~/.clodex/messages/` and are delivered as a pointer for the recipient to read via its file-access tool.
-
-Persistent data lives under `~/Library/Application Support/Clodex/`:
-- `sessions.json` — one entry per session with name, type, cwd, extraArgs, sessionId (for resume), workspaceId, label, and prompt references (`systemPromptFile` / `appendPromptFiles`)
-- `workspaces.json` — id, name, bounds, `lastFocusedAt`
-- `agent-defaults.json` — per-agent-name defaults that outlive a kill (e.g. strip level)
-- `templates.json` — saved new-session dialog configs
-- `ui-settings.json` — statusline component choices
-
-Prompt and memory files live under `~/.clodex/library/` (`prompts/{system,append}/*.md` and `memory/<agent>/*.md`), so they're shared across windows and editable outside the app.
-
-Clodex is derived from the [wb-wrap project](https://github.com/bogdan/wb-wrap), a proof-of-concept CLI version of the same idea. As of v0.6.6 they are independent: Clodex owns its runtime dir (`~/.clodex/`) and no longer shares the `/tmp/wb-wrap/` namespace with wb-wrap sessions.
+For headless Linux builds, see [`peering/`](peering/).
 
 ## License
 
