@@ -71,20 +71,20 @@ function createCliHooks({ REGISTRY_DIR, memoryStore, getUiSettings }) {
     // Unknown/missing source falls to name-only: fails toward a missed digest
     // (the append-once ledger path rescues), never a duplicated one.
     const script = `#!/bin/bash
-  set -euo pipefail
-  INPUT="$(cat)"
-  TPATH="$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('transcript_path',''))" 2>/dev/null || true)"
-  [ -z "$TPATH" ] && exit 0
-  TMPLINK="${linkPath}.tmp.$$"
-  ln -sf "$TPATH" "$TMPLINK"
-  mv -f "$TMPLINK" "${linkPath}"
-  SRC="$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source',''))" 2>/dev/null || true)"
-  if [ "$SRC" = "startup" ] || [ "$SRC" = "clear" ]; then
-    cat "${digestPath}"
-  else
-    cat "${outputPath}"
-  fi
-  `;
+set -euo pipefail
+INPUT="$(cat)"
+TPATH="$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('transcript_path',''))" 2>/dev/null || true)"
+[ -z "$TPATH" ] && exit 0
+TMPLINK="${linkPath}.tmp.$$"
+ln -sf "$TPATH" "$TMPLINK"
+mv -f "$TMPLINK" "${linkPath}"
+SRC="$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source',''))" 2>/dev/null || true)"
+if [ "$SRC" = "startup" ] || [ "$SRC" = "clear" ]; then
+  cat "${digestPath}"
+else
+  cat "${outputPath}"
+fi
+`;
     fs.writeFileSync(scriptPath, script, { mode: 0o700 });
 
     fs.writeFileSync(statusPath, renderClaudeStatusScript(name, !!proxyBase, getUiSettings(), REGISTRY_DIR), { mode: 0o700 });
@@ -98,9 +98,9 @@ function createCliHooks({ REGISTRY_DIR, memoryStore, getUiSettings }) {
     const attnScriptPath = path.join(REGISTRY_DIR, `${name}-attn.sh`);
     fs.writeFileSync(attnPath, '');
     fs.writeFileSync(attnScriptPath, `#!/bin/bash
-  IN="$(cat)"
-  printf '%s\\n' "$IN" >> "${attnPath}"
-  `, { mode: 0o700 });
+IN="$(cat)"
+printf '%s\\n' "$IN" >> "${attnPath}"
+`, { mode: 0o700 });
 
     // Deferred memory-mutation acks (_memoryAck): drain {name}-acks into the
     // next turn's context via UserPromptSubmit additionalContext. Read+truncate
@@ -111,17 +111,17 @@ function createCliHooks({ REGISTRY_DIR, memoryStore, getUiSettings }) {
     const ackPath = path.join(REGISTRY_DIR, `${name}-acks`);
     const ackScriptPath = path.join(REGISTRY_DIR, `${name}-acks.sh`);
     fs.writeFileSync(ackScriptPath, `#!/bin/bash
-  [ -s "${ackPath}" ] || exit 0
-  python3 - "${ackPath}" <<'PYEOF'
-  import json, sys
-  with open(sys.argv[1], 'r+') as f:
-      body = f.read().strip()
-      f.seek(0); f.truncate()
-  if body:
-      print(json.dumps({"hookSpecificOutput": {
-          "hookEventName": "UserPromptSubmit", "additionalContext": body}}))
-  PYEOF
-  `, { mode: 0o700 });
+[ -s "${ackPath}" ] || exit 0
+python3 - "${ackPath}" <<'PYEOF'
+import json, sys
+with open(sys.argv[1], 'r+') as f:
+    body = f.read().strip()
+    f.seek(0); f.truncate()
+if body:
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit", "additionalContext": body}}))
+PYEOF
+`, { mode: 0o700 });
 
     // Layer-3 delivery parking drain (see pending-store.js). Deliveries parked
     // while the operator was composing land here as UserPromptSubmit
@@ -134,31 +134,31 @@ function createCliHooks({ REGISTRY_DIR, memoryStore, getUiSettings }) {
     const pendingDir = path.join(REGISTRY_DIR, 'pending', name);
     const pendingScriptPath = path.join(REGISTRY_DIR, `${name}-pending.sh`);
     fs.writeFileSync(pendingScriptPath, `#!/bin/bash
-  [ -d "${pendingDir}" ] || exit 0
-  python3 - "${pendingDir}" <<'PYEOF'
-  import json, os, sys, glob, shutil
-  d = sys.argv[1]
-  claim = d + '.draining.hook.' + str(os.getpid())
-  try:
-      os.rename(d, claim)          # atomic claim; ENOENT => nothing to drain / lost the race
-  except OSError:
-      sys.exit(0)
-  texts = []
-  for fp in sorted(glob.glob(os.path.join(claim, '*.json'))):
-      try:
-          with open(fp) as f:
-              obj = json.load(f)
-          if isinstance(obj.get('text'), str):
-              texts.append(obj['text'])
-      except Exception:
-          pass                      # skip a corrupt entry, never abort the drain
-  shutil.rmtree(claim, ignore_errors=True)
-  if texts:
-      print(json.dumps({"hookSpecificOutput": {
-          "hookEventName": "UserPromptSubmit",
-          "additionalContext": "\\n\\n".join(texts)}}))
-  PYEOF
-  `, { mode: 0o700 });
+[ -d "${pendingDir}" ] || exit 0
+python3 - "${pendingDir}" <<'PYEOF'
+import json, os, sys, glob, shutil
+d = sys.argv[1]
+claim = d + '.draining.hook.' + str(os.getpid())
+try:
+    os.rename(d, claim)          # atomic claim; ENOENT => nothing to drain / lost the race
+except OSError:
+    sys.exit(0)
+texts = []
+for fp in sorted(glob.glob(os.path.join(claim, '*.json'))):
+    try:
+        with open(fp) as f:
+            obj = json.load(f)
+        if isinstance(obj.get('text'), str):
+            texts.append(obj['text'])
+    except Exception:
+        pass                      # skip a corrupt entry, never abort the drain
+shutil.rmtree(claim, ignore_errors=True)
+if texts:
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": "\\n\\n".join(texts)}}))
+PYEOF
+`, { mode: 0o700 });
 
     // High-context reminder drain (see ctx-reminder.js). main.js writes a
     // {name}-ctxwarn file (the reminder text) while the session's absolute token
@@ -169,16 +169,16 @@ function createCliHooks({ REGISTRY_DIR, memoryStore, getUiSettings }) {
     const ctxwarnPath = path.join(REGISTRY_DIR, `${name}-ctxwarn`);
     const ctxwarnScriptPath = path.join(REGISTRY_DIR, `${name}-ctxwarn.sh`);
     fs.writeFileSync(ctxwarnScriptPath, `#!/bin/bash
-  [ -s "${ctxwarnPath}" ] || exit 0
-  python3 - "${ctxwarnPath}" <<'PYEOF'
-  import json, sys
-  with open(sys.argv[1]) as f:
-      body = f.read().strip()
-  if body:
-      print(json.dumps({"hookSpecificOutput": {
-          "hookEventName": "UserPromptSubmit", "additionalContext": body}}))
-  PYEOF
-  `, { mode: 0o700 });
+[ -s "${ctxwarnPath}" ] || exit 0
+python3 - "${ctxwarnPath}" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    body = f.read().strip()
+if body:
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit", "additionalContext": body}}))
+PYEOF
+`, { mode: 0o700 });
 
     // Settings JSON
     const settings = {
@@ -268,19 +268,19 @@ function createCliHooks({ REGISTRY_DIR, memoryStore, getUiSettings }) {
     // Generic hook script: repoint the transcript symlink, then emit the
     // name-only additionalContext (per-name output file, routed by WB_WRAP_NAME).
     const script = `#!/bin/bash
-  set -euo pipefail
-  NAME="\${WB_WRAP_NAME:-}"
-  [ -z "$NAME" ] && exit 0
-  INPUT="$(cat)"
-  TPATH="$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('transcript_path',''))" 2>/dev/null || true)"
-  [ -z "$TPATH" ] && exit 0
-  LINK="${REGISTRY_DIR}/\${NAME}.jsonl"
-  TMPLINK="\${LINK}.tmp.$$"
-  ln -sf "$TPATH" "$TMPLINK"
-  mv -f "$TMPLINK" "$LINK"
-  OUTPUT="${REGISTRY_DIR}/\${NAME}-hook-output.json"
-  [ -f "$OUTPUT" ] && cat "$OUTPUT" || exit 0
-  `;
+set -euo pipefail
+NAME="\${WB_WRAP_NAME:-}"
+[ -z "$NAME" ] && exit 0
+INPUT="$(cat)"
+TPATH="$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('transcript_path',''))" 2>/dev/null || true)"
+[ -z "$TPATH" ] && exit 0
+LINK="${REGISTRY_DIR}/\${NAME}.jsonl"
+TMPLINK="\${LINK}.tmp.$$"
+ln -sf "$TPATH" "$TMPLINK"
+mv -f "$TMPLINK" "$LINK"
+OUTPUT="${REGISTRY_DIR}/\${NAME}-hook-output.json"
+[ -f "$OUTPUT" ] && cat "$OUTPUT" || exit 0
+`;
     fs.writeFileSync(scriptPath, script, { mode: 0o700 });
 
     // Write .codex/hooks.json in project dir
