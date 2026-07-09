@@ -47,6 +47,33 @@ const SCANNED_MODULES = [
   'fs-util.js',
 ];
 
+// The same guard for renderer.js extractions — these modules were carved out of
+// renderer/renderer.js, so they leak against ITS module scope, not main.js's.
+// findLeaks is parameterized by scope file; this list is scanned against
+// renderer/renderer.js. Populated retroactively with every R1/R2 island (the M5
+// review proved this bug class ships green — renderer had no guard at all until
+// R3) plus every new R3 popover module.
+const RENDERER_SCOPE = 'renderer/renderer.js';
+const RENDERER_SCANNED_MODULES = [
+  'renderer/lib/constants.js',
+  'renderer/lib/format.js',
+  'renderer/lib/render-html.js',
+  'renderer/lib/checklists.js',
+  'renderer/ipc-log.js',
+  'renderer/term-search.js',
+  'renderer/banners.js',
+  'renderer/themes.js',
+  'renderer/library-drawers.js',
+  'renderer/subagent-popover.js',
+  'renderer/popovers/report-panel.js',
+  'renderer/popovers/cost-popover.js',
+  'renderer/popovers/bust-popover.js',
+  'renderer/popovers/files-popover.js',
+  'renderer/popovers/checklist-popovers.js',
+  'renderer/popovers/context-popover.js',
+  'renderer/popovers/session-menus.js',
+];
+
 // Justified survivors of imperfect stripping. Format: module -> Set of names.
 const WHITELIST = {};
 
@@ -96,9 +123,21 @@ function ownDefinitions(rawSrc) {
   // Function/method parameters, including destructured factory deps objects —
   // matches `function f(a, { b, c } = {})` across lines, method shorthand, and
   // arrows with parenthesized params. Over-collection here only weakens
-  // detection for same-named locals; it cannot create false alarms.
-  for (const m of src.matchAll(/(?:function\s*\w*|\w+)\s*\(([^()]*)\)\s*(?:\{|=>)/gs)) {
-    for (const p of m[1].split(',')) {
+  // detection for same-named locals; it cannot create false alarms — BUT a
+  // control-flow head like `if (name === activeSession) {` also matches
+  // `word ( … ) {`, and absorbing its condition into own-defs silently HID a
+  // real missing injection (files-popover.js needed activeSession; the scan
+  // stayed green). So the leading token is captured and control keywords are
+  // excluded — a `\w+(` head that is if/for/while/switch/catch/return/do/…/an
+  // operator keyword is a statement, not a call/definition, and its parens hold
+  // an expression, never a parameter list. `function(` (anonymous) still counts.
+  const CONTROL_KW = new Set([
+    'if', 'for', 'while', 'switch', 'catch', 'return', 'do', 'else',
+    'typeof', 'await', 'new', 'in', 'of', 'instanceof', 'void', 'delete', 'yield',
+  ]);
+  for (const m of src.matchAll(/(?:\bfunction\s*\w*|(\w+))\s*\(([^()]*)\)\s*(?:\{|=>)/gs)) {
+    if (m[1] && CONTROL_KW.has(m[1])) continue;
+    for (const p of m[2].split(',')) {
       const cleaned = p.replace(/[{}[\]]/g, ' ');
       for (const word of cleaned.split(/[\s=:,]+/)) {
         if (/^[a-zA-Z_$][\w$]*$/.test(word)) defs.add(word);
@@ -175,14 +214,14 @@ function stripCommentsStringsAndKeys(src) {
     .replace(/([{,]\s*)\w+\s*:/g, '$1');
 }
 
-function findLeaks(moduleFile) {
-  const mainSrc = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8');
+function findLeaks(moduleFile, scopeFile = 'main.js') {
+  const scopeSrc = fs.readFileSync(path.join(ROOT, scopeFile), 'utf8');
   const modSrc = fs.readFileSync(path.join(ROOT, moduleFile), 'utf8');
-  const mainNames = moduleScopeNames(mainSrc);
+  const scopeNames = moduleScopeNames(scopeSrc);
   const defs = ownDefinitions(modSrc);
   const wl = WHITELIST[moduleFile] || new Set();
   const used = new Set(stripCommentsStringsAndKeys(modSrc).match(/\b[a-zA-Z_$][\w$]*\b/g) || []);
-  return [...used].filter((n) => mainNames.has(n) && !defs.has(n) && !wl.has(n)).sort();
+  return [...used].filter((n) => scopeNames.has(n) && !defs.has(n) && !wl.has(n)).sort();
 }
 
 for (const mod of SCANNED_MODULES) {
@@ -191,6 +230,16 @@ for (const mod of SCANNED_MODULES) {
     assert.deepStrictEqual(
       leaks, [],
       `free identifiers leaked from main.js scope (add to deps + destructure): ${leaks.join(', ')}`,
+    );
+  });
+}
+
+for (const mod of RENDERER_SCANNED_MODULES) {
+  test(`${mod} references no renderer.js-only identifiers`, () => {
+    const leaks = findLeaks(mod, RENDERER_SCOPE);
+    assert.deepStrictEqual(
+      leaks, [],
+      `free identifiers leaked from renderer.js scope (add to init params + destructure): ${leaks.join(', ')}`,
     );
   });
 }
@@ -231,5 +280,20 @@ test('moduleScopeNames collects a multi-line destructure', () => {
   const names = moduleScopeNames('({ persistence, templates,\n  skillLibrary, uiSettings } = initStores(x));');
   for (const n of ['persistence', 'templates', 'skillLibrary', 'uiSettings']) {
     assert.ok(names.has(n), `multi-line destructure missed ${n}`);
+  }
+});
+
+test('ownDefinitions does not absorb a control-flow condition as a parameter', () => {
+  // `if (name === activeSession) {` matches the `word ( … ) {` param shape, so the
+  // pre-hardening matcher pulled activeSession into own-defs and silently HID the
+  // missing injection (files-popover.js's R3 escape). A control keyword before
+  // `(` is a statement, not a definition — its condition holds no parameters.
+  const defs = ownDefinitions('function f(a) {\n  if (a === leakedName) {\n    return;\n  }\n}');
+  assert.ok(defs.has('a'), 'real parameter a was dropped');
+  assert.ok(!defs.has('leakedName'), 'if-condition token was absorbed as a param');
+  // The other control heads share the shape — none may absorb their condition.
+  for (const kw of ['for', 'while', 'switch', 'catch', 'return']) {
+    const d = ownDefinitions(`${kw} (x === sneaky) {}`);
+    assert.ok(!d.has('sneaky'), `${kw}-condition token was absorbed as a param`);
   }
 });
