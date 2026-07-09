@@ -31,7 +31,8 @@ const RESIZE_DEBOUNCE_MS = 80;
 class RemoteServer {
   constructor({ port, pagePath, getSessions, getTranscript, send, restartApp,
                 hostLabel, version, srcDir, getAttachInfo, sendInput, resizePty, onControlChange,
-                query, createSession, killSession, restartSession }) {
+                query, createSession, killSession, restartSession,
+                deliverDm, claimDms, listDmOrigins }) {
     this._port = port;
     this._pagePath = pagePath;
     this._getSessions = getSessions;
@@ -61,6 +62,14 @@ class RemoteServer {
     this._createSession = createSession || null;
     this._killSession = killSession || null;
     this._restartSession = restartSession || null;
+    // DM federation (Clodex-to-Clodex agent messaging). deliverDm gates the 'dm'
+    // cap and the inbound POST; claimDms drains a consumer's outbox; listDmOrigins
+    // advertises which origins have mail waiting (so a consumer only claims when
+    // there's something to fetch). All optional — absent → 501 / no 'dm' cap /
+    // empty dmOrigins, and old owners simply omit the field.
+    this._deliverDm = deliverDm || null;
+    this._claimDms = claimDms || null;
+    this._listDmOrigins = listDmOrigins || null;
     this._server = null;
     this._clients = new Set();       // live SSE responses (events feed)
     this._attach = new Map();        // name -> Set of SSE responses (attach feeds)
@@ -325,6 +334,7 @@ class RemoteServer {
       if (this._sendInput) caps.push('control');
       if (this._query) caps.push('query');
       if (this._createSession) caps.push('create'); // covers create + kill + restart (ship together)
+      if (this._deliverDm) caps.push('dm'); // inbound DM + outbox claim (federation)
       return this._json(res, 200, {
         ok: true, app: 'clodex', host: this._hostLabel,
         version: this._version, caps,
@@ -334,6 +344,10 @@ class RemoteServer {
         // Install dir on the box (home-relative or null) — lets a consumer's
         // Update pull the RIGHT checkout. null/absent → viewer keeps its guess.
         srcDir: this._srcDir,
+        // Origins (consumer labels) with DM mail waiting — a consumer whose label
+        // appears here claims its outbox this tick. Empty/absent → nothing to
+        // fetch, so old consumers (which ignore the field) simply never claim.
+        dmOrigins: this._listDmOrigins ? this._listDmOrigins() : [],
       });
     }
     // Read side: raw PTY stream with best-effort scrollback replay. The
@@ -515,6 +529,48 @@ class RemoteServer {
         Promise.resolve()
           .then(() => this._restartSession(name, { fresh: !!msg.fresh }))
           .then((out) => this._json(res, out && out.ok ? 200 : 404, out || { ok: false, error: 'restart failed' }))
+          .catch((e) => this._json(res, 500, { ok: false, error: e.message }));
+      });
+    }
+    // Inbound DM — {to, from, origin, body, urgent}. The consumer POSTs here to
+    // reach an agent on THIS box. The owner's deliverDm runs the same cost-gate/
+    // park path a local dm takes and returns the verdict, which rides the
+    // synchronous response back to the sender (delivered / parked / bounced) —
+    // no async ack channel needed. Trust is the tunnel, same as every peer RPC.
+    if (req.method === 'POST' && p === '/api/dm') {
+      if (!this._deliverDm) return this._json(res, 501, { ok: false, error: 'dm not available' });
+      return this._readBody(req, res, (body) => {
+        let msg;
+        try { msg = JSON.parse(body); } catch { return this._json(res, 400, { ok: false, error: 'bad JSON' }); }
+        const to = String(msg.to || '');
+        const from = String(msg.from || '');
+        const origin = String(msg.origin || '');
+        const text = typeof msg.body === 'string' ? msg.body : '';
+        if (!NAME_RE.test(to)) return this._json(res, 400, { ok: false, error: 'bad target name' });
+        if (!NAME_RE.test(from)) return this._json(res, 400, { ok: false, error: 'bad sender name' });
+        if (!NAME_RE.test(origin)) return this._json(res, 400, { ok: false, error: 'bad origin' });
+        if (!text) return this._json(res, 400, { ok: false, error: 'empty message' });
+        if (text.length > MAX_BODY) return this._json(res, 413, { ok: false, error: 'message too large' });
+        Promise.resolve()
+          .then(() => this._deliverDm({ to, from, origin, body: text, urgent: msg.urgent === true }))
+          .then((out) => this._json(res, out && out.ok ? 200 : 404, out || { ok: false, error: 'delivery failed' }))
+          .catch((e) => this._json(res, 500, { ok: false, error: e.message }));
+      });
+    }
+    // Outbox claim — {origin}. A consumer drains the mail this box has queued for
+    // it (box→consumer DMs, since the box can't dial back over the one-way
+    // tunnel). Atomic whole-dir claim on the owner side; response carries the
+    // whole snapshot.
+    if (req.method === 'POST' && p === '/api/dm/claim') {
+      if (!this._claimDms) return this._json(res, 501, { ok: false, error: 'dm not available' });
+      return this._readBody(req, res, (body) => {
+        let msg;
+        try { msg = JSON.parse(body); } catch { return this._json(res, 400, { ok: false, error: 'bad JSON' }); }
+        const origin = String(msg.origin || '');
+        if (!NAME_RE.test(origin)) return this._json(res, 400, { ok: false, error: 'bad origin' });
+        Promise.resolve()
+          .then(() => this._claimDms(origin))
+          .then((messages) => this._json(res, 200, { ok: true, messages: Array.isArray(messages) ? messages : [] }))
           .catch((e) => this._json(res, 500, { ok: false, error: e.message }));
       });
     }

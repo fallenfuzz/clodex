@@ -25,11 +25,15 @@ const REQUEST_TIMEOUT_MS = 5000;
 const QUERY_TIMEOUT_MS = 20000;
 
 class PeerConnection {
-  constructor({ id, label, url, emit }) {
+  constructor({ id, label, url, emit, selfLabel }) {
     this.id = id;
     this.label = label;
     this.url = url.replace(/\/+$/, '');
     this._emit = emit;
+    // Our own label as the box will see it (the origin on outbound DMs and the
+    // key we claim our inbox under). Computed once by the caller — never per
+    // request — so it can't drift mid-session.
+    this._selfLabel = selfLabel || null;
     // Two deliberately-separate socket pools. SSE streams (events + every
     // attach) never end while live, so pooling them alongside short requests
     // lets a few attached sessions pin every socket and starve the request
@@ -100,6 +104,17 @@ class PeerConnection {
           for (const [name, att] of this._attachments) {
             if (att.wanted && !att.req) this._openAttach(name, att);
           }
+        }
+        // DM federation: if the box says it has mail queued for us (our label in
+        // dmOrigins), claim it now. Every tick, not just on wake — box→consumer
+        // replies accrue between hellos, and the hello cadence IS the delivery
+        // latency. Emits 'peer-dms' up to main for local delivery.
+        if (this._selfLabel && Array.isArray(body.dmOrigins) && body.dmOrigins.includes(this._selfLabel)) {
+          this.claimDms((resp) => {
+            if (resp && resp.ok && Array.isArray(resp.messages) && resp.messages.length) {
+              this._emit('peer-dms', this.id, resp.messages);
+            }
+          });
         }
       } else {
         this._setOnline(false);
@@ -312,6 +327,25 @@ class PeerConnection {
     });
   }
 
+  // ---- DM federation ----
+  // Send a DM to an agent on this peer. `origin` is OUR label (how the box keys
+  // its reply outbox for us); passed once from selfLabel, never recomputed. The
+  // owner's verdict (delivered / parked / bounced) rides the response — that IS
+  // the sender's notice, no async ack needed.
+  dm({ to, from, body, urgent }, cb) {
+    this._request('POST', '/api/dm', { to, from, origin: this._selfLabel, body, urgent: !!urgent }, (err, resp) => {
+      cb(err ? { ok: false, error: err.message } : resp || { ok: false, error: 'no response' });
+    });
+  }
+
+  // Claim any DMs the box has queued for us (box→consumer replies). Keyed by our
+  // label. Fired from the hello tick when dmOrigins advertises us.
+  claimDms(cb) {
+    this._request('POST', '/api/dm/claim', { origin: this._selfLabel }, (err, resp) => {
+      cb(err ? { ok: false, error: err.message } : resp || { ok: false });
+    });
+  }
+
   // ---- plumbing ----
 
   _request(method, path, payload, cb, timeout = REQUEST_TIMEOUT_MS) {
@@ -378,8 +412,9 @@ class PeerConnection {
 
 // Owns one PeerConnection per configured peer; reconciled from settings.
 class PeerManager {
-  constructor({ emit }) {
+  constructor({ emit, selfLabel }) {
     this._emit = emit;
+    this._selfLabel = selfLabel || null; // our origin on the wire (DM federation)
     this._peers = new Map();          // id -> PeerConnection
   }
 
@@ -404,7 +439,7 @@ class PeerManager {
     }
     for (const [id, w] of wanted) {
       if (!this._peers.has(id)) {
-        const conn = new PeerConnection({ ...w, emit: this._emit });
+        const conn = new PeerConnection({ ...w, emit: this._emit, selfLabel: this._selfLabel });
         this._peers.set(id, conn);
         conn.start();
       }

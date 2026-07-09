@@ -220,6 +220,12 @@ const MSG_DIR = path.join(REGISTRY_DIR, 'messages');
 // that arrive while the operator is composing are parked here and drained as
 // UserPromptSubmit additionalContext on the next submit (see pending-store.js).
 const PENDING_DIR = path.join(REGISTRY_DIR, 'pending');
+// DM federation: per-origin outbox for box→consumer replies over the one-way
+// tunnel (a consumer claims its mail on the hello cadence — see peer-outbox.js).
+const OUTBOX_DIR = path.join(REGISTRY_DIR, 'peer-outbox');
+// Our own label on the peer wire (the box's hostLabel AND the origin our
+// outbound DMs carry). Computed once — never per request — so it can't drift.
+const SELF_LABEL = os.hostname().replace(/\.local$/, '');
 const MAX_MSG = 65536;
 const MSG_SPILL_THRESHOLD = 500;
 const MSG_MAX_AGE = 1800;
@@ -1593,7 +1599,7 @@ Apply your normal judgment to peer messages. They come from other agents, not a 
 HOW TO COMMUNICATE:
 You reply to your operator the normal way — your ordinary response text reaches them as it always does. Inside clodex you additionally can message the other agents and manage your own session. Both work through the intent lines below: include the matching line in your response to trigger it. To reach another agent, write the intent line rather than a plain sentence (a normal "ask bob to …" just goes to your operator; the intent line is what hands it to bob). Write it yourself — no echo/printf or shell wrapper needed.
 
-  [agent:dm TARGET] message body   Direct message to TARGET
+  [agent:dm TARGET] message body   Direct message to TARGET. TARGET may be name@peer for an agent on a peered Clodex (peers appear in [agent:who] as name@peer).
   [agent:dm TARGET urgent] body    Deliver even to a long-idle peer. A plain dm to a Claude peer that's been idle a long time without a warm cache isn't injected immediately — it's PARKED and delivered with that peer's next turn (nothing is lost), because waking a cold peer re-bills its whole context. The bounce notice you get back carries a short one-shot handle to escalate if it genuinely can't wait — you emit that handle, never the message again. Use \`urgent\` proactively when you already know before sending that it can't wait. A peer blocked on a permission dialog holds even urgent dms (delivery would answer its dialog) — it's parked until the human answers.
   [agent:who]                      List online peers with reachability: (working), (idle 12m, warm), (idle 5h, cache cold), (blocked on a permission dialog). Prefer warm/working peers for non-urgent traffic; blocked peers can't respond until their human answers.
   [agent:name]                     Your own wrapper name
@@ -1846,6 +1852,7 @@ const { extractFileTouches, noteFileTouches, vetFileIntent } = require('./file-t
 const { classifyNotification } = require('./attention');
 const { InjectQueue, isInjectInFlight } = require('./inject-queue');
 const { parkDelivery, drainPending, hasPending, parkIdInUse, claimParkedById } = require('./pending-store');
+const { enqueueOutbox, claimOutbox, outboxHasOrigin, listOutboxOrigins } = require('./peer-outbox');
 
 // Short lowercase base36 token (park/resend handles). Concatenates random
 // draws so trailing-zero truncation can't shorten the result below `len`.
@@ -3565,6 +3572,10 @@ class SessionManager {
   constructor() {
     this.sessions = new Map();
     this.windows = new Map(); // workspaceId -> BrowserWindow
+    // Origins (consumer labels) we've received an inbound wire DM from this run —
+    // the box routes outbound DMs to an outbox only for an origin it has heard
+    // from (plus any origin dir still on disk after a restart). Runtime-only.
+    this._knownDmOrigins = new Set();
     this._wire = null;       // in-process tee (WIRE_SHADOW only in W1)
     this._shadow = null;     // wire-vs-jsonl intent differ
     this._wireTelemetry = null; // W2 step-4 dark bridge (wire-telemetry.js)
@@ -4800,52 +4811,46 @@ class SessionManager {
           // UserPromptSubmit via the existing pending hook, so nothing is lost and
           // the sender never re-emits the body — the notice hands them a short
           // [agent:resend <id>] to escalate if it can't wait for that next turn.
-          const verdict = shouldHoldDm({
-            urgent: intent.urgent === true,
-            state: localTarget.activityState || 'idle',
-            idleMs: Date.now() - (localTarget.activityTs || Date.now()),
-            payload: this._proxyPoller ? this._proxyPoller.snapshot(intent.target) : null,
-            attention: localTarget.needsAttention ? localTarget.needsAttention.kind : null,
-          });
-          if (verdict.hold) {
-            // Park only for Claude targets — the drain rides a UserPromptSubmit
-            // hook Codex doesn't provide. A Codex (or park-failed) target falls
-            // back to the legacy bounce. Build the delivery text ONLY when we can
-            // actually park: _buildDeliveryText spills a >500-byte body to a file,
-            // so building it for the bounce path would orphan a spill file that's
-            // then discarded (and every retype would orphan another).
-            const canPark = localTarget.agentType === 'claude' && !localTarget._dead;
-            const parkId = canPark
-              ? this._parkHeldDelivery(localTarget, this._buildDeliveryText(localTarget, senderName, intent.body, 'dm'))
-              : null;
+          // The gate + park-or-deliver core is _gatedDeliver (shared with the wire
+          // deliverDm callback); this case owns the sender-notice copy.
+          const r = this._gatedDeliver(intent.target, senderName, intent.body, intent.urgent === true);
+          if (r.parked || r.held) {
+            const parkId = r.parked || null;
             if (session) {
               let notice;
               if (parkId) {
                 // Dialog holds keep the no-urgent stance: parked (drains after the
                 // human answers the dialog), but NO resend advertised — a resend
                 // would refuse identically (injecting answers the dialog).
-                notice = verdict.noUrgent
-                  ? `[agent:dm] parked for ${intent.target} (${verdict.reason}) as ${parkId} — it'll be delivered after the human answers the dialog.`
-                  : `[agent:dm] parked for ${intent.target} (${verdict.reason}) as ${parkId} — it'll be delivered with ${intent.target}'s next turn. If it can't wait, emit \`[agent:resend ${parkId}]\` to wake them now (delivers the parked copy — don't retype the message).`;
+                notice = r.noUrgent
+                  ? `[agent:dm] parked for ${intent.target} (${r.reason}) as ${parkId} — it'll be delivered after the human answers the dialog.`
+                  : `[agent:dm] parked for ${intent.target} (${r.reason}) as ${parkId} — it'll be delivered with ${intent.target}'s next turn. If it can't wait, emit \`[agent:resend ${parkId}]\` to wake them now (delivers the parked copy — don't retype the message).`;
               } else {
                 // Legacy bounce (non-Claude target, or parking failed).
-                const retry = verdict.noUrgent
+                const retry = r.noUrgent
                   ? `Resend after ${intent.target} is unblocked (a human has to answer the dialog).`
                   : `If it can't wait, resend as \`[agent:dm ${intent.target} urgent] <message>\`; otherwise it'll be cheapest right after ${intent.target}'s next turn.`;
-                notice = `[agent:dm] NOT delivered to ${intent.target}: ${verdict.reason}. ${retry}`;
+                notice = `[agent:dm] NOT delivered to ${intent.target}: ${r.reason}. ${retry}`;
               }
               this._injectText(session, notice, { parkable: true });
             }
             this._broadcast('ipc-message', {
               type: 'dm', from: senderName, to: intent.target,
               body: parkId
-                ? `PARKED (${verdict.reason}, ${parkId}): ${intent.body}`
-                : `HELD (${verdict.reason}): ${intent.body}`,
+                ? `PARKED (${r.reason}, ${parkId}): ${intent.body}`
+                : `HELD (${r.reason}): ${intent.body}`,
             });
             break;
           }
-          this._deliverMessage(intent.target, senderName, intent.body, 'dm');
+          // delivered — fall through to the shared ipc broadcast below.
         } else if (!localTarget) {
+          // Federated `name@peer` target (no local session; `@` can't occur in a
+          // session name, so it's never a socket peer either) → route out. The
+          // helper owns its notice + ipc-log, so break before the shared one.
+          if (intent.target.includes('@')) {
+            this._routeFederatedDm(session, senderName, intent);
+            break;
+          }
           const peer = registry.getPeer(intent.target);
           if (peer) {
             await Transport.send(peer.socket, {
@@ -4923,7 +4928,22 @@ class SessionManager {
           .map(p => p.name)
           .filter(n => !this.sessions.has(n))
           .map(n => ({ name: n, label: null }));
-        const others = [...localAgents, ...externalNames].filter(p => p.name !== senderName);
+        // Federated agents on peered Clodexes: an online peer advertising the
+        // 'dm' cap, whose label is a routable name, exposes its agent-type
+        // sessions as `name@label` — this is how an agent discovers it CAN
+        // initiate a cross-Clodex dm. Bare, like socket peers (no reachability
+        // v1); the box lists nothing extra (asymmetric, like reachability).
+        const remoteNames = [];
+        for (const st of (peerManager ? peerManager.statuses() : [])) {
+          if (!st.online || !(st.caps || []).includes('dm')) continue;
+          if (!st.label || !AGENT_NAME_RE.test(st.label)) continue;
+          for (const rs of (st.sessions || [])) {
+            if (rs && (rs.type === 'claude' || rs.type === 'codex')) {
+              remoteNames.push({ name: `${rs.name}@${st.label}`, label: null });
+            }
+          }
+        }
+        const others = [...localAgents, ...externalNames, ...remoteNames].filter(p => p.name !== senderName);
         const list = others.length
           ? others.map(p => p.label ? `${p.name} (${p.label})` : p.name).join(', ')
           : '(none)';
@@ -5404,6 +5424,120 @@ class SessionManager {
   }
 
   // --- Message delivery ---
+
+  // The cost-gate + park-or-deliver core, shared by the LOCAL dm case and the
+  // wire deliverDm callback so both ends apply identical semantics. `senderTag`
+  // is the name the recipient sees in `[agent:from …]` — a plain name locally,
+  // `name@origin` for a wire dm (so the reply trailer teaches an address that
+  // routes back). Returns a small verdict the caller shapes into a notice / HTTP
+  // response; it never injects the notice itself (the local case owns that copy,
+  // byte-identical to before):
+  //   { delivered:true }                         — injected/parked-for-draft now
+  //   { parked:<id>, reason, noUrgent }          — held + parked (resend id)
+  //   { held:<reason>, noUrgent }                — held, un-parkable (Codex/dead)
+  //   { error:<msg> }                            — target isn't a local agent
+  _gatedDeliver(targetName, senderTag, body, urgent) {
+    const target = this.sessions.get(targetName);
+    if (!target || !target.agentType) return { error: `no such agent "${targetName}"` };
+    const verdict = shouldHoldDm({
+      urgent: urgent === true,
+      state: target.activityState || 'idle',
+      idleMs: Date.now() - (target.activityTs || Date.now()),
+      payload: this._proxyPoller ? this._proxyPoller.snapshot(targetName) : null,
+      attention: target.needsAttention ? target.needsAttention.kind : null,
+    });
+    if (verdict.hold) {
+      // Park only for Claude targets (the drain rides a UserPromptSubmit hook
+      // Codex lacks); build the delivery text ONLY when we can actually park, so
+      // the bounce path never orphans a >500-byte spill file.
+      const canPark = target.agentType === 'claude' && !target._dead;
+      const parkId = canPark
+        ? this._parkHeldDelivery(target, this._buildDeliveryText(target, senderTag, body, 'dm'))
+        : null;
+      return parkId
+        ? { parked: parkId, reason: verdict.reason, noUrgent: verdict.noUrgent }
+        : { held: verdict.reason, noUrgent: verdict.noUrgent };
+    }
+    this._deliverMessage(targetName, senderTag, body, 'dm');
+    return { delivered: true };
+  }
+
+  // Route a `name@origin` dm that isn't a local session or socket peer. Runs on
+  // BOTH consumer and box (symmetric): (1) if `origin` matches a configured
+  // ONLINE peer advertising the 'dm' cap, POST it there (consumer leg); (2) else
+  // if `origin` is a known outbox origin (heard from this run, or a dir still on
+  // disk), queue it for that origin to claim (box leg); (3) else bounce. Handles
+  // its own notice + ipc-log; the caller just breaks after.
+  _routeFederatedDm(session, senderName, intent) {
+    const at = intent.target.indexOf('@');
+    const name = intent.target.slice(0, at);
+    const origin = intent.target.slice(at + 1);
+    const bounce = (msg) => { if (session) this._injectText(session, `[agent:dm] ${msg}`, { parkable: true }); };
+    if (!AGENT_NAME_RE.test(name) || !AGENT_NAME_RE.test(origin)) {
+      bounce(`can't route "${intent.target}" — a federated target is name@peer, both plain names.`);
+      return;
+    }
+    // (1) Consumer leg: a configured peer whose label matches `origin`.
+    const peers = peerManager ? peerManager.statuses() : [];
+    const match = peers.find((p) => p.label && p.label.toLowerCase() === origin.toLowerCase());
+    if (match) {
+      if (!match.online) { bounce(`peer '${origin}' is offline — try again when it's awake.`); return; }
+      if (!(match.caps || []).includes('dm')) { bounce(`peer '${origin}' predates dm federation — update its Clodex.`); return; }
+      const conn = peerManager.get(match.id);
+      if (!conn) { bounce(`peer '${origin}' is not reachable right now.`); return; }
+      conn.dm({ to: name, from: senderName, body: intent.body, urgent: intent.urgent === true }, (resp) => {
+        if (resp && resp.ok && resp.delivered) {
+          // delivered — silent, exactly like a local delivery.
+        } else if (resp && resp.ok && resp.parked) {
+          if (session) this._injectText(session,
+            `[agent:dm] parked on ${origin} for ${name} — it'll be delivered with ${name}'s next turn. If it can't wait, resend as \`[agent:dm ${intent.target} urgent] <message>\`.`,
+            { parkable: true });
+        } else {
+          const why = (resp && resp.error) || 'delivery failed';
+          bounce(`NOT delivered to ${intent.target}: ${why}`);
+        }
+      });
+      this._broadcast('ipc-message', { type: 'dm', from: senderName, to: `${name}@${origin}`, body: `WIRE→${origin}: ${intent.body}` });
+      return;
+    }
+    // (2) Box leg: queue for an origin we've heard from (or one lingering on disk).
+    if (this._knownDmOrigins.has(origin) || outboxHasOrigin(OUTBOX_DIR, origin)) {
+      const r = enqueueOutbox(OUTBOX_DIR, origin,
+        { from: senderName, to: name, body: intent.body, urgent: intent.urgent === true, ts: Date.now() },
+        this._nextParkSeq());
+      if (!r.ok) { bounce(`could not queue for ${intent.target}: ${r.error}`); return; }
+      // Silent on success — like a local delivery, the sender gets no notice.
+      this._broadcast('ipc-message', { type: 'dm', from: senderName, to: `${name}@${origin}`, body: `WIRE→${origin} (outbox): ${intent.body}` });
+      return;
+    }
+    // (3) No route.
+    bounce(`no route to '${intent.target}' — peer '${origin}' is not configured or has never contacted this box.`);
+  }
+
+  // Deliver DMs a consumer just claimed from a box's outbox. Each rides straight
+  // into _gatedDeliver — NEVER back through _handleIntent (that's the loop
+  // guard). The sender tag uses OUR configured label for the peer (NOT the origin
+  // the box recorded), so the recipient's reply trailer generates an address that
+  // routes back out through our own peer config. `to` must be a local agent;
+  // anything else is dropped with an ipc-log line rather than looped. Park gives
+  // the remote sender no notice (the accepted mailbox-leg asymmetry — nothing is
+  // lost, it drains on the target's next turn).
+  _deliverClaimedDms(peerId, messages) {
+    const cfg = (uiSettings.get().peers || []).find((p) => p && p.id === peerId);
+    const peerLabel = (cfg && cfg.label) || String(peerId);
+    for (const m of (Array.isArray(messages) ? messages : [])) {
+      if (!m || typeof m.to !== 'string') continue;
+      const senderTag = `${m.from || 'peer'}@${peerLabel}`;
+      const local = this.sessions.get(m.to);
+      if (!local || !local.agentType) {
+        this._broadcast('ipc-message', { type: 'dm', from: senderTag, to: m.to, body: `WIRE←${peerLabel} DROPPED (no local agent "${m.to}"): ${m.body || ''}` });
+        log.info('peer', `claimed dm from ${senderTag} dropped — no local agent "${m.to}"`);
+        continue;
+      }
+      this._gatedDeliver(m.to, senderTag, m.body || '', m.urgent === true);
+      this._broadcast('ipc-message', { type: 'dm', from: senderTag, to: m.to, body: `WIRE←${peerLabel}: ${m.body || ''}` });
+    }
+  }
 
   // Build the FINAL delivery text (prefix + spill-pointer/inline body + reply
   // trailer) a recipient reads — the exact bytes _deliverMessage would inject.
@@ -6710,8 +6844,36 @@ function syncRemoteServer() {
         log.info('session', `restart ${name} via peer (${opts && opts.fresh ? 'fresh' : 'resume'})${out && out.ok ? '' : ` failed: ${out && out.error}`}`);
         return out;
       },
+      // ---- DM federation (Clodex-to-Clodex agent messaging) ----
+      // Inbound dm from a consumer: remember the origin (so this box can route
+      // replies back to its outbox), run the SAME cost-gate/park path a local dm
+      // takes via _gatedDeliver, and map the verdict onto the HTTP-shaped
+      // response the sender reads. senderTag = from@origin so the recipient's
+      // reply trailer teaches an address that routes back.
+      deliverDm: ({ to, from, origin, body, urgent }) => {
+        manager._knownDmOrigins.add(origin);
+        const senderTag = `${from}@${origin}`;
+        const r = manager._gatedDeliver(to, senderTag, body, urgent === true);
+        manager._broadcast('ipc-message', { type: 'dm', from: senderTag, to, body: `WIRE←${origin}: ${body}` });
+        if (r.delivered) return { ok: true, delivered: true };
+        if (r.parked) return { ok: true, parked: r.parked };
+        // held (Codex/dead target) or error (not a local agent) → bounce; the
+        // reason rides the response so the remote sender sees why.
+        const why = r.held || r.error || 'not delivered';
+        log.info('peer', `dm from ${senderTag} to ${to} not delivered: ${why}`);
+        return { ok: false, error: why };
+      },
+      // Outbox claim: hand the consumer every reply queued under its label.
+      claimDms: (origin) => {
+        const messages = claimOutbox(OUTBOX_DIR, origin);
+        if (messages.length) log.info('peer', `outbox claim by ${origin}: ${messages.length} message(s)`);
+        return messages;
+      },
+      // Advertise which origins have mail waiting, so a consumer only claims when
+      // there's something to fetch.
+      listDmOrigins: () => listOutboxOrigins(OUTBOX_DIR),
       // ---- peer-attach surface (Clodex-to-Clodex) ----
-      hostLabel: os.hostname().replace(/\.local$/, ''),
+      hostLabel: SELF_LABEL,
       version: app.getVersion(),
       // Self-report our install dir (home-relative) so a consumer's Update pulls
       // THIS checkout, not a guessed default. Packaged builds report null — an
@@ -6843,7 +7005,15 @@ function syncPeerManager() {
   if (!peerManager) {
     const { PeerManager } = require('./peer-client');
     peerManager = new PeerManager({
+      selfLabel: SELF_LABEL,
       emit: (channel, ...args) => {
+        // DM federation: claimed box→consumer messages are internal, not a
+        // renderer event — deliver them locally and stop (keep bodies off the
+        // generic ipc fan-out; deliverClaimedDms does its own ipc-log line).
+        if (channel === 'peer-dms') {
+          try { manager._deliverClaimedDms(args[0], args[1]); } catch (e) { log.error('peer', `claimed dm delivery failed: ${e.message}`); }
+          return;
+        }
         try { manager._broadcast(channel, ...args); } catch {}
         // Keep the Window > Peers menu's indicators + session lists fresh.
         if (channel === 'peer-state' || channel === 'peer-removed') scheduleAppMenuRefresh();

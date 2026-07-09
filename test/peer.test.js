@@ -21,6 +21,10 @@ const restarts = [];
 const created = [];
 const killed = [];
 const restartedSessions = [];
+// DM federation fakes: deliverDm records inbound calls + returns a verdict keyed
+// by target; the outbox is a plain per-origin queue claimDms/listDmOrigins read.
+const dmCalls = [];
+const fakeOutbox = {};
 const fakeSessions = [{ name: 'alpha', type: 'claude', cwd: '/tmp/x', workspace: 'w', stats: {} }];
 
 let server;
@@ -110,10 +114,19 @@ before(async () => {
       if (kind === 'boom') throw new Error('kaput');
       return { ok: false, error: `unknown query kind: ${kind}` };
     },
+    // DM federation: verdict keyed by target name; the outbox is a plain queue.
+    deliverDm: ({ to, from, origin, body, urgent }) => {
+      dmCalls.push({ to, from, origin, body, urgent });
+      if (to === 'alpha') return { ok: true, delivered: true };
+      if (to === 'parkme') return { ok: true, parked: 'pk123' };
+      return { ok: false, error: `no such agent "${to}"` };
+    },
+    claimDms: (origin) => { const m = fakeOutbox[origin] || []; fakeOutbox[origin] = []; return m; },
+    listDmOrigins: () => Object.keys(fakeOutbox).filter((o) => (fakeOutbox[o] || []).length),
   });
   await server.start();
   conn = new PeerConnection({
-    id: 'p1', label: 'lab', url: `http://127.0.0.1:${server.port}`,
+    id: 'p1', label: 'lab', url: `http://127.0.0.1:${server.port}`, selfLabel: 'mylaptop',
     emit: (channel, ...args) => events.push({ channel, args }),
   });
   conn.start();
@@ -135,11 +148,51 @@ test('hello: identity and caps reach the peer, connection goes online', async ()
   assert.ok(st.caps.includes('control'));
   assert.ok(st.caps.includes('query'));
   assert.ok(st.caps.includes('create'));
+  // 'dm' is advertised because the server was built with a deliverDm callback —
+  // it's what tells a consumer this box can be dm-federated.
+  assert.ok(st.caps.includes('dm'));
   // The self-reported install dir rides the hello and surfaces in status() (the
   // same passthrough as platform) — this is what lets a consumer's Update pull
   // the box's actual checkout instead of guessing a default.
   assert.equal(st.srcDir, '~/projects/clodex');
   assert.equal(st.sessions[0].name, 'alpha');
+});
+
+test('dm federation: consumer→box delivers/parks/bounces per the owner verdict', async () => {
+  // A dm to a live agent delivers; the verdict rides the synchronous response.
+  const delivered = await new Promise((r) => conn.dm({ to: 'alpha', from: 'bob', body: 'hi', urgent: false }, r));
+  assert.deepStrictEqual(delivered, { ok: true, delivered: true });
+  // A held target parks — the resend id comes back for the sender's notice.
+  const parked = await new Promise((r) => conn.dm({ to: 'parkme', from: 'bob', body: 'later' }, r));
+  assert.strictEqual(parked.ok, true);
+  assert.strictEqual(parked.parked, 'pk123');
+  // An unknown target bounces with the reason.
+  const bounced = await new Promise((r) => conn.dm({ to: 'ghost', from: 'bob', body: 'x' }, r));
+  assert.strictEqual(bounced.ok, false);
+  assert.match(bounced.error, /no such agent/);
+  // Every outbound dm carried OUR selfLabel as the origin (never recomputed).
+  const mine = dmCalls.filter((c) => c.to === 'alpha' || c.to === 'parkme' || c.to === 'ghost');
+  assert.ok(mine.length >= 3);
+  assert.ok(mine.every((c) => c.origin === 'mylaptop'));
+});
+
+test('dm federation: box outbox → hello dmOrigins → claim → delivered to consumer', async () => {
+  // Queue a box→consumer reply for a fresh consumer labelled "claimer".
+  fakeOutbox['claimer'] = [{ from: 'clodex', to: 'bob', body: 'reply', urgent: false, ts: 1 }];
+  const got = [];
+  const conn2 = new PeerConnection({
+    id: 'p2', label: 'lab2', url: `http://127.0.0.1:${server.port}`, selfLabel: 'claimer',
+    emit: (channel, ...args) => { if (channel === 'peer-dms') got.push(args); },
+  });
+  conn2.start();
+  // The immediate first hello sees our label in dmOrigins, claims, and emits.
+  const msgs = await waitFor(() => (got.length ? got[0][1] : null), 'peer-dms emission');
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0].from, 'clodex');
+  assert.equal(msgs[0].body, 'reply');
+  // Claim is one-shot: the outbox is now empty.
+  assert.deepStrictEqual(fakeOutbox['claimer'], []);
+  conn2.stop();
 });
 
 test('attach: replay carries scrollback and owner geometry', async () => {
