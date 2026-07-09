@@ -5,6 +5,18 @@ Post-refactor layout (2026-07, phases M1–M5 / R1–R4). Two processes:
 (`renderer/`). `main.js` and `renderer/renderer.js` are thin coordinators;
 everything else is a module with an explicit interface.
 
+This file answers "where does code live". The subsystem docs answer "how
+does it work and what must I not break":
+
+- [sessions.md](sessions.md) — session lifecycle: create/argv, hooks,
+  transcript watching, exit/kill/restore, persistence, workspaces.
+- [messaging.md](messaging.md) — intents: grammar, routing, DM delivery,
+  injection, parking/resend, federation, memory, protocol text, drains.
+- [peering.md](peering.md) — remote server, peer client, tunnels, control
+  model, peers UI, deploy wizard, headless nodes.
+- [telemetry.md](telemetry.md) — wirescope client/poller/supervisor,
+  autocompact, statusline, ctx reminders, updates, ops log.
+
 Conventions the refactor established:
 
 - **Factory + deps object.** Extracted modules export `createX(deps)` /
