@@ -225,6 +225,67 @@ function isDraftOpen({ lastUserInputTs = 0, lastUserSubmitTs = 0 } = {}) {
   return (lastUserInputTs || 0) > (lastUserSubmitTs || 0);
 }
 
+// Parse a version string into a [major, minor, patch] triple. Leading `v` and
+// any pre-release tail (after `-`) are dropped; a missing minor/patch reads 0
+// (so "2" == "2.0.0"). Returns null when the string isn't version-ish — a
+// present-but-non-numeric component (e.g. "2.x.1") or an empty/garbage value —
+// so callers can render 'unknown' rather than guess.
+function parseSemverTriple(v) {
+  if (v == null) return null;
+  const s = String(v).trim().replace(/^v/i, '');
+  if (!s) return null;
+  const parts = s.split(/[.-]/);
+  const out = [];
+  for (let i = 0; i < 3; i++) {
+    if (i >= parts.length) { out.push(0); continue; } // absent trailing ⇒ 0
+    if (!/^\d+$/.test(parts[i])) return null;          // present but non-numeric
+    out.push(parseInt(parts[i], 10));
+  }
+  return out;
+}
+
+// Severity of a PEER's version relative to ours — the semver distance, named so
+// the UI can tint it. 'current' (equal), 'patch'/'minor'/'major' (peer behind
+// us, by the highest differing component), 'newer' (peer AHEAD — we're the stale
+// one, so it's informational, never alarming), 'unknown' (either side
+// unparseable). Pure; drives both the header tint and the popover's severity
+// line.
+function versionSeverity(ours, theirs) {
+  const us = parseSemverTriple(ours);
+  const peer = parseSemverTriple(theirs);
+  if (!us || !peer) return 'unknown';
+  const [uM, um, up] = us;
+  const [pM, pm, pp] = peer;
+  if (pM === uM && pm === um && pp === up) return 'current';
+  const peerNewer = pM > uM || (pM === uM && (pm > um || (pm === um && pp > up)));
+  if (peerNewer) return 'newer';
+  if (pM !== uM) return 'major';
+  if (pm !== um) return 'minor';
+  return 'patch';
+}
+
+// Best-effort age/behind facts for a peer's version, off a newest-first
+// `releases` list ([{tag, published_at}] as cached from GitHub). Finds the
+// release whose tag matches `v<version>` (leading `v` optional on either side);
+// its index IS the releases-behind count (newest-first). Returns
+// { behind, ageDays } — ageDays null when the date is missing/unparseable — or
+// null when the version isn't in the list (a dev build / unpublished tag), so
+// the popover omits the age line entirely. Pure.
+function releaseAgeInfo(version, releases, now = Date.now()) {
+  if (version == null || !Array.isArray(releases) || !releases.length) return null;
+  const want = String(version).trim().replace(/^v/i, '');
+  if (!want) return null;
+  const idx = releases.findIndex(
+    (r) => r && String(r.tag || '').trim().replace(/^v/i, '') === want,
+  );
+  if (idx < 0) return null;
+  const rel = releases[idx];
+  let ageDays = null;
+  const t = rel.published_at ? Date.parse(rel.published_at) : NaN;
+  if (Number.isFinite(t)) ageDays = Math.max(0, Math.floor((now - t) / 86400000));
+  return { behind: idx, ageDays };
+}
+
 // Decision + the reason it went that way — the reason drives the ops-log
 // observability ("autocompact suppressed: cache-not-warm") that surfaced the
 // silent-never-fired class. shouldAutoCompact stays a thin boolean wrapper so
@@ -401,5 +462,6 @@ module.exports = {
   PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord, shapeSubagent,
   AUTO_COMPACT, headroomBand, shouldAutoCompact, autoCompactDecision, isHumanPtyInput,
   draftChunkSignal, isDraftOpen,
+  versionSeverity, releaseAgeInfo,
   DM_HOLD_IDLE_MS, peerStatusLabel, shouldHoldDm,
 };

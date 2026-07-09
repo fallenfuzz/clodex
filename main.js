@@ -5684,8 +5684,37 @@ function isNewer(a, b) {
 }
 
 let updateInfo = null; // { version, url }
+// Newest-first [{tag, published_at}] from GitHub, refreshed on the update-check
+// cadence. In-memory only (persisting a release list is overkill) — feeds the
+// peer-identity popover's best-effort "released N days ago · N behind" line via
+// the update:releases IPC. Empty until the first successful fetch / when offline.
+let releasesCache = [];
+
+// Pull the full release list alongside the latest-version check. Self-contained
+// error handling: a failure keeps whatever we had cached (or []), so the popover
+// simply drops its age line — never a hard dependency on GitHub. Fire-and-forget
+// from checkForUpdate; never awaited on any UI path.
+async function refreshReleases() {
+  try {
+    const rels = await fetchJson(
+      `https://api.github.com/repos/${UPDATE_REPO}/releases?per_page=100`,
+    );
+    if (Array.isArray(rels)) {
+      releasesCache = rels.map((r) => ({
+        tag: r.tag_name || '',
+        published_at: r.published_at || '',
+      }));
+    }
+  } catch (err) {
+    // Keep the prior cache; the popover degrades to version + caps + os.
+  }
+}
 
 async function checkForUpdate(silent = true) {
+  // Refresh the release list on the same cadence, but decoupled from the
+  // latest-version logic below (a releases failure must not suppress the update
+  // banner, and vice versa).
+  refreshReleases();
   try {
     const release = await fetchJson(
       `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`,
@@ -7136,6 +7165,10 @@ app.whenReady().then(() => {
 
   ipcMain.handle('update:check', () => checkForUpdate(false));
   ipcMain.handle('update:info', () => updateInfo);
+  // Cached release list for the peer-identity popover's age/behind line. Returns
+  // [] until the first fetch lands / when offline — the renderer never blocks on
+  // it (it renders from whatever is cached at open time).
+  ipcMain.handle('update:releases', () => releasesCache);
   ipcMain.handle('update:open', () => {
     if (updateInfo) shell.openExternal(updateInfo.url);
   });
@@ -8063,6 +8096,20 @@ app.whenReady().then(() => {
   // action reuses the same peer:context-action channel. Restart needs the peer
   // online (a down peer has nothing to restart — the process-gone case is out
   // of scope).
+  // Deploy target for a peer id, resolved from config exactly as the header
+  // menu's "Update Clodex…" item does — { sshHost, port, folder } for an
+  // ssh-reachable peer, or null (url-only peer / unknown id) so the popover
+  // hides its Update button. Port/folder carry the persisted overrides.
+  ipcMain.handle('peer:deployConfig', (_e, id) => {
+    const cfg = (uiSettings.get().peers || []).find((p) => p && p.id === id);
+    if (!cfg || !cfg.sshHost) return null;
+    return {
+      sshHost: cfg.sshHost,
+      port: Number.isInteger(cfg.remotePort) ? cfg.remotePort : 7900,
+      folder: cfg.deployFolder || '',
+    };
+  });
+
   ipcMain.on('peer:header-menu', (e, st) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     const { id, label, online, canCreate } = st || {};

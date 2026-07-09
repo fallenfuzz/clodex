@@ -167,6 +167,14 @@
         <button id="peer-select-popover-apply" type="button">Apply</button>
       </div>
     </div>
+    <div id="peer-info-popover" class="hidden">
+      <div class="popover-title"><span>Peer — <span id="peer-info-popover-name"></span></span><button type="button" class="popover-close" id="peer-info-popover-close" title="Close" aria-label="Close">&times;</button></div>
+      <div id="peer-info-body" class="peer-info-body"></div>
+      <div class="popover-actions">
+        <button id="peer-info-update" type="button" class="hidden">Update Clodex</button>
+        <button id="peer-info-popover-done" class="secondary" type="button">Close</button>
+      </div>
+    </div>
     <div id="skills-popover" class="hidden">
       <div class="popover-title"><span>Skills — <span id="skills-popover-name"></span></span><button type="button" class="popover-close" id="skills-popover-close" title="Close" aria-label="Close">&times;</button></div>
       <div class="popover-bulk"><button type="button" data-bulk="all">Check all</button><button type="button" data-bulk="none">Uncheck all</button></div>

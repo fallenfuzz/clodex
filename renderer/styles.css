@@ -709,6 +709,26 @@ html, body {
 #agents-popover #popover-agents-list,
 #peer-select-popover #peer-select-list { overflow-y: auto; flex: 1; }
 
+/* Peer identity popover — same chrome as the others but narrower (its content is
+   a short key/value stack, not a checklist). */
+#peer-info-popover {
+  position: fixed;
+  z-index: 50;
+  width: 300px;
+  max-width: calc(100vw - 16px);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+#peer-info-popover.hidden { display: none; }
+#peer-info-popover .popover-title { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+#peer-info-popover .popover-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+
 /* Lay the (short, single-word) tool/skill checklists out in two columns so the
    popover stays wide-and-short instead of a tall scroll. */
 #popover-tools-list,
@@ -2271,6 +2291,20 @@ html, body {
 .peer-select:hover { color: var(--text); }
 .peer-select:disabled { opacity: 0.35; cursor: default; }
 .peer-select:disabled:hover { color: var(--text-dim); }
+/* Version-severity tint, shared by the peer-state label, the ⓘ icon, and the
+   popover's severity line. current/newer/unknown stay neutral (a peer AHEAD of
+   us is informational, never alarming); patch/minor/major climb yellow → orange
+   → red. Placed after .peer-select so it wins the equal-specificity tie on the
+   icon; :hover (higher specificity) still brightens it. Orange is mixed from the
+   theme's warn+error so it themes without a new variable. */
+.peer-sev-current, .peer-sev-newer, .peer-sev-unknown { color: var(--text-dim); }
+.peer-sev-patch { color: var(--warn); }
+.peer-sev-minor { color: color-mix(in srgb, var(--warn) 40%, var(--error)); }
+.peer-sev-major { color: var(--error); }
+/* Peer identity popover body: a compact key/value stack. */
+.peer-info-body { display: flex; flex-direction: column; gap: 4px; padding: 4px 2px 2px; font-size: 12px; }
+.peer-info-line { line-height: 1.4; }
+.peer-info-key { display: inline-block; min-width: 62px; color: var(--text-dim); }
 /* A selected session the peer no longer lists (asleep / gone): shown so it
    isn't silently dropped from the selection, but visibly de-emphasized. */
 .agent-check.peer-select-gone { opacity: 0.55; }

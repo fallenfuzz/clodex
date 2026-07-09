@@ -54,6 +54,8 @@ window.api = {
     ipcRenderer.invoke('update:check'),
   getUpdateInfo: () =>
     ipcRenderer.invoke('update:info'),
+  getReleases: () =>
+    ipcRenderer.invoke('update:releases'),
   openUpdate: () =>
     ipcRenderer.invoke('update:open'),
   getVersion: () =>
@@ -162,6 +164,7 @@ window.api = {
   // ::marker lines back via onPeerDeployLine).
   peerProbe: (sshHost, port) => ipcRenderer.invoke('peer:probe', sshHost, port),
   peerDeploy: (sshHost, opts) => ipcRenderer.invoke('peer:deploy', sshHost, opts),
+  peerDeployConfig: (id) => ipcRenderer.invoke('peer:deployConfig', id),
   peerDeployFix: (sshHost, port, label, logText) =>
     ipcRenderer.invoke('peer:deployFix', sshHost, port, label, logText),
   onPeerDeployLine: (callback) =>

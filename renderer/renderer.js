@@ -2,6 +2,7 @@ const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { SearchAddon } = require('@xterm/addon-search');
 const { PendingInput } = require('../peer-input-queue');
+const { versionSeverity, releaseAgeInfo } = require('../proxy-util');
 
 // ---------------------------------------------------------------------------
 // State
@@ -1259,6 +1260,12 @@ const peerTunnels = new Map();  // peerId -> managed-tunnel status (may lag peer
 // reporting a different version in its hello). null until fetched / if it fails.
 let ourAppVersion = null;
 window.api.getVersion().then((v) => { ourAppVersion = v || null; }).catch(() => {});
+// Cached GitHub release list ([{tag, published_at}] newest-first) for the peer
+// identity popover's best-effort age/behind line. Seeded once and refreshed
+// when a popover opens; empty until the first fetch / when offline. The popover
+// never blocks on this — it renders from whatever is cached at open time.
+let releasesCache = [];
+window.api.getReleases().then((r) => { releasesCache = Array.isArray(r) ? r : []; }).catch(() => {});
 const peerBar = document.getElementById('peer-bar');
 // Per-peer visibility selection mirrored from main (peer:visible). No entry for
 // a peer ⇒ show all its sessions; an array (possibly empty) restricts to those
@@ -1295,12 +1302,19 @@ function renderPeers() {
       if (tun.error) header.title = tun.error;
     }
     // Identity surfacing: an online peer's hello carries version + caps (+ os).
-    // Show them in the header tooltip, and flag a version mismatch subtly in the
-    // state text (feeds Batch B's "Update Clodex on <box>").
+    // Show them in the header tooltip, and flag a version delta in the state text
+    // — severity-driven so the color rides the same class the ⓘ icon uses. A peer
+    // AHEAD of us reads 'newer' (we're the stale one), behind reads 'outdated'.
+    let sev = 'unknown';
     if (st.online && st.version) {
       const capList = (st.caps || []).join(', ') || 'none';
       header.title = `Clodex v${st.version} · caps: ${capList}${st.platform ? ` · ${st.platform}` : ''}`;
-      if (ourAppVersion && st.version !== ourAppVersion) stateText = 'outdated';
+      if (ourAppVersion) {
+        sev = versionSeverity(ourAppVersion, st.version);
+        if (sev === 'newer') stateText = 'newer';
+        else if (sev === 'patch' || sev === 'minor' || sev === 'major') stateText = 'outdated';
+        // current / unknown: leave the (empty, online) state text as-is.
+      }
     }
     // Right-aligned host action strip mirrors the header context menu: ＋ new
     // session (create-capable peers only), ↻ restart Clodex, ◎ choose visible
@@ -1311,15 +1325,23 @@ function renderPeers() {
     const off = st.online ? '' : 'disabled';
     header.innerHTML = `<span class="peer-dot ${st.online ? 'online' : ''}"></span>` +
       `<span class="peer-label">${esc(hostLabel)}</span>` +
-      `<span class="peer-state">${esc(stateText)}</span>` +
+      `<span class="peer-state peer-sev-${sev}">${esc(stateText)}</span>` +
       `<span class="peer-actions">` +
         (canCreate ? `<button class="peer-select peer-new" title="New Session on ${esc(hostLabel)}…" aria-label="New Session on ${esc(hostLabel)}" ${off}>&#65291;</button>` : '') +
         `<button class="peer-select peer-restart" title="Restart Clodex on ${esc(hostLabel)}" aria-label="Restart Clodex on ${esc(hostLabel)}" ${off}>&#8635;</button>` +
         `<button class="peer-select peer-eye" title="Choose which sessions to show" aria-label="Choose which sessions to show">&#9678;</button>` +
+        // ⓘ identity: version/caps/age + Update. Only when the hello gives us an
+        // identity to show (online + version) — nothing to surface otherwise.
+        ((st.online && st.version) ? `<button class="peer-select peer-info peer-sev-${sev}" title="Peer identity & version" aria-label="Peer identity">&#9432;</button>` : '') +
       `</span>`;
     header.querySelector('.peer-eye').addEventListener('click', (e) => {
       e.stopPropagation();
       openPeerSelectPopover(id, e.currentTarget);
+    });
+    const infoBtn = header.querySelector('.peer-info');
+    if (infoBtn) infoBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openPeerInfoPopover(id, e.currentTarget);
     });
     const newBtn = header.querySelector('.peer-new');
     if (newBtn) newBtn.addEventListener('click', (e) => {
@@ -3370,6 +3392,94 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !peerSelectPopover.classList.contains('hidden')) closePeerSelectPopover();
 });
 
+// --- Peer identity popover (the ⓘ icon) ----------------------------------
+// Read-only surface: peer version vs ours, platform, caps, a severity line, and
+// a best-effort "released N days ago · N behind" pulled from the cached release
+// list (omitted entirely when the version isn't a published release / no cache).
+// The Update button reuses the header-menu deploy flow (sshHost + online gated),
+// resolved from config via peer:deployConfig. Never blocks on a fetch.
+const peerInfoPopover = document.getElementById('peer-info-popover');
+const peerInfoPopoverName = document.getElementById('peer-info-popover-name');
+const peerInfoBody = document.getElementById('peer-info-body');
+const peerInfoUpdateBtn = document.getElementById('peer-info-update');
+
+function closePeerInfoPopover() {
+  peerInfoPopover.classList.add('hidden');
+  peerInfoPopover.dataset.peerId = '';
+  peerInfoUpdateBtn.classList.add('hidden');
+  peerInfoUpdateBtn.onclick = null;
+}
+
+const SEV_LINE = {
+  current: 'Up to date with your Clodex.',
+  patch: 'One patch release behind your Clodex.',
+  minor: 'A minor version behind your Clodex.',
+  major: 'A major version behind your Clodex.',
+  newer: 'Newer than your Clodex — this machine is the older one.',
+  unknown: '',
+};
+
+function openPeerInfoPopover(id, anchorBtn) {
+  const st = peerStatuses.get(id);
+  if (!st) return;
+  const label = peerDisplayHost(st);
+  peerInfoPopoverName.textContent = label;
+  const sev = (ourAppVersion && st.version) ? versionSeverity(ourAppVersion, st.version) : 'unknown';
+  const capList = (st.caps || []).join(', ') || 'none';
+  const rows = [];
+  rows.push(`<div class="peer-info-line"><span class="peer-info-key">Version</span> Clodex v${esc(st.version || '?')}${ourAppVersion ? ` <span class="peer-status-dim">(you run v${esc(ourAppVersion)})</span>` : ''}</div>`);
+  if (st.platform) rows.push(`<div class="peer-info-line"><span class="peer-info-key">Platform</span> ${esc(st.platform)}</div>`);
+  rows.push(`<div class="peer-info-line"><span class="peer-info-key">Caps</span> ${esc(capList)}</div>`);
+  if (SEV_LINE[sev]) rows.push(`<div class="peer-info-line peer-sev-${sev}">${esc(SEV_LINE[sev])}</div>`);
+  // Best-effort age line from the cached release list; omitted whole when the
+  // peer's version isn't a known published release (dev build / empty cache).
+  const age = releaseAgeInfo(st.version, releasesCache);
+  if (age) {
+    const bits = [];
+    if (age.ageDays != null) bits.push(`released ${age.ageDays} day${age.ageDays === 1 ? '' : 's'} ago`);
+    if (age.behind > 0) bits.push(`${age.behind} release${age.behind === 1 ? '' : 's'} behind`);
+    if (bits.length) rows.push(`<div class="peer-info-line peer-status-dim">${esc(bits.join(' · '))}</div>`);
+  }
+  peerInfoBody.innerHTML = rows.join('');
+  peerInfoPopover.dataset.peerId = id;
+  peerInfoPopover.classList.remove('hidden');
+  // Anchor above the button, clamped to the viewport (mirrors the eye popover).
+  const rect = anchorBtn.getBoundingClientRect();
+  const w = peerInfoPopover.offsetWidth;
+  peerInfoPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - w - 8))}px`;
+  peerInfoPopover.style.bottom = `${Math.max(8, window.innerHeight - rect.top + 6)}px`;
+  // Update button: online + ssh-reachable only (the exact header-menu gate).
+  // Resolved async from config; if the peer is url-only it stays hidden. Guard
+  // against a stale resolve landing after the popover was closed/retargeted.
+  peerInfoUpdateBtn.classList.add('hidden');
+  peerInfoUpdateBtn.onclick = null;
+  if (st.online) {
+    window.api.peerDeployConfig(id).then((cfg) => {
+      if (!cfg || !cfg.sshHost) return;
+      if (peerInfoPopover.classList.contains('hidden') || peerInfoPopover.dataset.peerId !== String(id)) return;
+      peerInfoUpdateBtn.classList.remove('hidden');
+      peerInfoUpdateBtn.onclick = () => {
+        closePeerInfoPopover();
+        updatePeerHost(id, label, cfg.sshHost, cfg.port, cfg.folder);
+      };
+    }).catch(() => {});
+  }
+  // Refresh the release cache in the background for next time (never awaited).
+  window.api.getReleases().then((r) => { if (Array.isArray(r)) releasesCache = r; }).catch(() => {});
+}
+
+document.getElementById('peer-info-popover-close').addEventListener('click', closePeerInfoPopover);
+document.getElementById('peer-info-popover-done').addEventListener('click', closePeerInfoPopover);
+document.addEventListener('mousedown', (e) => {
+  if (peerInfoPopover.classList.contains('hidden')) return;
+  if (peerInfoPopover.contains(e.target)) return;
+  if (e.target.closest('.peer-info')) return; // the opener handles itself
+  closePeerInfoPopover();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !peerInfoPopover.classList.contains('hidden')) closePeerInfoPopover();
+});
+
 // --- Per-session Skills popover ------------------------------------------
 // Mirrors the tools popover, but writes skillOverrides:{name:"off"} (which
 // reclaims the per-turn roster tokens) instead of permissions.deny. The
@@ -5325,11 +5435,17 @@ function addPeerRow(peer) {
   const st = peer.id && peerStatuses.get(peer.id);
   if (st && st.online && st.version) {
     const capList = (st.caps || []).join(', ') || 'none';
-    const outdated = ourAppVersion && st.version !== ourAppVersion
-      ? `<span class="peer-status-warn"> · outdated (you run v${esc(ourAppVersion)})</span>` : '';
+    const sev = ourAppVersion ? versionSeverity(ourAppVersion, st.version) : 'unknown';
+    // A peer behind us gets the "outdated" nudge; one ahead reads "newer" (we're
+    // the stale one). current/unknown add nothing.
+    const delta = (sev === 'patch' || sev === 'minor' || sev === 'major')
+      ? `<span class="peer-status-warn"> · outdated (you run v${esc(ourAppVersion)})</span>`
+      : sev === 'newer'
+        ? `<span class="peer-status-dim"> · newer than you (v${esc(ourAppVersion)})</span>`
+        : '';
     renderPeerStatus(status,
       `<span class="peer-status-ok">✓ Clodex v${esc(st.version)}</span>` +
-      `<span class="peer-status-dim"> · caps: ${esc(capList)}${st.platform ? ` · ${esc(st.platform)}` : ''}</span>${outdated}`);
+      `<span class="peer-status-dim"> · caps: ${esc(capList)}${st.platform ? ` · ${esc(st.platform)}` : ''}</span>${delta}`);
   }
 }
 

@@ -479,3 +479,61 @@ test('peerStatusLabel: permission dialog outranks working and idle', () => {
     peerStatusLabel({ state: 'idle', idleMs: 3 * 60_000, payload: null, attention: 'other', now: PV_NOW }),
     'idle 3m');
 });
+
+// --- versionSeverity + releaseAgeInfo: peer identity surfacing ---------------
+const { versionSeverity, releaseAgeInfo } = require('../proxy-util');
+
+test('versionSeverity: equal versions are current (v-prefix + missing parts tolerated)', () => {
+  assert.strictEqual(versionSeverity('2.10.1', '2.10.1'), 'current');
+  assert.strictEqual(versionSeverity('v2.10.1', '2.10.1'), 'current');
+  assert.strictEqual(versionSeverity('2', '2.0.0'), 'current');
+  // A pre-release tail on the peer is ignored for the triple compare.
+  assert.strictEqual(versionSeverity('2.10.1', '2.10.1-beta'), 'current');
+});
+
+test('versionSeverity: peer behind us classifies by the highest differing component', () => {
+  assert.strictEqual(versionSeverity('2.10.1', '2.10.0'), 'patch');
+  assert.strictEqual(versionSeverity('2.10.1', '2.9.5'), 'minor');
+  assert.strictEqual(versionSeverity('2.10.1', '1.99.99'), 'major');
+});
+
+test('versionSeverity: peer ahead of us reads newer (we are the stale one)', () => {
+  assert.strictEqual(versionSeverity('2.10.1', '2.10.2'), 'newer');
+  assert.strictEqual(versionSeverity('2.10.1', '3.0.0'), 'newer');
+});
+
+test('versionSeverity: unparseable on either side is unknown', () => {
+  assert.strictEqual(versionSeverity('2.10.1', 'garbage'), 'unknown');
+  assert.strictEqual(versionSeverity('2.10.1', '2.x.1'), 'unknown');
+  assert.strictEqual(versionSeverity('', '2.10.1'), 'unknown');
+  assert.strictEqual(versionSeverity('2.10.1', null), 'unknown');
+});
+
+test('releaseAgeInfo: found ⇒ index is releases-behind, age in whole days', () => {
+  const NOW = Date.parse('2026-01-20T00:00:00Z');
+  const releases = [
+    { tag: 'v2.10.3', published_at: '2026-01-18T00:00:00Z' }, // newest
+    { tag: 'v2.10.2', published_at: '2026-01-15T00:00:00Z' },
+    { tag: 'v2.10.1', published_at: '2026-01-10T00:00:00Z' }, // peer is here
+    { tag: 'v2.10.0', published_at: '2026-01-01T00:00:00Z' },
+  ];
+  assert.deepStrictEqual(releaseAgeInfo('2.10.1', releases, NOW), { behind: 2, ageDays: 10 });
+  // v-prefix on the query and the latest release (behind 0) both resolve.
+  assert.deepStrictEqual(releaseAgeInfo('v2.10.3', releases, NOW), { behind: 0, ageDays: 2 });
+});
+
+test('releaseAgeInfo: not in the list (dev build) ⇒ null; empty/absent list ⇒ null', () => {
+  const releases = [{ tag: 'v2.10.1', published_at: '2026-01-10T00:00:00Z' }];
+  assert.strictEqual(releaseAgeInfo('9.9.9', releases, Date.now()), null);
+  assert.strictEqual(releaseAgeInfo('2.10.1', [], Date.now()), null);
+  assert.strictEqual(releaseAgeInfo('2.10.1', null, Date.now()), null);
+  assert.strictEqual(releaseAgeInfo('', releases, Date.now()), null);
+});
+
+test('releaseAgeInfo: a missing/unparseable date keeps the behind count, age null', () => {
+  const releases = [
+    { tag: 'v2.10.2', published_at: '2026-01-15T00:00:00Z' },
+    { tag: 'v2.10.1' }, // no published_at
+  ];
+  assert.deepStrictEqual(releaseAgeInfo('2.10.1', releases, Date.now()), { behind: 1, ageDays: null });
+});
