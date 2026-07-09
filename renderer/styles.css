@@ -2385,6 +2385,10 @@ html, body {
 #peers-list .peer-row-port { flex: 0 0 70px; }
 #peers-list .peer-row-folder { flex: 1; }
 #peers-list .peer-row input.invalid { border-color: var(--error); }
+/* "folder reported by the box" — a dim note on its own full-width line under the
+   override inputs, shown only when the pre-fill came from the peer's live
+   srcDir. Indented to align with the folder field. */
+#peers-list .peer-row-folder-hint { flex: 0 0 100%; margin-left: 116px; font-size: 11px; }
 
 /* Wizard status / deploy-progress panel under a peer row. Indented to the
    inputs, muted chrome, grows without reflowing the row above it. */

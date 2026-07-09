@@ -30,7 +30,7 @@ const RESIZE_DEBOUNCE_MS = 80;
 
 class RemoteServer {
   constructor({ port, pagePath, getSessions, getTranscript, send, restartApp,
-                hostLabel, version, getAttachInfo, sendInput, resizePty, onControlChange,
+                hostLabel, version, srcDir, getAttachInfo, sendInput, resizePty, onControlChange,
                 query, createSession, killSession, restartSession }) {
     this._port = port;
     this._pagePath = pagePath;
@@ -41,6 +41,11 @@ class RemoteServer {
     // Peer-attach surface (all optional: absent callbacks 501 their endpoints)
     this._hostLabel = hostLabel || 'clodex';
     this._version = version || '';
+    // Self-reported install dir (home-relative, e.g. ~/projects/clodex) so a
+    // consumer's Update targets the box's ACTUAL checkout instead of guessing.
+    // null for a packaged .app (not a git-pullable source dir) and for old
+    // owners — the hello simply omits it and viewers fall back to today's guess.
+    this._srcDir = srcDir || null;
     this._getAttachInfo = getAttachInfo || null;
     this._sendInput = sendInput || null;
     this._resizePty = resizePty || null;
@@ -326,6 +331,9 @@ class RemoteServer {
         // Deploy/identity surfacing: which OS the box runs (the deploy wizard
         // and header tooltip show it; harmless to older viewers that ignore it).
         platform: process.platform,
+        // Install dir on the box (home-relative or null) — lets a consumer's
+        // Update pull the RIGHT checkout. null/absent → viewer keeps its guess.
+        srcDir: this._srcDir,
       });
     }
     // Read side: raw PTY stream with best-effort scrollback replay. The

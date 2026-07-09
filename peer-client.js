@@ -43,7 +43,7 @@ class PeerConnection {
     this._reqAgent = new http.Agent({ keepAlive: true, maxSockets: 8 });
     this._sseAgent = new http.Agent({ keepAlive: false, maxSockets: Infinity });
     this.online = false;
-    this.hello = null;                // { host, version, caps, platform }
+    this.hello = null;                // { host, version, caps, platform, srcDir }
     this.sessions = [];               // last fetched session list
     this._helloTimer = null;
     this._eventsReq = null;
@@ -78,6 +78,7 @@ class PeerConnection {
       version: this.hello ? this.hello.version : null,
       caps: this.hello ? this.hello.caps : [],
       platform: this.hello ? this.hello.platform : null,
+      srcDir: this.hello ? this.hello.srcDir : null,
       sessions: this.sessions,
     };
   }
@@ -90,7 +91,7 @@ class PeerConnection {
       if (this._stopped) return;
       if (!err && body && body.ok && body.app === 'clodex') {
         const wasOffline = !this.online;
-        this.hello = { host: body.host, version: body.version, caps: body.caps || [], platform: body.platform || null };
+        this.hello = { host: body.host, version: body.version, caps: body.caps || [], platform: body.platform || null, srcDir: body.srcDir || null };
         this._setOnline(true);
         if (wasOffline) {
           this._refreshSessions();

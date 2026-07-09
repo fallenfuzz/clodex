@@ -1857,7 +1857,7 @@ function randBase36(len) {
 const { ctxReminderFor } = require('./ctx-reminder');
 const { parseSkillFrontmatter, buildSkillPlugin } = require('./skills-util');
 const { sshRun } = require('./ssh-run');
-const { probePeer, fixSessionName, buildDeployFixBriefing, classifyDeployFolder } = require('./peer-deploy');
+const { probePeer, fixSessionName, buildDeployFixBriefing, classifyDeployFolder, homeRelativize, resolveDeployFolder } = require('./peer-deploy');
 const PROXY_POLL_INTERVAL = 5000; // ms
 const PROXY_HTTP_TIMEOUT = 4000;  // ms — default; keeps polling/handshake snappy
 // Reports disk-scan the whole session on the proxy side, so they can take much
@@ -6713,6 +6713,11 @@ function syncRemoteServer() {
       // ---- peer-attach surface (Clodex-to-Clodex) ----
       hostLabel: os.hostname().replace(/\.local$/, ''),
       version: app.getVersion(),
+      // Self-report our install dir (home-relative) so a consumer's Update pulls
+      // THIS checkout, not a guessed default. Packaged builds report null — an
+      // .app bundle isn't a git-pullable source and the ssh update path doesn't
+      // apply. main.js sits at the repo root, so __dirname IS the checkout.
+      srcDir: app.isPackaged ? null : homeRelativize(__dirname, os.homedir()),
       getAttachInfo: (name) => {
         const sess = manager.sessions.get(name);
         // Bash included: attach mirrors the raw PTY (scrollback + geometry),
@@ -8096,19 +8101,25 @@ app.whenReady().then(() => {
   // action reuses the same peer:context-action channel. Restart needs the peer
   // online (a down peer has nothing to restart — the process-gone case is out
   // of scope).
-  // Deploy target for a peer id, resolved from config exactly as the header
-  // menu's "Update Clodex…" item does — { sshHost, port, folder } for an
-  // ssh-reachable peer, or null (url-only peer / unknown id) so the popover
-  // hides its Update button. Port/folder carry the persisted overrides.
-  ipcMain.handle('peer:deployConfig', (_e, id) => {
+  // Deploy target for a peer id — the SINGLE resolver both the popover's Update
+  // button (peer:deployConfig) and the header-menu "Update Clodex…" item read,
+  // so the folder-precedence rule lives in exactly one place. { sshHost, port,
+  // folder } for an ssh-reachable peer, or null (url-only / unknown id) so the
+  // caller hides Update. folder follows resolveDeployFolder: the box's live
+  // self-reported srcDir wins over the persisted deployFolder guess (a stale
+  // guess must not shadow live truth), which wins over '' (script default).
+  function deployTargetFor(id) {
     const cfg = (uiSettings.get().peers || []).find((p) => p && p.id === id);
     if (!cfg || !cfg.sshHost) return null;
+    const st = peerManager ? peerManager.statuses().find((s) => s.id === id) : null;
+    const reported = st && st.online ? st.srcDir : null;
     return {
       sshHost: cfg.sshHost,
       port: Number.isInteger(cfg.remotePort) ? cfg.remotePort : 7900,
-      folder: cfg.deployFolder || '',
+      folder: resolveDeployFolder(reported, cfg.deployFolder),
     };
-  });
+  }
+  ipcMain.handle('peer:deployConfig', (_e, id) => deployTargetFor(id));
 
   ipcMain.on('peer:header-menu', (e, st) => {
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -8132,16 +8143,17 @@ app.whenReady().then(() => {
     // "Update Clodex on <box>…" re-runs the idempotent deploy script over ssh.
     // Only offered for peers reached via an ssh host (a url-only peer has no ssh
     // route) and only when online (nothing to update on an unreachable box).
-    const cfg = (uiSettings.get().peers || []).find((p) => p && p.id === id);
-    if (online && cfg && cfg.sshHost) {
+    // Same deployTargetFor resolver as the popover — reported srcDir wins.
+    const target = online ? deployTargetFor(id) : null;
+    if (target) {
       template.push({ type: 'separator' });
       template.push({
         label: `Update Clodex on ${label || 'peer'}…`,
         click: () => e.sender.send('peer:context-action', {
           action: 'update', id, name: label,
-          sshHost: cfg.sshHost,
-          port: Number.isInteger(cfg.remotePort) ? cfg.remotePort : 7900,
-          folder: cfg.deployFolder || '',
+          sshHost: target.sshHost,
+          port: target.port,
+          folder: target.folder,
         }),
       });
     }

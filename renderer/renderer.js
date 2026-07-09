@@ -5408,7 +5408,17 @@ function addPeerRow(peer) {
   // different port or install location. They wrap to a second line via the
   // full-width break so the primary inputs stay uncrowded.
   const portVal = Number.isInteger(peer.remotePort) ? peer.remotePort : 7900;
-  const folderVal = (typeof peer.deployFolder === 'string' && peer.deployFolder) ? peer.deployFolder : '~/wb-wrap-ui';
+  // Folder pre-fill precedence: the box's LIVE self-reported install dir wins
+  // over a persisted deployFolder (a stale guess must not shadow live truth —
+  // Bogdan's settings may still carry a polluted ~/wb-wrap-ui for a mac that
+  // actually runs from ~/projects/clodex), which wins over the default. When the
+  // value came from the live report we surface a dim inline hint below.
+  const liveSrc = (peer.id && peerStatuses.get(peer.id) && peerStatuses.get(peer.id).online)
+    ? (peerStatuses.get(peer.id).srcDir || '') : '';
+  const folderReported = !!(liveSrc && typeof liveSrc === 'string' && liveSrc.trim());
+  const folderVal = folderReported
+    ? liveSrc.trim()
+    : ((typeof peer.deployFolder === 'string' && peer.deployFolder) ? peer.deployFolder : '~/wb-wrap-ui');
   // One smart destination field: ssh host / IP / alias, OR an http(s):// URL. The
   // scheme prefix disambiguates (classifyPeerDest), so no protocol dropdown. The
   // settings schema is unchanged — a classified 'ssh' saves peer.sshHost and a
@@ -5425,7 +5435,8 @@ function addPeerRow(peer) {
     <label class="peer-row-advlabel">port</label>
     <input type="text" class="peer-row-port" title="Peer protocol port on the box (default 7900)" value="${esc(String(portVal))}">
     <label class="peer-row-advlabel">folder</label>
-    <input type="text" class="peer-row-folder" title="Install/clone dir on the box — ~/… (home-relative) or /abs (default ~/wb-wrap-ui)" value="${esc(folderVal)}">`;
+    <input type="text" class="peer-row-folder" title="Install/clone dir on the box — ~/… (home-relative) or /abs (default ~/wb-wrap-ui)" value="${esc(folderVal)}">
+    ${folderReported ? `<span class="peer-row-folder-hint peer-status-dim">folder reported by the box</span>` : ''}`;
   // Status/progress area (probe result → install offer → deploy step list).
   // Below the inputs so it can grow without reflowing the row.
   const status = document.createElement('div');

@@ -10,6 +10,7 @@ const { execFileSync } = require('child_process');
 const {
   probePeer, parseDeployLine, buildProbeScript, PROBE_NOLISTEN,
   fixSessionName, buildDeployFixBriefing, classifyDeployFolder, classifyPeerDest,
+  homeRelativize, resolveDeployFolder,
 } = require('../peer-deploy');
 
 // A session name must satisfy the same regex sessions/agents use elsewhere.
@@ -245,4 +246,43 @@ test('classifyPeerDest: an over-long destination (>128 chars) is rejected', () =
   assert.strictEqual(classifyPeerDest(long).kind, 'error');
   // Exactly 128 is still a valid ssh alias.
   assert.deepStrictEqual(classifyPeerDest('a'.repeat(128)), { kind: 'ssh', sshHost: 'a'.repeat(128) });
+});
+
+// --- homeRelativize: absolute path → ~/… for the self-report ------------------
+test('homeRelativize: inside home becomes ~/rest, exactly home becomes ~', () => {
+  assert.strictEqual(homeRelativize('/Users/bob/projects/clodex', '/Users/bob'), '~/projects/clodex');
+  assert.strictEqual(homeRelativize('/Users/bob/wb-wrap-ui', '/Users/bob'), '~/wb-wrap-ui');
+  assert.strictEqual(homeRelativize('/Users/bob', '/Users/bob'), '~');
+});
+
+test('homeRelativize: outside home is unchanged; trailing separators tolerated', () => {
+  assert.strictEqual(homeRelativize('/opt/clodex', '/Users/bob'), '/opt/clodex');
+  // A trailing slash on home (or path) still matches and normalizes.
+  assert.strictEqual(homeRelativize('/Users/bob/proj', '/Users/bob/'), '~/proj');
+  assert.strictEqual(homeRelativize('/Users/bob/proj/', '/Users/bob'), '~/proj');
+  // A prefix that isn't a path-boundary must NOT match (/Users/bobby ≠ ~).
+  assert.strictEqual(homeRelativize('/Users/bobby/x', '/Users/bob'), '/Users/bobby/x');
+});
+
+test('homeRelativize: empty inputs degrade to the raw path', () => {
+  assert.strictEqual(homeRelativize('', '/Users/bob'), '');
+  assert.strictEqual(homeRelativize('/opt/x', ''), '/opt/x');
+  assert.strictEqual(homeRelativize(null, null), '');
+});
+
+// --- resolveDeployFolder: reported > persisted > default ----------------------
+test('resolveDeployFolder: a live reported dir wins over a persisted guess', () => {
+  // The wrong-guess bug: settings carry ~/wb-wrap-ui but the box reports the real
+  // dir — reported must win so Update pulls the right checkout.
+  assert.strictEqual(resolveDeployFolder('~/projects/clodex', '~/wb-wrap-ui'), '~/projects/clodex');
+});
+
+test('resolveDeployFolder: falls through reported → persisted → ""', () => {
+  assert.strictEqual(resolveDeployFolder('', '~/wb-wrap-ui'), '~/wb-wrap-ui');
+  assert.strictEqual(resolveDeployFolder(null, '~/custom'), '~/custom');
+  assert.strictEqual(resolveDeployFolder(null, null), '');
+  assert.strictEqual(resolveDeployFolder('', ''), '');
+  // Whitespace-only on either side counts as absent.
+  assert.strictEqual(resolveDeployFolder('   ', '~/persisted'), '~/persisted');
+  assert.strictEqual(resolveDeployFolder('  ~/reported  ', '~/persisted'), '~/reported');
 });

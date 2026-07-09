@@ -65,6 +65,7 @@ before(async () => {
     send: () => ({ ok: true }),
     hostLabel: 'testhost',
     version: '0.0.0-test',
+    srcDir: '~/projects/clodex',
     getAttachInfo: (name) => (name === 'alpha'
       ? {
           ok: true, scrollback: Buffer.from('hello world'), cols: 100, rows: 30,
@@ -134,6 +135,10 @@ test('hello: identity and caps reach the peer, connection goes online', async ()
   assert.ok(st.caps.includes('control'));
   assert.ok(st.caps.includes('query'));
   assert.ok(st.caps.includes('create'));
+  // The self-reported install dir rides the hello and surfaces in status() (the
+  // same passthrough as platform) — this is what lets a consumer's Update pull
+  // the box's actual checkout instead of guessing a default.
+  assert.equal(st.srcDir, '~/projects/clodex');
   assert.equal(st.sessions[0].name, 'alpha');
 });
 

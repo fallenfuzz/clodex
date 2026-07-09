@@ -239,9 +239,37 @@ function classifyPeerDest(raw) {
   return { kind: 'error', error: "That doesn't look like an ssh host or a URL. Example: user@laptop2" };
 }
 
+// Render an absolute path as home-relative for display / self-report: inside
+// `home` → `~/rest`, exactly `home` → `~`, outside → unchanged. Trailing
+// separators on either side are tolerated (a home of `/Users/x/` still matches
+// `/Users/x/proj`). Pure; the owner side calls it on __dirname so a peer reports
+// its install dir the way the wizard's folder field expects (~/…).
+function homeRelativize(p, home) {
+  const path_ = String(p == null ? '' : p).replace(/\/+$/, '');
+  const h = String(home == null ? '' : home).replace(/\/+$/, '');
+  if (!path_) return path_;
+  if (!h) return path_;
+  if (path_ === h) return '~';
+  if (path_.startsWith(h + '/')) return '~/' + path_.slice(h.length + 1);
+  return path_;
+}
+
+// The ONE deploy-folder precedence rule, shared by every consumer: a live
+// self-reported install dir wins over a persisted deployFolder guess, which wins
+// over '' (the caller's default pre-fill). A stale persisted value must never
+// shadow live truth — that's the wrong-guess bug this closes. Pure.
+function resolveDeployFolder(reported, persisted) {
+  const r = typeof reported === 'string' ? reported.trim() : '';
+  if (r) return r;
+  const p = typeof persisted === 'string' ? persisted.trim() : '';
+  if (p) return p;
+  return '';
+}
+
 module.exports = {
   probePeer, buildProbeScript, parseDeployLine,
   fixSessionName, buildDeployFixBriefing,
   classifyDeployFolder, shSingleQuote, classifyPeerDest,
+  homeRelativize, resolveDeployFolder,
   PROBE_NOLISTEN, PROBE_BODY,
 };
