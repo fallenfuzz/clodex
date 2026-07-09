@@ -208,7 +208,14 @@ function initFilesPopover({ popoverApi, filesState, filesUnseen, peerFilesCount,
     if (e.key === 'Escape' && !filePeekOverlay.classList.contains('hidden')) closeFilePeek();
   });
 
-  return { openFilesPopover };
+  // The peer subsystem needs to know whether the files popover is currently
+  // showing a given session's rows (onPeerTelemetry suppresses the unseen latch
+  // while the user is "seeing" it) without touching the private DOM handle.
+  function isFilesPopoverForKey(key) {
+    return !filesPopover.classList.contains('hidden') && filesPopover.dataset.name === key;
+  }
+
+  return { openFilesPopover, openFilePeek, isFilesPopoverForKey };
 }
 
 module.exports = { initFilesPopover };

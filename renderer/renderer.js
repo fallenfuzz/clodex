@@ -1734,7 +1734,7 @@ window.api.onPeerTelemetry((id, name, tele) => {
   if (tele.files && typeof tele.files.count === 'number') {
     const prev = peerFilesCount.get(key);
     peerFilesCount.set(key, tele.files.count);
-    const watching = !filesPopover.classList.contains('hidden') && filesPopover.dataset.name === key;
+    const watching = isFilesPopoverForKey(key);
     if (prev !== undefined && tele.files.count > prev && !watching) {
       filesUnseen.add(key);
       filesGrew = true;
@@ -2725,7 +2725,7 @@ const { openBustPopover } = initBustPopover({ popoverApi, proxyState });
 // subscriptions; peek/diff data via popoverApi; the bar's file count/unseen
 // state (filesState/filesUnseen/peerFilesCount) + renderProxyBar are core,
 // injected by reference; getActiveSession reads the live active tab.
-const { openFilesPopover } = initFilesPopover({
+const { openFilesPopover, openFilePeek, isFilesPopoverForKey } = initFilesPopover({
   popoverApi, filesState, filesUnseen, peerFilesCount, renderProxyBar,
   getActiveSession: () => activeSession,
 });
