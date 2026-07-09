@@ -133,6 +133,23 @@ systemctl --user stop    clodex
 journalctl   --user -u   clodex -f        # live app logs
 ```
 
+## macOS peers
+
+A mac is a supported deploy target for **source install/update over SSH**, but
+Clodex is **not** auto-started there. `clodex-deploy.sh` is OS-aware (`uname -s`):
+on Darwin it walks preflight → source → npm → electron-rebuild → settings and
+**skips** the Linux-only steps (apt deps, the SUID chrome-sandbox, the systemd
+service + linger) with a note per step — no `systemctl`, no unit, no brew.
+
+- **Update path** (header-menu *Update Clodex* against a mac): the script updates
+  the checkout, then the wizard restarts the already-running app via
+  `POST /api/restart` — no service manager involved. `verify` probes hello for
+  ~5s; the still-running OLD app answers, and the post-restart hello is the real
+  version check.
+- **Fresh deploy** on a mac ends with the source built but nothing running —
+  start it manually (`npm start`, or launch the app). `verify` notes this on
+  stderr instead of failing (nothing auto-starts by design).
+
 ---
 
 ## Creating & removing sessions (`clodex-seed.sh`)

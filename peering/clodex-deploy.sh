@@ -31,10 +31,20 @@ CONFIG_DIR="$HOME/.config/clodex"
 SETTINGS="$CONFIG_DIR/ui-settings.json"
 UNIT_DIR="$HOME/.config/systemd/user"
 
+# OS awareness: macOS is a supported deploy target for source install/update, but
+# we do NOT set up auto-start there — the Linux-only steps (apt-deps, the SUID
+# chrome-sandbox, the systemd --user service + linger) are skipped with a note,
+# and on a mac starting the app is manual (or, on the update path, the already-
+# running app is restarted via POST /api/restart after the script succeeds).
+OS="$(uname -s)"
+IS_MAC=0
+[ "$OS" = "Darwin" ] && IS_MAC=1
+
 # Over `ssh host 'bash -s'` there's usually no login session, so `systemctl
 # --user` can't find its bus without this — the exact pitfall peering/README.md
 # warns about. Set it early so daemon-reload/enable --now work on first run.
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# Linux-only: it's a systemd-bus concern and there's no systemd on Darwin.
+[ "$IS_MAC" = "1" ] || export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # set -u + a non-login ssh that doesn't export USER would otherwise kill the
 # script at the linger check (which needs the username).
 USER="${USER:-$(id -un)}"
@@ -71,13 +81,21 @@ command -v node >/dev/null 2>&1 || fail preflight "node-not-found"
 command -v npm  >/dev/null 2>&1 || fail preflight "npm-not-found"
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
 [ "$NODE_MAJOR" -ge 20 ] 2>/dev/null || fail preflight "node-$(node -v 2>/dev/null)-too-old-need-20+"
-command -v systemctl >/dev/null 2>&1 || fail preflight "systemctl-not-found"
+# systemctl gates the Linux service step only; a mac never installs a unit.
+[ "$IS_MAC" = "1" ] || command -v systemctl >/dev/null 2>&1 || fail preflight "systemctl-not-found"
 ok preflight
 
 # --- apt deps: Electron's GUI libs + Xvfb + build toolchain ----------------
 # Only touches apt if something's actually missing (idempotent re-run). Mirror
 # of peering/README.md's dependency list — keep the two in sync.
 step apt-deps
+# macOS: no apt, and no brew adventures — node/git are already preflighted, and if
+# node-pty needs the Xcode command-line tools the electron-rebuild step fails
+# distinguishably. Skip cleanly.
+if [ "$IS_MAC" = "1" ]; then
+  log "macOS: skipping apt system packages (Electron GUI libs / Xvfb are Linux-only)"
+  ok apt-deps
+else
 APT_PKGS="xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 build-essential python3"
 missing=""
 for p in $APT_PKGS; do
@@ -102,6 +120,7 @@ if [ -n "$missing" ]; then
   fi
 fi
 ok apt-deps
+fi
 
 # --- source: clone or fast-forward to origin/<BRANCH> ----------------------
 step source
@@ -145,7 +164,14 @@ ok electron-rebuild
 # --- chrome-sandbox: the Chromium SUID sandbox needs root:root + mode 4755 --
 # Re-checked AFTER any rebuild/install because reinstalling electron resets it;
 # node-pty dies with "killed" (or Electron refuses to start) without it.
+# macOS: the SUID chrome-sandbox is a Linux-only mechanism, AND the `stat -c`
+# probe below is GNU coreutils syntax (BSD/macOS stat uses -f) — so this step
+# must NEVER run on Darwin. Skip cleanly before touching stat.
 step sandbox
+if [ "$IS_MAC" = "1" ]; then
+  log "macOS: skipping chrome-sandbox (the SUID Chromium sandbox is Linux-only)"
+  ok sandbox
+else
 SANDBOX="$SRC_DIR/node_modules/electron/dist/chrome-sandbox"
 if [ -f "$SANDBOX" ]; then
   owner="$(stat -c '%u' "$SANDBOX" 2>/dev/null || echo -1)"
@@ -163,6 +189,7 @@ else
   log "chrome-sandbox not present (electron layout differs) — skipping"
 fi
 ok sandbox
+fi
 
 # --- ui-settings.json: enable the peer server, MERGE (don't clobber) --------
 step settings
@@ -182,7 +209,15 @@ fs.renameSync(tmp, p);
 ok settings
 
 # --- systemd --user service + linger ---------------------------------------
+# macOS: Bogdan's ruling — "if it is a mac we don't make it start automatically".
+# No unit, no linger; a fresh mac deploy ends with a manual first start, and the
+# update path just restarts the already-running app via POST /api/restart (fired
+# by the wizard after the script succeeds), which needs no service manager.
 step service
+if [ "$IS_MAC" = "1" ]; then
+  log "macOS: auto-start not configured — start Clodex manually (npm start) or use the app"
+  ok service
+else
 mkdir -p "$UNIT_DIR"
 # Install/refresh the unit from the repo copy, pinning WorkingDirectory to the
 # actual source dir (the repo unit uses %h/wb-wrap-ui; honor a CLODEX_SRC override).
@@ -200,9 +235,29 @@ fi
 systemctl --user daemon-reload            || fail service "daemon-reload-failed"
 systemctl --user enable --now clodex.service >&2 || fail service "enable-now-failed"
 ok service
+fi
 
 # --- verify: the box answers the peer protocol we just enabled -------------
+# macOS: nothing auto-starts by design, so a fresh deploy legitimately has no app
+# answering — never FAIL on silence. Probe briefly (~5s): if it answers (the
+# update path, where the OLD app is still running when verify fires — its restart
+# comes later from the wizard, and the next hello is the real version check) → ok;
+# if silent → still ok, with a note to start it manually. Linux is unchanged
+# (30s, fail on silence — the systemd service must have come up).
 step verify
+if [ "$IS_MAC" = "1" ]; then
+  hello=""
+  for _ in $(seq 1 5); do
+    hello="$(curl -fsS -m 3 "http://127.0.0.1:$PORT/api/peer/hello" 2>/dev/null || true)"
+    case "$hello" in *'"app":"clodex"'*) break;; esac
+    sleep 1
+  done
+  case "$hello" in
+    *'"app":"clodex"'*) log "Clodex answering on :$PORT" ;;
+    *) log "no Clodex answering on :$PORT — start it manually (npm start) or launch the app" ;;
+  esac
+  ok verify
+else
 hello=""
 for _ in $(seq 1 30); do
   hello="$(curl -fsS -m 3 "http://127.0.0.1:$PORT/api/peer/hello" 2>/dev/null || true)"
@@ -213,5 +268,6 @@ case "$hello" in
   *'"app":"clodex"'*) ok verify ;;
   *) fail verify "no-hello-on-127.0.0.1:$PORT-after-30s" ;;
 esac
+fi
 
 echo "::done"
