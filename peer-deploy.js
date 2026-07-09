@@ -170,8 +170,42 @@ function buildDeployFixBriefing({ sshHost, port, label, logText, docsDir } = {})
   ].join('\n');
 }
 
+// Single-quote a value for POSIX sh: wrap in '…', and end/escape/reopen any
+// embedded quote. Renders any string as one safe literal word.
+function shSingleQuote(v) {
+  return `'${String(v == null ? '' : v).replace(/'/g, `'\\''`)}'`;
+}
+
+// Classify an operator-entered deploy folder and render its CLODEX_SRC export
+// token for the deploy preamble. The clone/checkout dir on the box; the deploy
+// script defaults CLODEX_SRC to $HOME/wb-wrap-ui, so a blank field ⇒ NO export
+// (the script's own default stands — one source of truth). Two accepted forms:
+//   `~/sub/dir` → REMOTE-home-relative. We render CLODEX_SRC="$HOME/"'sub/dir':
+//     $HOME stays UNQUOTED so the remote shell expands it, the remainder is a
+//     single-quoted literal. (A quoted "~" would be a literal tilde dir — the
+//     classic footgun this avoids.)
+//   `/abs/path` → absolute, single-quoted whole.
+// Anything else (a relative path without ~/, or a bare ~) is rejected with an
+// inline error — the wizard surfaces it and never deploys. Pure + testable.
+// Returns { ok:true, srcExport } (srcExport '' means no override) or
+// { ok:false, error }.
+function classifyDeployFolder(folder) {
+  const f = (folder == null ? '' : String(folder)).trim();
+  if (!f) return { ok: true, srcExport: '' };            // blank → script default
+  if (f.includes('\0')) return { ok: false, error: 'Folder path contains an invalid character.' };
+  if (f === '~' || f === '~/') return { ok: false, error: 'Enter a folder under home, e.g. ~/clodex.' };
+  if (f.startsWith('~/')) {
+    const rest = f.slice(2).replace(/^\/+/, '');         // strip the ~/ and any extra leading /
+    if (!rest) return { ok: false, error: 'Enter a folder under home, e.g. ~/clodex.' };
+    return { ok: true, srcExport: `CLODEX_SRC="$HOME/"${shSingleQuote(rest)}` };
+  }
+  if (f.startsWith('/')) return { ok: true, srcExport: `CLODEX_SRC=${shSingleQuote(f)}` };
+  return { ok: false, error: 'Use an absolute path (/…) or a home path (~/…).' };
+}
+
 module.exports = {
   probePeer, buildProbeScript, parseDeployLine,
   fixSessionName, buildDeployFixBriefing,
+  classifyDeployFolder, shSingleQuote,
   PROBE_NOLISTEN, PROBE_BODY,
 };

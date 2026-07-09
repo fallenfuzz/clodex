@@ -1662,7 +1662,7 @@ async function doPeerRestart(id, label) {
 // deliberately small: a start toast, a completion/failure toast, and the stderr
 // tail in the ipc-log on failure (the peers dialog's live step-list is for the
 // install-from-scratch wizard; a header-menu update has no row to stream into).
-async function updatePeerHost(id, label, sshHost, port) {
+async function updatePeerHost(id, label, sshHost, port, folder) {
   const go = await window.api.confirmPeerUpdate(label);
   if (!go) return;
   showToast(`Updating Clodex on ${label} — this can take a few minutes.`, { kind: 'peer-ui' });
@@ -1674,7 +1674,9 @@ async function updatePeerHost(id, label, sshHost, port) {
     else if (ev.type === 'fail') failReasons.push(ev.reason ? `${ev.name} — ${ev.reason}` : ev.name);
   });
   let res;
-  try { res = await window.api.peerDeploy(sshHost, { port }); }
+  // folder reuses the peer's persisted deployFolder (main resolved it from
+  // config) so an update targets the same install dir as the original deploy.
+  try { res = await window.api.peerDeploy(sshHost, { port, folder }); }
   catch (e) { res = { ok: false, error: (e && e.message) || 'deploy failed' }; }
   deployLineHandlers.delete(sshHost);
   if (res && res.ok && sawDone) {
@@ -1692,7 +1694,7 @@ async function updatePeerHost(id, label, sshHost, port) {
   appendIpcEntry({ from: 'deploy', to: label, body: `update failed (${why})\n${detail}` });
 }
 
-window.api.onPeerContextAction(async ({ action, id, name, sshHost, port }) => {
+window.api.onPeerContextAction(async ({ action, id, name, sshHost, port, folder }) => {
   const key = peerKey(id, name);
   switch (action) {
     case 'attach':
@@ -1726,9 +1728,10 @@ window.api.onPeerContextAction(async ({ action, id, name, sshHost, port }) => {
       break;
     case 'update':
       // Host-level in-place update — re-run the deploy script over ssh, restart
-      // on success. `name` is the display label; sshHost/port ride the message
-      // (main resolved them from the peer config, url-only peers never get here).
-      await updatePeerHost(id, name || 'peer', sshHost, port);
+      // on success. `name` is the display label; sshHost/port/folder ride the
+      // message (main resolved them from the peer config, url-only peers never
+      // get here).
+      await updatePeerHost(id, name || 'peer', sshHost, port, folder);
       break;
     case 'restartRemote':
       // Plain host-level restart of a peer SESSION (--resume, keeps history).
@@ -5276,7 +5279,7 @@ const peersOverlay = document.getElementById('peers-overlay');
 // Deploy-line router: main streams `peer-deploy-line` (sshHost, line) globally
 // as the deploy script runs; each in-flight wizard registers a handler keyed by
 // its ssh host so concurrent deploys never cross wires.
-const { parseDeployLine } = require('../peer-deploy');
+const { parseDeployLine, classifyDeployFolder } = require('../peer-deploy');
 const deployLineHandlers = new Map(); // sshHost -> (line) => void
 window.api.onPeerDeployLine((sshHost, line) => {
   const h = deployLineHandlers.get(sshHost);
@@ -5289,13 +5292,24 @@ function addPeerRow(peer) {
   const row = document.createElement('div');
   row.className = 'peer-row';
   row.dataset.peerId = peer.id || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
-  if (Number.isInteger(peer.remotePort)) row.dataset.remotePort = String(peer.remotePort);
+  // Port + folder are OVERRIDES, pre-filled with the real defaults (7900 and the
+  // deploy script's own $HOME/wb-wrap-ui clone dir). Left as-is they reproduce
+  // today's behavior; the operator changes them only when a box needs a
+  // different port or install location. They wrap to a second line via the
+  // full-width break so the primary inputs stay uncrowded.
+  const portVal = Number.isInteger(peer.remotePort) ? peer.remotePort : 7900;
+  const folderVal = (typeof peer.deployFolder === 'string' && peer.deployFolder) ? peer.deployFolder : '~/wb-wrap-ui';
   row.innerHTML = `
     <input type="text" class="peer-row-label" placeholder="label (e.g. laptop2)" value="${esc(peer.label || '')}">
     <input type="text" class="peer-row-ssh" placeholder="ssh host (user@laptop2)" value="${esc(peer.sshHost || '')}">
     <input type="text" class="peer-row-url" placeholder="or URL (advanced)" value="${esc(peer.url || '')}">
     <button type="button" class="secondary peer-row-test" title="Test the ssh host and check for Clodex; offer to install if absent">Test &amp; Set Up</button>
-    <button type="button" class="secondary peer-row-remove" title="Remove peer">&times;</button>`;
+    <button type="button" class="secondary peer-row-remove" title="Remove peer">&times;</button>
+    <div class="peer-row-break"></div>
+    <label class="peer-row-advlabel">port</label>
+    <input type="text" class="peer-row-port" title="Peer protocol port on the box (default 7900)" value="${esc(String(portVal))}">
+    <label class="peer-row-advlabel">folder</label>
+    <input type="text" class="peer-row-folder" title="Install/clone dir on the box — ~/… (home-relative) or /abs (default ~/wb-wrap-ui)" value="${esc(folderVal)}">`;
   // Status/progress area (probe result → install offer → deploy step list).
   // Below the inputs so it can grow without reflowing the row.
   const status = document.createElement('div');
@@ -5319,9 +5333,40 @@ function addPeerRow(peer) {
   }
 }
 
-// Per-peer remote port (settings-file-only; carried through on the row dataset).
+// Per-peer remote port, read live from the row's port input. Returns NaN for a
+// blank/non-numeric field so callers can validate; a valid 1..65535 int passes.
 function peerRowPort(row) {
-  return row.dataset.remotePort ? parseInt(row.dataset.remotePort, 10) : 7900;
+  const el = row.querySelector('.peer-row-port');
+  const raw = el ? el.value.trim() : '';
+  return raw === '' ? NaN : parseInt(raw, 10);
+}
+
+// Per-peer deploy folder override (raw operator string, ~/… or /abs). '' = the
+// field is blank → deploy falls back to the script's own default.
+function peerRowFolder(row) {
+  const el = row.querySelector('.peer-row-folder');
+  return el ? el.value.trim() : '';
+}
+
+// Validate a row's port + folder together, marking the offending input and
+// returning the first error (or null when both are fine). port defaults are
+// applied by the caller; here we only reject an explicitly-bad value.
+function validatePeerRowInputs(row) {
+  const portEl = row.querySelector('.peer-row-port');
+  const folderEl = row.querySelector('.peer-row-folder');
+  if (portEl) portEl.classList.remove('invalid');
+  if (folderEl) folderEl.classList.remove('invalid');
+  const port = peerRowPort(row);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    if (portEl) portEl.classList.add('invalid');
+    return { ok: false, error: 'Port must be a number from 1 to 65535.' };
+  }
+  const cls = classifyDeployFolder(peerRowFolder(row));
+  if (!cls.ok) {
+    if (folderEl) folderEl.classList.add('invalid');
+    return { ok: false, error: cls.error };
+  }
+  return { ok: true, port, folder: peerRowFolder(row) };
 }
 
 // "Test & Set Up": probe the box (ssh + curl hello on the box, no tunnel), then
@@ -5330,8 +5375,10 @@ function peerRowPort(row) {
 // still works whether or not you ever click Test.
 async function peerTestAndSetUp(row, status) {
   const sshHost = row.querySelector('.peer-row-ssh').value.trim();
-  const port = peerRowPort(row);
   if (!sshHost) { renderPeerStatus(status, `<span class="peer-status-warn">Enter an ssh host first (e.g. user@laptop2).</span>`); return; }
+  const v = validatePeerRowInputs(row);
+  if (!v.ok) { renderPeerStatus(status, `<span class="peer-status-warn">${esc(v.error)}</span>`); return; }
+  const port = v.port;
   const testBtn = row.querySelector('.peer-row-test');
   testBtn.disabled = true;
   renderPeerStatus(status, `<span class="peer-status-dim">ssh <span class="peer-spin">…</span> connecting to ${esc(sshHost)}</span>`);
@@ -5368,6 +5415,7 @@ async function peerTestAndSetUp(row, status) {
 // into a live step list. Terminal states: ::done (success → save hint),
 // ::need-sudo (copyable commands + re-run), or a ::fail / non-zero exit.
 async function peerRunDeploy(row, status, sshHost, port) {
+  const folder = peerRowFolder(row);   // '' → box uses the script default clone dir
   const steps = new Map();   // name -> { el, state }
   const sudoCmds = [];
   const logLines = [];       // raw ::marker stream, replayed to a fix agent on failure
@@ -5411,7 +5459,7 @@ async function peerRunDeploy(row, status, sshHost, port) {
     else if (ev.type === 'done') { sawDone = true; }
   });
   let res;
-  try { res = await window.api.peerDeploy(sshHost, { port }); }
+  try { res = await window.api.peerDeploy(sshHost, { port, folder }); }
   catch (e) { res = { ok: false, error: (e && e.message) || 'deploy failed' }; }
   deployLineHandlers.delete(sshHost);
   if (res && res.ok && sawDone) {
@@ -5469,6 +5517,9 @@ function renderPeerStatus(status, html) {
   status.classList.remove('hidden');
 }
 
+// Gather + validate every peer row. Returns { ok:true, peers } or, on the first
+// bad port/folder, { ok:false, error, row } after marking the offending input
+// and surfacing the message in that row's status panel (so Save can bail).
 function collectPeers() {
   const out = [];
   for (const row of peersListBox.querySelectorAll('.peer-row')) {
@@ -5476,15 +5527,23 @@ function collectPeers() {
     const url = row.querySelector('.peer-row-url').value.trim();
     if (!sshHost && !url) continue;
     const label = row.querySelector('.peer-row-label').value.trim();
+    const v = validatePeerRowInputs(row);
+    if (!v.ok) {
+      const status = row.parentElement && row.parentElement.querySelector('.peer-row-status');
+      if (status) renderPeerStatus(status, `<span class="peer-status-warn">${esc(v.error)}</span>`);
+      return { ok: false, error: v.error, row };
+    }
     const peer = { id: row.dataset.peerId, label: label || sshHost || url };
     if (sshHost) peer.sshHost = sshHost;
     if (url) peer.url = url;
-    // remotePort is settings-file-only (like wirescopePort) — carry the
-    // loaded value through the save instead of resetting it to default.
-    if (row.dataset.remotePort) peer.remotePort = parseInt(row.dataset.remotePort, 10);
+    // Port + folder are settings-file-only overrides (like wirescopePort): carry
+    // the row's validated values through the save. A folder equal to the default
+    // pre-fill still round-trips harmlessly (main re-validates at deploy time).
+    peer.remotePort = v.port;
+    if (v.folder) peer.deployFolder = v.folder;
     out.push(peer);
   }
-  return out;
+  return { ok: true, peers: out };
 }
 
 document.getElementById('peers-add').addEventListener('click', () => addPeerRow({}));
@@ -5500,7 +5559,9 @@ function closePeersDialog() { peersOverlay.classList.add('hidden'); }
 
 document.getElementById('btn-peers-cancel').addEventListener('click', closePeersDialog);
 document.getElementById('btn-peers-save').addEventListener('click', async () => {
-  await window.api.setSettings({ peers: collectPeers() });
+  const collected = collectPeers();
+  if (!collected.ok) return;   // invalid port/folder — inline error already shown, keep the dialog open
+  await window.api.setSettings({ peers: collected.peers });
   closePeersDialog();
 });
 peersOverlay.addEventListener('mousedown', (e) => { if (e.target === peersOverlay) closePeersDialog(); });

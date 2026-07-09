@@ -9,7 +9,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const {
   probePeer, parseDeployLine, buildProbeScript, PROBE_NOLISTEN,
-  fixSessionName, buildDeployFixBriefing,
+  fixSessionName, buildDeployFixBriefing, classifyDeployFolder,
 } = require('../peer-deploy');
 
 // A session name must satisfy the same regex sessions/agents use elsewhere.
@@ -146,4 +146,48 @@ test('clodex-deploy.sh passes a bash -n syntax check', () => {
   const script = path.join(__dirname, '..', 'peering', 'clodex-deploy.sh');
   // Throws (failing the test) on any shell syntax error.
   execFileSync('bash', ['-n', script]);
+});
+
+// --- classifyDeployFolder: the CLODEX_SRC preamble token ---------------------
+test('classifyDeployFolder: blank ⇒ no override (script default stands)', () => {
+  assert.deepStrictEqual(classifyDeployFolder(''), { ok: true, srcExport: '' });
+  assert.deepStrictEqual(classifyDeployFolder('   '), { ok: true, srcExport: '' });
+  assert.deepStrictEqual(classifyDeployFolder(null), { ok: true, srcExport: '' });
+  assert.deepStrictEqual(classifyDeployFolder(undefined), { ok: true, srcExport: '' });
+});
+
+test('classifyDeployFolder: ~/… expands $HOME on the REMOTE (unquoted $HOME)', () => {
+  // $HOME must stay OUTSIDE the single quotes so the box's shell expands it; the
+  // remainder is a single-quoted literal. A quoted "~" would be a literal dir.
+  assert.deepStrictEqual(classifyDeployFolder('~/clodex'),
+    { ok: true, srcExport: `CLODEX_SRC="$HOME/"'clodex'` });
+  assert.deepStrictEqual(classifyDeployFolder('~/projects/clodex'),
+    { ok: true, srcExport: `CLODEX_SRC="$HOME/"'projects/clodex'` });
+  // The default pre-fill round-trips to the script's own default location.
+  assert.deepStrictEqual(classifyDeployFolder('~/wb-wrap-ui'),
+    { ok: true, srcExport: `CLODEX_SRC="$HOME/"'wb-wrap-ui'` });
+  // Extra slashes after ~/ are normalized away.
+  assert.deepStrictEqual(classifyDeployFolder('~//clodex'),
+    { ok: true, srcExport: `CLODEX_SRC="$HOME/"'clodex'` });
+});
+
+test('classifyDeployFolder: absolute path is single-quoted whole', () => {
+  assert.deepStrictEqual(classifyDeployFolder('/opt/clodex'),
+    { ok: true, srcExport: `CLODEX_SRC='/opt/clodex'` });
+  // A path with a quote is safely escaped (never breaks out of the literal).
+  assert.deepStrictEqual(classifyDeployFolder(`/opt/cl'odex`),
+    { ok: true, srcExport: `CLODEX_SRC='/opt/cl'\\''odex'` });
+});
+
+test('classifyDeployFolder: a relative-without-~ path is rejected', () => {
+  const r = classifyDeployFolder('projects/clodex');
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /absolute|home/i);
+  assert.strictEqual(classifyDeployFolder('clodex').ok, false);
+  assert.strictEqual(classifyDeployFolder('./x').ok, false);
+});
+
+test('classifyDeployFolder: a bare ~ (no path under home) is rejected', () => {
+  assert.strictEqual(classifyDeployFolder('~').ok, false);
+  assert.strictEqual(classifyDeployFolder('~/').ok, false);
 });

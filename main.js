@@ -1229,11 +1229,18 @@ function sanitizePeers(raw) {
     // ssh host or user@host — same charset ssh_config aliases allow.
     const sshHost = typeof p.sshHost === 'string' && /^[a-zA-Z0-9._@-]{1,128}$/.test(p.sshHost) ? p.sshHost : null;
     if (!url && !sshHost) continue;
+    // Optional per-peer deploy folder override (the clone dir on the box). Kept
+    // as the raw operator string (~/… or /abs) — validated/rendered at deploy
+    // time by classifyDeployFolder, not here; a blank/invalid value just falls
+    // back to the script's own $HOME/wb-wrap-ui default. Cap length defensively.
+    const deployFolder = typeof p.deployFolder === 'string' && p.deployFolder.trim()
+      ? p.deployFolder.trim().slice(0, 256) : null;
     out.push({
       id: p.id,
       label: typeof p.label === 'string' && p.label ? p.label : (sshHost || url),
       url, sshHost,
       remotePort: Number.isInteger(p.remotePort) ? p.remotePort : 7900,
+      deployFolder,
     });
   }
   return out;
@@ -1850,7 +1857,7 @@ function randBase36(len) {
 const { ctxReminderFor } = require('./ctx-reminder');
 const { parseSkillFrontmatter, buildSkillPlugin } = require('./skills-util');
 const { sshRun } = require('./ssh-run');
-const { probePeer, fixSessionName, buildDeployFixBriefing } = require('./peer-deploy');
+const { probePeer, fixSessionName, buildDeployFixBriefing, classifyDeployFolder } = require('./peer-deploy');
 const PROXY_POLL_INTERVAL = 5000; // ms
 const PROXY_HTTP_TIMEOUT = 4000;  // ms — default; keeps polling/handshake snappy
 // Reports disk-scan the whole session on the proxy side, so they can take much
@@ -7644,9 +7651,17 @@ app.whenReady().then(() => {
     const port = Number.isInteger(opts.port) ? opts.port : (uiSettings.get().remotePort || 7900);
     const repoUrl = typeof opts.repoUrl === 'string' && opts.repoUrl ? opts.repoUrl : `https://github.com/${UPDATE_REPO}`;
     const branch = typeof opts.branch === 'string' && opts.branch ? opts.branch : 'master';
+    // Optional deploy-folder override → a CLODEX_SRC export appended to the
+    // preamble. classifyDeployFolder renders the tilde/absolute forms safely; a
+    // blank folder yields '' (script default stands). A malformed folder is a
+    // hard stop BEFORE we ssh — the wizard validates too, but never trust the
+    // renderer for a value that becomes a remote shell word.
+    const srcClass = classifyDeployFolder(opts.folder);
+    if (!srcClass.ok) return { ok: false, error: srcClass.error };
     const shellEsc = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
+    const srcExport = srcClass.srcExport ? ` ${srcClass.srcExport}` : '';
     const preamble =
-      `export PORT=${shellEsc(port)} REPO_URL=${shellEsc(repoUrl)} BRANCH=${shellEsc(branch)}\n`;
+      `export PORT=${shellEsc(port)} REPO_URL=${shellEsc(repoUrl)} BRANCH=${shellEsc(branch)}${srcExport}\n`;
     const wc = e.sender;
     try {
       const res = await sshRun(sshHost, preamble + script, {
@@ -8079,6 +8094,7 @@ app.whenReady().then(() => {
           action: 'update', id, name: label,
           sshHost: cfg.sshHost,
           port: Number.isInteger(cfg.remotePort) ? cfg.remotePort : 7900,
+          folder: cfg.deployFolder || '',
         }),
       });
     }
