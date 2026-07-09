@@ -155,6 +155,13 @@ class RemoteServer {
     this._broadcast('sessions', {});
   }
 
+  // DM doorbell: a reply was just queued in the outbox for `origin`. Tells that
+  // consumer to claim now instead of waiting out the hello interval. The outbox
+  // stays the durable channel; this is only the low-latency nudge.
+  notifyDmMail(origin) {
+    this._broadcast('dm-mail', { origin });
+  }
+
   // Live PTY bytes for a session — fan out to its attach streams. Called
   // from the session manager's onData, so it must stay cheap when nobody
   // is attached (the common case).

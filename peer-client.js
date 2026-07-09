@@ -110,16 +110,25 @@ class PeerConnection {
         // replies accrue between hellos, and the hello cadence IS the delivery
         // latency. Emits 'peer-dms' up to main for local delivery.
         if (this._selfLabel && Array.isArray(body.dmOrigins) && body.dmOrigins.includes(this._selfLabel)) {
-          this.claimDms((resp) => {
-            if (resp && resp.ok && Array.isArray(resp.messages) && resp.messages.length) {
-              this._emit('peer-dms', this.id, resp.messages);
-            }
-          });
+          this._claimAndEmit();
         }
       } else {
         this._setOnline(false);
       }
       this._helloTimer = setTimeout(() => this._helloLoop(), HELLO_INTERVAL_MS);
+    });
+  }
+
+  // Claim our outbox off the box and emit whatever came back. Shared by the
+  // hello-tick path (box advertised our label in dmOrigins) and the dm-mail
+  // doorbell (box pushed an SSE nudge). Both can fire for the same mail: the
+  // whole-dir rename-claim is atomic, so the loser reads an empty snapshot and
+  // emits nothing — no double-delivery.
+  _claimAndEmit() {
+    this.claimDms((resp) => {
+      if (resp && resp.ok && Array.isArray(resp.messages) && resp.messages.length) {
+        this._emit('peer-dms', this.id, resp.messages);
+      }
     });
   }
 
@@ -151,6 +160,11 @@ class PeerConnection {
           const s = this.sessions.find((x) => x.name === data.name);
           if (s) s.activity = data.state;
           this._emit('peer-activity', this.id, data.name, data.state);
+        } else if (event === 'dm-mail' && data && data.origin === this._selfLabel) {
+          // Doorbell: the box queued a reply for us. Claim immediately rather
+          // than waiting the hello interval; racing hello-claims are safe (see
+          // _claimAndEmit).
+          this._claimAndEmit();
         }
       },
       onOpen: (req) => { this._eventsReq = req; this._eventsBackoff = RECONNECT_MIN_MS; },

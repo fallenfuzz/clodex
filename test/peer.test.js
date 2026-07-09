@@ -195,6 +195,45 @@ test('dm federation: box outbox → hello dmOrigins → claim → delivered to c
   conn2.stop();
 });
 
+test('dm doorbell: notifyDmMail pushes an immediate claim (no hello wait)', async () => {
+  const got = [];
+  const conn3 = new PeerConnection({
+    id: 'p3', label: 'lab3', url: `http://127.0.0.1:${server.port}`, selfLabel: 'ringer',
+    emit: (channel, ...args) => { if (channel === 'peer-dms') got.push(args); },
+  });
+  conn3.start();
+  // Wait until the SSE events feed is open so the doorbell has a listener. The
+  // first hello sees an empty outbox for us and claims nothing.
+  await waitFor(() => (conn3.online && conn3._eventsReq ? true : null), 'events feed open');
+  // Queue a reply and ring the doorbell — no hello elapses in this window
+  // (interval is 15s), so an emission here proves the SSE push drove the claim.
+  fakeOutbox['ringer'] = [{ from: 'clodex', to: 'bob', body: 'ding', urgent: false, ts: 2 }];
+  server.notifyDmMail('ringer');
+  const msgs = await waitFor(() => (got.length ? got[0][1] : null), 'doorbell peer-dms emission');
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0].body, 'ding');
+  assert.deepStrictEqual(fakeOutbox['ringer'], []);
+  conn3.stop();
+});
+
+test('dm doorbell: a doorbell for another origin triggers no claim', async () => {
+  const got = [];
+  const conn4 = new PeerConnection({
+    id: 'p4', label: 'lab4', url: `http://127.0.0.1:${server.port}`, selfLabel: 'quiet',
+    emit: (channel, ...args) => { if (channel === 'peer-dms') got.push(args); },
+  });
+  conn4.start();
+  await waitFor(() => (conn4.online && conn4._eventsReq ? true : null), 'events feed open');
+  // Mail is waiting for us, but the doorbell names someone else. The origin
+  // filter means we never claim: our outbox stays queued and nothing emits.
+  fakeOutbox['quiet'] = [{ from: 'clodex', to: 'bob', body: 'nope', urgent: false, ts: 3 }];
+  server.notifyDmMail('someoneelse');
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(got.length, 0);
+  assert.equal((fakeOutbox['quiet'] || []).length, 1);
+  conn4.stop();
+});
+
 test('attach: replay carries scrollback and owner geometry', async () => {
   conn.attach('alpha');
   const rep = await waitFor(() => events.find((x) => x.channel === 'peer-replay'), 'peer-replay');

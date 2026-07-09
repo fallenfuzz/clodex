@@ -5506,6 +5506,9 @@ class SessionManager {
         { from: senderName, to: name, body: intent.body, urgent: intent.urgent === true, ts: Date.now() },
         this._nextParkSeq());
       if (!r.ok) { bounce(`could not queue for ${intent.target}: ${r.error}`); return; }
+      // Ring the doorbell so the consumer claims now instead of waiting a hello
+      // interval; the outbox it just landed in is the durable fallback.
+      if (remoteServer) { try { remoteServer.notifyDmMail(origin); } catch {} }
       // Silent on success — like a local delivery, the sender gets no notice.
       this._broadcast('ipc-message', { type: 'dm', from: senderName, to: `${name}@${origin}`, body: `WIRE→${origin} (outbox): ${intent.body}` });
       return;
