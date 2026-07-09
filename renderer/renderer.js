@@ -3,6 +3,9 @@ const { FitAddon } = require('@xterm/addon-fit');
 const { SearchAddon } = require('@xterm/addon-search');
 const { PendingInput } = require('../peer-input-queue');
 const { versionSeverity, updateApplies, releaseAgeInfo } = require('../proxy-util');
+const { THEMES, STRIP_LEVELS, SEV_LINE, CTX_CAT_LABELS, COST_SPINE, COST_CONTENT, BUST_FAULT, REP_BUCKET_COLOR, REP_BUCKET_LABEL, REP_CAT_COLOR } = require('./lib/constants');
+const { esc, shortPath, fmtTokens, fmtCountdown, fmtAgo, fmtUsd, fmtDur, shortTs, fmtBustTokens, fmtBytes } = require('./lib/format');
+const { renderDiffHtml, costStackBlock, svgCostChart, bustRow } = require('./lib/render-html');
 
 // ---------------------------------------------------------------------------
 // State
@@ -16,44 +19,6 @@ let activeSession = null;
 // xterm color object (incl. the 16-color ANSI palette) since the terminal's
 // palette lives in JS, not CSS. 'midnight' is the default (matches :root).
 // ---------------------------------------------------------------------------
-const THEMES = {
-  midnight: {
-    label: 'Midnight (default)',
-    xterm: {
-      background: '#1a1a2e', foreground: '#eee', cursor: '#e94560',
-      selectionBackground: '#3a4a6a',
-      black: '#1a1a2e', red: '#e94560', green: '#4ade80', yellow: '#fbbf24',
-      blue: '#60a5fa', magenta: '#c084fc', cyan: '#22d3ee', white: '#eee',
-      brightBlack: '#6b7689', brightRed: '#ff6b81', brightGreen: '#86efac',
-      brightYellow: '#fde047', brightBlue: '#93c5fd', brightMagenta: '#d8b4fe',
-      brightCyan: '#67e8f9', brightWhite: '#fff',
-    },
-  },
-  claude: {
-    label: 'Claude (warm dark)',
-    xterm: {
-      background: '#262624', foreground: '#f5f4ef', cursor: '#d97757',
-      selectionBackground: '#4a4641',
-      black: '#3a3733', red: '#e0816b', green: '#a3b18a', yellow: '#d9a55b',
-      blue: '#7da3c4', magenta: '#b08cba', cyan: '#6fb3b8', white: '#f5f4ef',
-      brightBlack: '#9b9690', brightRed: '#eb9a85', brightGreen: '#bcc7a6',
-      brightYellow: '#e6bd7c', brightBlue: '#9bbcd6', brightMagenta: '#c6a7ce',
-      brightCyan: '#8ec9cd', brightWhite: '#fffefb',
-    },
-  },
-  light: {
-    label: 'Light',
-    xterm: {
-      background: '#faf9f5', foreground: '#1f1e1d', cursor: '#c15f3c',
-      selectionBackground: '#d8e2ec',
-      black: '#1f1e1d', red: '#c1442e', green: '#4f7a3a', yellow: '#9a6b1e',
-      blue: '#2b6cb0', magenta: '#8a4f9e', cyan: '#2d8a8f', white: '#5c5852',
-      brightBlack: '#6b6862', brightRed: '#a8351f', brightGreen: '#3f6630',
-      brightYellow: '#855a14', brightBlue: '#225a96', brightMagenta: '#763f88',
-      brightCyan: '#247479', brightWhite: '#1f1e1d',
-    },
-  },
-};
 const THEME_DEFAULT = 'midnight';
 function themeName() {
   const t = localStorage.getItem('clodex-theme');
@@ -281,18 +246,6 @@ function addFailedSessionToSidebar(entry) {
   });
 
   sessionList.appendChild(item);
-}
-
-// Shorten a path by replacing $HOME with ~ and showing only the last 2 segments
-function shortPath(p) {
-  if (!p) return '';
-  let s = p;
-  if (s.startsWith(homeDir)) s = '~' + s.slice(homeDir.length);
-  const parts = s.split('/').filter(Boolean);
-  if (parts.length > 2) {
-    return (s.startsWith('/') ? '/' : '') + '…/' + parts.slice(-2).join('/');
-  }
-  return s;
 }
 
 function addSessionToSidebar(name, type, cwd, label) {
@@ -2132,13 +2085,6 @@ const ctxTokens = new Map(); // name -> { used, size }
 const CTX_WARN_TOKENS = 200000;   // yellow
 const CTX_HEAVY_TOKENS = 300000;  // red
 
-// Compact token count: 201234 -> "201k", 1000000 -> "1M".
-function fmtTokens(n) {
-  if (n >= 1e6) { const m = n / 1e6; return (Number.isInteger(m) ? m : m.toFixed(1)) + 'M'; }
-  if (n >= 1000) return Math.round(n / 1000) + 'k';
-  return String(n);
-}
-
 function applyCtxBadge(name, pct) {
   const el = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
   if (!el) return;
@@ -2178,11 +2124,6 @@ const filesState = new Map();
 // Sessions whose feed grew since the popover was last opened — drives the
 // files button's unseen-changes highlight (cleared on open, never on poll).
 const filesUnseen = new Set();
-
-function fmtCountdown(remaining_s) {
-  const s = Math.max(0, Math.round(remaining_s));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-}
 
 // Type of a session, read from its sidebar tab (the renderer's source for it).
 function sessionTypeOf(name) {
@@ -3065,12 +3006,6 @@ document.addEventListener('keydown', (e) => {
 let stripMenu = null;
 function closeStripMenu() { if (stripMenu) { stripMenu.remove(); stripMenu = null; } }
 
-const STRIP_LEVELS = [
-  { lvl: 0, name: 'Off', desc: 'No stripping' },
-  { lvl: 1, name: 'Level 1 — thinking', desc: 'Strip prior-turn reasoning (~30% off, no visible degradation)' },
-  { lvl: 2, name: 'Level 2 — + edit-acks & failed calls', desc: 'Also collapse succeeded edit/write acks and stub failed tool calls (only reclaims while L1 is stripping)' },
-];
-
 function openStripMenu(anchorBtn, currentLevel) {
   closeStripMenu();
   const caps = (activeSession && proxyState.get(activeSession)?.payload?.capabilities) || {};
@@ -3416,15 +3351,6 @@ function closePeerInfoPopover() {
   peerInfoUpdateBtn.onclick = null;
 }
 
-const SEV_LINE = {
-  current: 'Up to date with your Clodex.',
-  patch: 'One patch release behind your Clodex.',
-  minor: 'A minor version behind your Clodex.',
-  major: 'A major version behind your Clodex.',
-  newer: 'Newer than your Clodex — this machine is the older one.',
-  unknown: '',
-};
-
 function openPeerInfoPopover(id, anchorBtn) {
   const st = peerStatuses.get(id);
   if (!st) return;
@@ -3659,12 +3585,6 @@ const ctxPopover = document.getElementById('ctx-popover');
 const ctxPopoverName = document.getElementById('ctx-popover-name');
 const ctxPopoverBody = document.getElementById('ctx-popover-body');
 
-const CTX_CAT_LABELS = {
-  tools: 'Tools', system: 'System prompt', claudemd: 'CLAUDE.md',
-  useremail: 'User email', user: 'User messages', assistant: 'Assistant',
-  thinking: 'Thinking', tool_calls: 'Tool calls', tool_results: 'Tool results',
-  agents: 'Agents', skills: 'Skills',
-};
 // Unknown future categories collapse to "other" (forward-compatible per the
 // wirescope contract).
 const ctxCatLabel = (c) => CTX_CAT_LABELS[c] || 'other';
@@ -4015,58 +3935,7 @@ const costPopover = document.getElementById('cost-popover');
 const costPopoverName = document.getElementById('cost-popover-name');
 const costPopoverBody = document.getElementById('cost-popover-body');
 
-// read = window carriage, write = cache toll, generation = output (receipt-exact).
-const COST_SPINE = [
-  { key: 'read', label: 'read · carriage', color: '#61afef' },
-  { key: 'write', label: 'write · cache toll', color: '#e5c07b' },
-  { key: 'generation', label: 'generation · output', color: '#98c379' },
-];
-// content_carriage_est apportions the READ dollars to content (estimate).
-const COST_CONTENT = [
-  { key: 'conversation', label: 'conversation', color: '#61afef' },
-  { key: 'preamble', label: 'preamble', color: '#98c379' },
-  { key: 'thinking', label: 'thinking', color: '#c678dd' },
-];
-
 function closeCostPopover() { costPopover.classList.add('hidden'); costPopover.dataset.name = ''; }
-
-function costStackBlock(title, badge, defs, vals, total) {
-  const rows = defs.map(d => ({ d, v: vals[d.key] || 0 })).filter(x => x.v > 0);
-  const bar = rows.map(x => `<span style="width:${(total > 0 ? x.v / total * 100 : 0).toFixed(2)}%;background:${x.d.color}"></span>`).join('');
-  const legend = rows.map(x => {
-    const pct = total > 0 ? Math.round(x.v / total * 100) : 0;
-    return `<span><span class="ck" style="background:${x.d.color}"></span>${esc(x.d.label)} <span class="cv">${fmtUsd(x.v)} · ${pct}%</span></span>`;
-  }).join('');
-  return `<div class="cost-sec-title"><span>${title}${badge}</span><span class="ctx-line-total">${fmtUsd(total)}</span></div>`
-    + `<div class="cost-bar">${bar}</div><div class="cost-legend">${legend}</div>`;
-}
-
-// Cumulative-cost line chart: one line per spine bucket over request index.
-// read towers and bends super-linearly; write/generation stay near the floor —
-// that contrast is the point. Colors match the spine legend above.
-function svgCostChart(reqs, defs) {
-  const W = 600, H = 150, pl = 6, pr = 6, pt = 10, pb = 14;
-  const n = reqs.length;
-  const cum = {}; const run = {};
-  defs.forEach(d => { cum[d.key] = []; run[d.key] = 0; });
-  reqs.forEach(r => defs.forEach(d => { run[d.key] += (r[d.key + '_usd'] || 0); cum[d.key].push(run[d.key]); }));
-  let maxY = 0;
-  defs.forEach(d => { const last = cum[d.key][n - 1] || 0; if (last > maxY) maxY = last; });
-  maxY = maxY || 1;
-  const X = i => pl + (n <= 1 ? 0 : (i / (n - 1)) * (W - pl - pr));
-  const Y = v => H - pb - (v / maxY) * (H - pt - pb);
-  const paths = defs.map(d => {
-    const pts = cum[d.key].map((v, i) => `${i === 0 ? 'M' : 'L'}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(' ');
-    return `<path d="${pts}" fill="none" stroke="${d.color}" stroke-width="1.5"/>`;
-  }).join('');
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Cumulative cost by type over requests">`
-    + `<line x1="${pl}" y1="${H - pb}" x2="${W - pr}" y2="${H - pb}" stroke="#444" stroke-width="1"/>`
-    + paths
-    + `<text x="${pl}" y="${pt}" font-size="9" fill="#888">${esc(fmtUsd(maxY))}</text>`
-    + `<text x="${pl}" y="${H - 3}" font-size="9" fill="#888">req 1</text>`
-    + `<text x="${W - pr}" y="${H - 3}" font-size="9" fill="#888" text-anchor="end">req ${n}</text>`
-    + `</svg>`;
-}
 
 function renderCostTimeline(d, base, sid) {
   const s = d && d.series;
@@ -4194,52 +4063,6 @@ const bustPopoverBody = document.getElementById('bust-popover-body');
 
 function closeBustPopover() { bustPopover.classList.add('hidden'); bustPopover.dataset.name = ''; }
 
-// Fault → how the row reads. `content` is the actionable class (a real prefix
-// change); `environment`/`self` are expected and render calm. Unknown/absent
-// faults fall back to neutral so a pre-v0.6.20 proxy still renders cleanly.
-const BUST_FAULT = {
-  content:     { cls: 'bust-fault-content', label: 'prefix changed' },
-  environment: { cls: 'bust-fault-env',     label: 'cache went cold' },
-  self:        { cls: 'bust-fault-self',    label: 'designed strip cost' },
-};
-
-function fmtBustTokens(n) {
-  if (!n) return '0';
-  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
-  return String(n);
-}
-
-// One transition row. Everything except fault/fix_hint is v0.6.19-present.
-function bustRow(t, base, sid) {
-  const sev = t.severity || (t.bust ? 'bust' : 'append');
-  const loc = t.locus || {};
-  // locus.label is wirescope's human string ("system[2] … +SHELL COMMANDS:",
-  // "messages[0] claudeMd bundle changed"). Fall back to segment+index.
-  const what = loc.label
-    || (loc.segment ? `${loc.segment}${loc.index != null ? `[${loc.index}]` : ''} changed` : 'divergence');
-  // A content-fault bust that straddles a proxy restart (restart_between) is the
-  // benign deploy/upgrade tax — it self-heals next turn. Render it calm (env
-  // treatment) + a heal badge, so a GUI-restart-to-upgrade doesn't read as a
-  // real leak. A content bust WITHOUT restart_between is the actionable one.
-  const deployTax = !!(t.restart_between && t.fault === 'content');
-  const fault = t.fault && BUST_FAULT[deployTax ? 'environment' : t.fault];
-  const faultBadge = fault ? `<span class="bust-badge ${fault.cls}">${esc(fault.label)}</span>` : '';
-  const healBadge = deployTax ? '<span class="bust-badge bust-badge-heal">one-time deploy tax · self-heals</span>' : '';
-  // fix_hint is wirescope's prose (v0.6.20+); suppress it for the deploy tax
-  // (nothing to fix) — the heal badge already says all there is to say.
-  const hint = (t.fix_hint && !deployTax) ? `<div class="bust-hint">${esc(t.fix_hint)}</div>` : '';
-  const mag = `<span class="bust-mag">${fmtBustTokens(t.write_tokens)} tok rewritten${t.write_frac != null ? ` · ${Math.round(t.write_frac * 100)}%` : ''}</span>`;
-  // Deep-link into wirescope's per-turn navigator (v0.6.20 adds bust-jump nav).
-  const turnLink = (base && sid && t.i != null)
-    ? `<span class="px-link-ext" data-url="${esc(`${base}/_session?session=${encodeURIComponent(sid)}&turn=${t.i}`)}" title="Open this turn in the wirescope navigator (⌘-click for browser)">turn ${t.i} →</span>`
-    : `<span class="bust-turn-static">turn ${t.i != null ? t.i : '?'}</span>`;
-  return `<div class="bust-row bust-sev-${esc(sev)}">`
-    + `<div class="bust-row-head"><span class="bust-what">${esc(what)}</span>${faultBadge}${healBadge}</div>`
-    + `<div class="bust-row-meta"><span class="bust-sev">${esc(sev)}</span>${mag}${turnLink}</div>`
-    + hint
-    + `</div>`;
-}
-
 function renderBustSeries(d, base, sid) {
   const busts = Array.isArray(d && d.busts) ? d.busts : [];
   const nT = d && d.count != null ? d.count : null;
@@ -4346,14 +4169,6 @@ window.api.onSessionFiles((name, files) => {
   if (watching) renderFilesRows(name);
 });
 
-function fmtAgo(ts) {
-  const s = Math.max(0, (Date.now() - ts) / 1000);
-  if (s < 60) return 'now';
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
-}
-
 function closeFilesPopover() { filesPopover.classList.add('hidden'); filesPopover.dataset.name = ''; }
 
 function renderFilesRows(name) {
@@ -4447,17 +4262,6 @@ let filePeek = null; // { path, tab, diffRes, peekRes }
 
 function closeFilePeek() { filePeekOverlay.classList.add('hidden'); filePeek = null; }
 
-function renderDiffHtml(diff) {
-  return diff.split('\n').map((ln) => {
-    let cls = 'diff-ctx';
-    if (ln.startsWith('+++') || ln.startsWith('---') || ln.startsWith('diff ') || ln.startsWith('index ')) cls = 'diff-file';
-    else if (ln.startsWith('@@')) cls = 'diff-hunk';
-    else if (ln.startsWith('+')) cls = 'diff-add';
-    else if (ln.startsWith('-')) cls = 'diff-del';
-    return `<div class="diff-line ${cls}">${esc(ln) || ' '}</div>`;
-  }).join('');
-}
-
 function renderFilePeek() {
   if (!filePeek) return;
   const { tab, diffRes, peekRes } = filePeek;
@@ -4536,40 +4340,6 @@ const reportNameEl = document.getElementById('report-name');
 const reportBody = document.getElementById('report-body');
 
 function closeReportPanel() { reportOverlay.classList.add('hidden'); reportOverlay.dataset.name = ''; }
-
-function fmtUsd(n) {
-  if (typeof n !== 'number' || !isFinite(n)) return '$0';
-  if (n >= 100) return '$' + n.toFixed(0);
-  if (n >= 1) return '$' + n.toFixed(2);
-  return '$' + n.toFixed(n >= 0.1 ? 3 : 4);
-}
-function fmtDur(s) {
-  if (!s) return '';
-  if (s >= 3600) return (s / 3600).toFixed(1) + 'h';
-  if (s >= 60) return Math.round(s / 60) + 'm';
-  return Math.round(s) + 's';
-}
-function shortTs(iso) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso || '');
-  if (!m) return iso || '';
-  const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+m[2] - 1] || m[2];
-  return `${mon} ${+m[3]} ${m[4]}:${m[5]}`;
-}
-
-// Stable colors shared by each stacked bar and its legend.
-const REP_BUCKET_COLOR = {
-  cache_read: '#61afef', cache_write_initial: '#56b6c2',
-  cache_write_rewrite: '#e5c07b', uncached_input: '#e06c75', output: '#98c379',
-};
-const REP_BUCKET_LABEL = {
-  cache_read: 'Cache read', cache_write_initial: 'Cache write (initial)',
-  cache_write_rewrite: 'Cache write (rewrite)', uncached_input: 'Uncached input',
-  output: 'Output',
-};
-const REP_CAT_COLOR = {
-  system: '#61afef', claudemd: '#e5c07b', useremail: '#c678dd',
-  skills: '#56b6c2', tools: '#98c379',
-};
 
 async function openReportPanel(name) {
   reportNameEl.textContent = name;
@@ -5275,14 +5045,6 @@ let wsPollTimer = null;
 async function refreshWsStatus() {
   try { renderWsStatus(await window.api.wirescopeStatus()); } catch {}
   try { renderRemoteStatus(await window.api.remoteStatus()); } catch {}
-}
-
-function fmtBytes(n) {
-  if (!(n > 0)) return '0 B';
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0, v = n;
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
 }
 
 // Capture-log size readout + Clear button with an age picker. Sourced entirely
@@ -6337,13 +6099,3 @@ window.api.onRequestOpenSkillsDrawer((name) => openSkillsDrawer(name));
   // Focus the first restored session
   switchSession(restored[0].name);
 })();
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function esc(str) {
-  const d = document.createElement('div');
-  d.textContent = str;
-  return d.innerHTML;
-}
