@@ -173,6 +173,58 @@ function isHumanPtyInput(data) {
   return String(data).replace(PTY_AUTO_REPLY_RE, '').length > 0;
 }
 
+// Bracketed-paste markers. Claude Code enables bracketed paste (mode 2004), so a
+// multiline paste arrives as ONE human chunk wrapped `\x1b[200~…\x1b[201~`, and
+// the CLI treats the interior \r as LITERAL newlines — the paste does NOT submit,
+// the draft stays open. A naive "\r ⇒ closed" would false-close the latch and let
+// the next parkable delivery splice straight through the open draft (Bogdan's
+// paste-logs-into-a-draft workflow — the exact bug this whole fix prevents).
+const PASTE_START = '\x1b[200~';
+const PASTE_END = '\x1b[201~';
+
+// Draft-close detection, STATEFUL across chunks. A submit/abort key (Enter \r or
+// Ctrl-C \x03) closes the draft ONLY when it lands OUTSIDE a bracketed-paste
+// region; inside a paste every byte is literal content. node-pty splits a large
+// paste across reads, so the 200~/201~ region can SPAN chunks — the caller
+// threads the running `inPaste` bit back in each call (main.js keeps it on
+// s._inPaste next to the other keystroke stamps).
+//
+// Returns { closes, inPaste }: `closes` = a real submit/abort happened in this
+// chunk; `inPaste` = the paste state to carry into the next chunk. A \r AFTER the
+// 201~ closer in the same chunk still closes (we're back outside the region).
+//
+// \x03 inside a paste: treated as NON-closing (literal pasted byte, not a live
+// Ctrl-C — the CLI doesn't abort on it), consistent with the unsafe-false-close
+// direction this fix targets. clodex's spec leaned "still closes"; going the
+// fail-safe way instead (documented, easily flipped). Only ever consulted for
+// input already classified human (isHumanPtyInput), so focus/query replies never
+// reach it.
+function draftChunkSignal(chunk, inPaste = false) {
+  const s = chunk == null ? '' : String(chunk);
+  let paste = !!inPaste;
+  let closes = false;
+  let i = 0;
+  while (i < s.length) {
+    if (!paste && s.startsWith(PASTE_START, i)) { paste = true; i += PASTE_START.length; continue; }
+    if (paste && s.startsWith(PASTE_END, i)) { paste = false; i += PASTE_END.length; continue; }
+    if (!paste) { const c = s[i]; if (c === '\r' || c === '\x03') closes = true; }
+    i++;
+  }
+  return { closes, inPaste: paste };
+}
+
+// Level-triggered "is the operator mid-draft right now?" latch. True once a
+// keystroke has landed more recently than the last submit/abort — and it STAYS
+// true across thinking pauses, unlike the time-windowed quiet-gate which
+// reopens the instant typing pauses. Callers stamp lastUserInputTs on every
+// human keystroke and lastUserSubmitTs when draftChunkSignal closes. Zero/absent
+// timestamps read as no-draft. Fail direction is safe for the park divert: a
+// stale "still open" parks the delivery (drains on the next submit or the cap),
+// which is never worse than a splice.
+function isDraftOpen({ lastUserInputTs = 0, lastUserSubmitTs = 0 } = {}) {
+  return (lastUserInputTs || 0) > (lastUserSubmitTs || 0);
+}
+
 // Decision + the reason it went that way — the reason drives the ops-log
 // observability ("autocompact suppressed: cache-not-warm") that surfaced the
 // silent-never-fired class. shouldAutoCompact stays a thin boolean wrapper so
@@ -348,5 +400,6 @@ function shapeProxyRecord(r, probe, now = Date.now()) {
 module.exports = {
   PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord, shapeSubagent,
   AUTO_COMPACT, headroomBand, shouldAutoCompact, autoCompactDecision, isHumanPtyInput,
+  draftChunkSignal, isDraftOpen,
   DM_HOLD_IDLE_MS, peerStatusLabel, shouldHoldDm,
 };

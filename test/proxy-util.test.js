@@ -204,6 +204,70 @@ test('isHumanPtyInput: keystrokes are human, unknown sequences fail toward human
   assert.strictEqual(isHumanPtyInput('\x1b[?999z'), true);
 });
 
+// --- draft tracking: draftChunkSignal + isDraftOpen --------------------------
+// Level-triggered draft latch behind the inject park divert: a keystroke opens
+// the draft (stamp lastUserInputTs); a submit/abort OUTSIDE a bracketed-paste
+// region closes it (stamp lastUserSubmitTs). draftOpen = input > submit.
+const { draftChunkSignal, isDraftOpen } = require('../proxy-util');
+
+test('draftChunkSignal: Enter and Ctrl-C close; plain keys/edits do not', () => {
+  assert.deepStrictEqual(draftChunkSignal('\r'), { closes: true, inPaste: false });    // Enter submits
+  assert.deepStrictEqual(draftChunkSignal('\x03'), { closes: true, inPaste: false });  // Ctrl-C abandons
+  assert.deepStrictEqual(draftChunkSignal('a'), { closes: false, inPaste: false });    // a plain key opens/extends
+  assert.deepStrictEqual(draftChunkSignal('hello'), { closes: false, inPaste: false });
+  assert.deepStrictEqual(draftChunkSignal('\x7f'), { closes: false, inPaste: false }); // backspace edits
+  assert.deepStrictEqual(draftChunkSignal('\x1b[A'), { closes: false, inPaste: false });// arrow nav
+  assert.deepStrictEqual(draftChunkSignal(''), { closes: false, inPaste: false });
+  assert.deepStrictEqual(draftChunkSignal(null), { closes: false, inPaste: false });
+});
+
+test('draftChunkSignal: type-then-Enter batched into one read counts as closed', () => {
+  // Fast type-then-Enter (not a paste): the trailing \r is a real submit.
+  assert.deepStrictEqual(draftChunkSignal('done\r'), { closes: true, inPaste: false });
+  assert.deepStrictEqual(draftChunkSignal('ab\x03cd'), { closes: true, inPaste: false });
+});
+
+test('draftChunkSignal: a multiline bracketed paste does NOT close (interior \\r is literal)', () => {
+  // The false-close bug: paste never submits in bracketed mode, so the \r
+  // between lines must NOT stamp a close — the draft stays open.
+  const chunk = '\x1b[200~line1\rline2\rline3\x1b[201~';
+  assert.deepStrictEqual(draftChunkSignal(chunk, false), { closes: false, inPaste: false });
+});
+
+test('draftChunkSignal: a paste SPANNING two chunks (\\r in each) does not close', () => {
+  // node-pty splits a large paste: the 200~ region opens in chunk A and closes
+  // in chunk B; the running inPaste bit must carry across so neither \r closes.
+  const a = draftChunkSignal('\x1b[200~alpha\rbeta', false);
+  assert.deepStrictEqual(a, { closes: false, inPaste: true });   // still inside the paste
+  const b = draftChunkSignal('gamma\rdelta\x1b[201~', a.inPaste);
+  assert.deepStrictEqual(b, { closes: false, inPaste: false });  // region closed, no submit
+});
+
+test('draftChunkSignal: a \\r AFTER the 201~ closer in the same chunk closes', () => {
+  // Paste ends, then the operator hits Enter — same read. We're back outside the
+  // region by the \r, so it's a real submit.
+  const chunk = '\x1b[200~pasted\x1b[201~\r';
+  assert.deepStrictEqual(draftChunkSignal(chunk, false), { closes: true, inPaste: false });
+});
+
+test('draftChunkSignal: \\x03 INSIDE a paste is literal, does not close (fail-safe)', () => {
+  // Judgment call (clodex leaned the other way): a pasted 0x03 byte is content,
+  // not a live Ctrl-C — closing on it would be the same false-close class. So it
+  // stays open; only a Ctrl-C outside the region aborts.
+  assert.deepStrictEqual(draftChunkSignal('\x1b[200~a\x03b\x1b[201~', false), { closes: false, inPaste: false });
+  // ...but a Ctrl-C after the paste closer still closes.
+  assert.deepStrictEqual(draftChunkSignal('\x1b[200~a\x1b[201~\x03', false), { closes: true, inPaste: false });
+});
+
+test('isDraftOpen: open once a keystroke post-dates the last submit; closed otherwise', () => {
+  assert.strictEqual(isDraftOpen({ lastUserInputTs: 100, lastUserSubmitTs: 50 }), true);  // typed after submit
+  assert.strictEqual(isDraftOpen({ lastUserInputTs: 50, lastUserSubmitTs: 100 }), false); // submitted last
+  assert.strictEqual(isDraftOpen({ lastUserInputTs: 100, lastUserSubmitTs: 100 }), false); // mixed chunk: equal ⇒ closed
+  assert.strictEqual(isDraftOpen({ lastUserInputTs: 100 }), true);   // never submitted → open
+  assert.strictEqual(isDraftOpen({}), false);                        // no input ever → closed
+  assert.strictEqual(isDraftOpen(), false);                          // defaults → closed
+});
+
 const AC_NOW = 10_000_000;
 function acArgs(over = {}, payloadOver = {}) {
   return {

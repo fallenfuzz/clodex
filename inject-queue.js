@@ -19,6 +19,16 @@
 // Deliberately dependency-injected (write / timers / clocks / predicates) so the
 // serialization and the gate are unit-testable without a live PTY or Electron.
 
+// Gap between the leading Ctrl-U (clear-line) write and the text write. EMPIRICAL
+// (Claude Code 2.1.205, verified live): a LONE '\x15' written on its own — with a
+// short gap before the text — registers as a clear-line KEY event (the CLI shows
+// its "Ctrl+Y to paste deleted text" kill-ring hint and the draft vanishes). The
+// OLD single-chunk write of '\x15'+text was read as ONE paste-like input event,
+// which left the '\x15' as a LITERAL char in the buffer (it never cleared
+// anything, and merged into an open draft). The gap is what makes the CLI's input
+// loop process the key before the text arrives; ~30ms is comfortably enough.
+const CTRLU_SETTLE_MS = 30;
+
 // Pure decision: should the drainer keep waiting for a typing-quiet window before
 // injecting this item? True = wait more. Waits while a human touched the pane
 // within quietMs, but never past maxWaitMs from when THIS item began waiting.
@@ -50,7 +60,9 @@ class InjectQueue {
   //   onCapFire(text)       optional: the max-wait cap forced this item through
   //                         while a human was STILL typing (the splice-risk case)
   //                         — surfaced for observability, never changes behavior
-  constructor({ write, settleMsFor, quietMs, maxWaitMs, lastHumanInputAt, isDead, now, sleep, onCapFire }) {
+  //   ctrlUSettleMs         gap between the Ctrl-U write and the text write
+  //                         (default CTRLU_SETTLE_MS; tests override to 0)
+  constructor({ write, settleMsFor, quietMs, maxWaitMs, lastHumanInputAt, isDead, now, sleep, onCapFire, ctrlUSettleMs }) {
     this._write = write;
     this._settleMsFor = settleMsFor;
     this._quietMs = quietMs;
@@ -60,6 +72,7 @@ class InjectQueue {
     this._now = now || Date.now;
     this._sleep = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
     this._onCapFire = onCapFire || null;
+    this._ctrlUSettleMs = Number.isFinite(ctrlUSettleMs) ? ctrlUSettleMs : CTRLU_SETTLE_MS;
     this._chain = Promise.resolve();
     this._length = 0;
   }
@@ -68,14 +81,22 @@ class InjectQueue {
 
   // Fire-and-forget: appends to the chain so items drain strictly in arrival
   // order, one critical section at a time. Returns the tail promise for tests.
-  enqueue(text) {
+  //
+  // opts.divert(text): optional per-item seam checked RIGHT before the write
+  // (after the quiet-gate). If it returns true the item is claimed — the queue
+  // skips the write+Enter entirely, so the bytes never reach the pane. This is
+  // how a delivery gets park-diverted when the operator opened a draft DURING
+  // the quiet-gate wait: the divert re-checks draft state at fire time, not at
+  // enqueue time. Absent/throwing divert ⇒ the item writes as normal.
+  enqueue(text, opts = {}) {
     this._length++;
-    const run = () => this._drain(text).finally(() => { this._length--; });
+    const divert = typeof opts.divert === 'function' ? opts.divert : null;
+    const run = () => this._drain(text, divert).finally(() => { this._length--; });
     this._chain = this._chain.then(run, run);   // run even if a prior item rejected
     return this._chain;
   }
 
-  async _drain(text) {
+  async _drain(text, divert = null) {
     const waitingSince = this._now();
     let deferred = false;
     // Quiet-gate: poll in short slices so a keystroke landing mid-wait extends
@@ -90,6 +111,18 @@ class InjectQueue {
       await this._sleep(Math.min(this._quietMs, 500));
     }
     if (this._isDead()) return;
+    // Park-at-fire-time divert: a draft may have OPENED during the quiet-gate
+    // wait above (the one-shot enqueue-time park decision couldn't see it).
+    // Re-check now, immediately before the write. If the caller claims the item
+    // (parks it), skip the write+Enter entirely — the bytes never touch the
+    // pane, so there's no splice. Checked before the cap-fire below so a parked
+    // item doesn't log a spurious splice warning. A throwing divert falls
+    // through to a normal write (never drop a delivery).
+    if (divert) {
+      let claimed = false;
+      try { claimed = !!divert(text); } catch {}
+      if (claimed) return;
+    }
     // Cap-fire: we waited, and we're proceeding while a human is STILL inside
     // the typing window — the max-wait cap forced us through an active draft
     // (the splice-risk case). Surface it (never suppress the inject). Once
@@ -99,7 +132,14 @@ class InjectQueue {
       && this._now() - (this._lastHumanInputAt() || 0) < this._quietMs) {
       try { this._onCapFire(text); } catch {}
     }
-    this._write('\x15' + text.replace(/\n/g, '\r'));   // Ctrl-U + text (\n→\r)
+    // Ctrl-U as its OWN write, a short gap, then the text — see CTRLU_SETTLE_MS:
+    // written together they'd be read as one paste-like event and the \x15 would
+    // land literal. Parking now handles the draft-open case, so this Ctrl-U is
+    // mostly a no-op guard clearing stray junk off an otherwise-empty prompt.
+    this._write('\x15');                               // clear-line key event
+    await this._sleep(this._ctrlUSettleMs);
+    if (this._isDead()) return;
+    this._write(text.replace(/\n/g, '\r'));            // the text (\n→\r)
     await this._sleep(this._settleMsFor(text));
     if (this._isDead()) return;
     this._write('\r');                                 // Enter — closes the unit

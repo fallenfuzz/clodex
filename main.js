@@ -1833,7 +1833,7 @@ function resolveProxyBase(proxy) {
 // streaming/refusals, a clodex2 concern).
 // See https://github.com/avirtual/wirescope (INTEGRATION.md).
 
-const { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord, AUTO_COMPACT, shouldAutoCompact, autoCompactDecision, isHumanPtyInput, peerStatusLabel, shouldHoldDm } = require('./proxy-util');
+const { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord, AUTO_COMPACT, shouldAutoCompact, autoCompactDecision, isHumanPtyInput, draftChunkSignal, isDraftOpen, peerStatusLabel, shouldHoldDm } = require('./proxy-util');
 const { parseAgentFrontmatter, buildAgentsArg, denyAgentRules } = require('./agents-util');
 const { extractFileTouches, noteFileTouches, vetFileIntent } = require('./file-touch');
 const { classifyNotification } = require('./attention');
@@ -4312,6 +4312,16 @@ class SessionManager {
       // A human touched this pane — auto-compact's quiet-window fact (injecting
       // /compact starts with Ctrl-U, which would eat a half-typed draft).
       s.lastUserInputTs = Date.now();
+      // Level-triggered draft latch (isDraftOpen): a chunk carrying Enter/Ctrl-C
+      // OUTSIDE a bracketed-paste region CLOSES the draft (stamp submit ts); any
+      // other keystroke leaves it open. draftChunkSignal is stateful across
+      // chunks (a large paste's 200~…201~ region can span reads), so we thread
+      // s._inPaste through. This is what the inject park divert reads to decide,
+      // at fire time, whether the operator is still mid-composition. Peer-
+      // controller remote input rides this same choke point, tracked for free.
+      const sig = draftChunkSignal(data, s._inPaste);
+      s._inPaste = sig.inPaste;
+      if (sig.closes) s.lastUserSubmitTs = s.lastUserInputTs;
       // And drop the atPrompt latch: a user at the keyboard can open dialog UIs
       // WITHOUT an API turn (/permissions et al.) — the quiet window only covers
       // 2 minutes, a dialog can sit until warmth expiry. Only the next terminal
@@ -4817,7 +4827,7 @@ class SessionManager {
                   : `If it can't wait, resend as \`[agent:dm ${intent.target} urgent] <message>\`; otherwise it'll be cheapest right after ${intent.target}'s next turn.`;
                 notice = `[agent:dm] NOT delivered to ${intent.target}: ${verdict.reason}. ${retry}`;
               }
-              this._injectText(session, notice);
+              this._injectText(session, notice, { parkable: true });
             }
             this._broadcast('ipc-message', {
               type: 'dm', from: senderName, to: intent.target,
@@ -4847,7 +4857,7 @@ class SessionManager {
         // Anyone may resend (same trust domain). Claim + drain race safely: an
         // ENOENT (or no match) means the target's next-turn drain already took
         // it, which is a success, so we report "delivered" not an error.
-        const reply = (msg) => { if (session) this._injectText(session, `[agent:resend] ${msg}`); };
+        const reply = (msg) => { if (session) this._injectText(session, `[agent:resend] ${msg}`, { parkable: true }); };
         const claimed = claimParkedById(PENDING_DIR, intent.id);
         if (!claimed) {
           reply(`nothing parked under "${intent.id}" — it may already have been delivered on the target's next turn.`);
@@ -4878,7 +4888,7 @@ class SessionManager {
         }
         // Deliver the parked copy. Not bypassHold: a mid-turn/compacting target
         // still queues-and-flushes correctly; only the cost hold is bypassed.
-        this._injectText(target, claimed.text);
+        this._injectText(target, claimed.text, { parkable: true });
         const origin = (claimed.text.match(/^\[agent:from (\S+)\]/) || [])[1] || senderName;
         this._sendToSession(target.name, 'session-mention', target.name, 'dm', origin);
         reply(`delivered the parked message to ${claimed.name}.`);
@@ -4910,11 +4920,11 @@ class SessionManager {
         const list = others.length
           ? others.map(p => p.label ? `${p.name} (${p.label})` : p.name).join(', ')
           : '(none)';
-        if (session) this._injectText(session, `[agent:peers] ${list}`);
+        if (session) this._injectText(session, `[agent:peers] ${list}`, { parkable: true });
         break;
       }
       case 'name': {
-        if (session) this._injectText(session, `[agent:name] ${senderName}`);
+        if (session) this._injectText(session, `[agent:name] ${senderName}`, { parkable: true });
         break;
       }
       case 'context': {
@@ -4958,7 +4968,7 @@ class SessionManager {
   // [agent:file] line; success is silent — the file appearing IS the ack, and
   // an inject costs the agent a turn. Every attempt logs to the IPC drawer.
   _handleFileIntent(session, sub, rawPath) {
-    const reply = (msg) => this._injectText(session, `[agent:file] ${msg}`);
+    const reply = (msg) => this._injectText(session, `[agent:file] ${msg}`, { parkable: true });
     // Token bucket, not min-gap: "open all three reports" is one legitimate
     // burst; a confused agent machine-gunning windows is not.
     const now = Date.now();
@@ -5062,7 +5072,7 @@ class SessionManager {
       const summary = units.length
         ? units.map(u => `• ${u.id}${u.scope ? ` [${u.scope}]` : ''}${u.pinned ? ' (pinned)' : ''}: ${u.body.split('\n')[0].slice(0, 60)}`).join('\n')
         : '(no memories yet)';
-      this._injectText(session, `[agent:memory] ${units.length} unit(s):\n${summary}`);
+      this._injectText(session, `[agent:memory] ${units.length} unit(s):\n${summary}`, { parkable: true });
       return;
     }
     if (sub === 'remember') {
@@ -5084,14 +5094,14 @@ class SessionManager {
         persistence.markDigested(agent, session.sessionId);
         this._memoryAck(session, `[agent:memory] remembered ${unit.id}${scope ? ` [${scope}]` : ''}${pinned ? ' (pinned)' : ''}`);
       } catch (e) {
-        this._injectText(session, `[agent:memory] could not remember: ${e.message}`);
+        this._injectText(session, `[agent:memory] could not remember: ${e.message}`, { parkable: true });
       }
       return;
     }
     if (sub === 'recall') {
       const unit = memoryStore.recall(agent, body);
       if (!unit) {
-        this._injectText(session, `[agent:memory] no match for "${body.trim().slice(0, 60)}"`);
+        this._injectText(session, `[agent:memory] no match for "${body.trim().slice(0, 60)}"`, { parkable: true });
         return;
       }
       // Surface as a tail message (spill if large) — the spec-prescribed recall
@@ -5106,7 +5116,7 @@ class SessionManager {
         refreshDigest();
         this._memoryAck(session, `[agent:memory] ${sub}ned ${body.trim()}`);
       } catch (e) {
-        this._injectText(session, `[agent:memory] could not ${sub}: ${e.message}`);
+        this._injectText(session, `[agent:memory] could not ${sub}: ${e.message}`, { parkable: true });
       }
       return;
     }
@@ -5118,11 +5128,11 @@ class SessionManager {
         // tripped Fable's refusal classifier (memory-tampering pattern match).
         this._memoryAck(session, `[agent:memory] removed ${body.trim()} from the store`);
       } catch (e) {
-        this._injectText(session, `[agent:memory] could not remove: ${e.message}`);
+        this._injectText(session, `[agent:memory] could not remove: ${e.message}`, { parkable: true });
       }
       return;
     }
-    this._injectText(session, `[agent:memory] unknown sub-command "${sub}" (use list|remember|recall|pin|unpin|forget)`);
+    this._injectText(session, `[agent:memory] unknown sub-command "${sub}" (use list|remember|recall|pin|unpin|forget)`, { parkable: true });
   }
 
   // Spawn a NEW persistent peer session from inside a running agent (spec
@@ -5134,7 +5144,7 @@ class SessionManager {
   // with appendPromptFiles=[] still speaks dm/who/context. Replies (ok + every
   // error) inject straight back into the spawner's input as an [agent:spawn] line.
   _handleSpawnIntent(spawner, intent) {
-    const reply = (msg) => this._injectText(spawner, `[agent:spawn] ${msg}`);
+    const reply = (msg) => this._injectText(spawner, `[agent:spawn] ${msg}`, { parkable: true });
     const name = (intent.name || '').trim();
     const rawCwd = (intent.cwd || '').trim();
     if (!name || !rawCwd) { reply('error: usage [agent:spawn name:X cwd:Y]'); return; }
@@ -5228,7 +5238,7 @@ class SessionManager {
           + 'reload drops all history, so the fresh process only knows what you '
           + 'pass it. Re-fire as `[agent:context reload] <briefing for your next '
           + 'self: what you were doing, what to do next>`. Reload aborted; '
-          + 'this session is untouched.');
+          + 'this session is untouched.', { parkable: true });
         return;
       }
       // In-flight guard: a reload is a kill + cold respawn. A duplicate intent
@@ -5434,7 +5444,10 @@ class SessionManager {
     // it into the pane and splicing the draft. Falls through to a normal inject
     // otherwise, or if parking isn't applicable / fails.
     if (!this._maybeParkDelivery(target, finalText)) {
-      this._injectText(target, finalText);
+      // parkable: the delivery-time park above is a one-shot; if the operator
+      // opens a draft AFTER it (but before the queue writes), the fire-time
+      // divert re-checks and parks rather than splicing the draft.
+      this._injectText(target, finalText, { parkable: true });
     }
     this._sendToSession(targetName, 'session-mention', targetName, mtype, senderName);
   }
@@ -5542,7 +5555,39 @@ class SessionManager {
     // quiet-gate before starting. The queue self-drains; callers stay
     // fire-and-forget. Enter fires inside the queue's critical section (bailing
     // if the PTY died) — same death-window guard as before, just serialized.
-    this._injectQueueFor(session).enqueue(text);
+    //
+    // Park-at-fire-time: conversational deliveries/notices pass parkable:true so
+    // the queue re-checks (via the divert) whether a draft opened during its
+    // quiet-gate wait and parks instead of splicing. OPT-IN by design, not
+    // opt-out: a missed tag just falls back to today's inject-through behavior
+    // (a possible splice, no worse than before), whereas parking a CLI-driving
+    // self-intent (compact/reload continuation, slash command) would stall the
+    // agent — so those stay unparkable by omission, which is the safe direction.
+    const divert = opts.parkable ? this._parkDivertFor(session) : null;
+    this._injectQueueFor(session).enqueue(text, divert ? { divert } : undefined);
+  }
+
+  // Build the park-at-fire-time divert for a parkable injection, or null when
+  // parking doesn't apply (non-claude: the drain rides a Claude UserPromptSubmit
+  // hook Codex lacks — same gate as _maybeParkDelivery). The returned predicate
+  // is called by the InjectQueue right before it writes: if a draft is open at
+  // that instant, park the text for the operator's next submit (arming the
+  // non-destructive cap) and tell the queue to skip the write. Parking is
+  // best-effort — on failure it returns false so the delivery still injects.
+  _parkDivertFor(session) {
+    if (!session || session.agentType !== 'claude') return null;
+    return (text) => {
+      if (session._dead || !isDraftOpen(session)) return false;
+      try {
+        parkDelivery(PENDING_DIR, session.name, text, this._nextParkSeq());
+      } catch (e) {
+        log.error('inject', `fire-time park failed for ${session.name}: ${e.message} — injecting instead`);
+        return false;
+      }
+      this._armParkCap(session);
+      log.info('inject', `diverted to park: draft open (${session.name})`);
+      return true;
+    };
   }
 
   // Lazily build (and memoize on the session) the per-session InjectQueue. The
