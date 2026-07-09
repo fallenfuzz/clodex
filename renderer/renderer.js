@@ -2,7 +2,7 @@ const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { SearchAddon } = require('@xterm/addon-search');
 const { PendingInput } = require('../peer-input-queue');
-const { versionSeverity, releaseAgeInfo } = require('../proxy-util');
+const { versionSeverity, updateApplies, releaseAgeInfo } = require('../proxy-util');
 
 // ---------------------------------------------------------------------------
 // State
@@ -1302,20 +1302,22 @@ function renderPeers() {
       if (tun.error) header.title = tun.error;
     }
     // Identity surfacing: an online peer's hello carries version + caps (+ os).
-    // Show them in the header tooltip, and flag a version delta in the state text
-    // — severity-driven so the color rides the same class the ⓘ icon uses. A peer
-    // AHEAD of us reads 'newer' (we're the stale one), behind reads 'outdated'.
+    // Show them in the header tooltip; the version delta tints the peer NAME
+    // (below) rather than adding state text — the old 'newer'/'outdated' strings
+    // pushed the action icons past the sidebar edge. Severity-driven so the name,
+    // the ⓘ icon, and the popover all ride the same class.
     let sev = 'unknown';
     if (st.online && st.version) {
       const capList = (st.caps || []).join(', ') || 'none';
       header.title = `Clodex v${st.version} · caps: ${capList}${st.platform ? ` · ${st.platform}` : ''}`;
-      if (ourAppVersion) {
-        sev = versionSeverity(ourAppVersion, st.version);
-        if (sev === 'newer') stateText = 'newer';
-        else if (sev === 'patch' || sev === 'minor' || sev === 'major') stateText = 'outdated';
-        // current / unknown: leave the (empty, online) state text as-is.
-      }
+      if (ourAppVersion) sev = versionSeverity(ourAppVersion, st.version);
     }
+    // Tint the name only when the peer is genuinely BEHIND us (patch/minor/major
+    // climb yellow→orange→red). current/newer/unknown leave the name at its
+    // normal color — a dim tint on a bold label reads as disabled, and an
+    // up-to-date (or ahead) peer's name must never render dimmer than a session
+    // row. The ⓘ icon still carries the full-range sev tint (dim suits icon chrome).
+    const nameSev = (sev === 'patch' || sev === 'minor' || sev === 'major') ? ` peer-sev-${sev}` : '';
     // Right-aligned host action strip mirrors the header context menu: ＋ new
     // session (create-capable peers only), ↻ restart Clodex, ◎ choose visible
     // sessions (the old ⋯ opener). The first two need the peer online; the eye
@@ -1324,8 +1326,8 @@ function renderPeers() {
     const canCreate = peerSupportsCreate(st);
     const off = st.online ? '' : 'disabled';
     header.innerHTML = `<span class="peer-dot ${st.online ? 'online' : ''}"></span>` +
-      `<span class="peer-label">${esc(hostLabel)}</span>` +
-      `<span class="peer-state peer-sev-${sev}">${esc(stateText)}</span>` +
+      `<span class="peer-label${nameSev}">${esc(hostLabel)}</span>` +
+      `<span class="peer-state">${esc(stateText)}</span>` +
       `<span class="peer-actions">` +
         (canCreate ? `<button class="peer-select peer-new" title="New Session on ${esc(hostLabel)}…" aria-label="New Session on ${esc(hostLabel)}" ${off}>&#65291;</button>` : '') +
         `<button class="peer-select peer-restart" title="Restart Clodex on ${esc(hostLabel)}" aria-label="Restart Clodex on ${esc(hostLabel)}" ${off}>&#8635;</button>` +
@@ -1359,6 +1361,10 @@ function renderPeers() {
       window.api.showPeerHeaderMenu({
         id, label: peerDisplayHost(st), online: !!st.online,
         canCreate: peerSupportsCreate(st),
+        // sev is in scope from this row's identity block; main gates the Update
+        // item on it (updateApplies) so we don't offer a pointless restart to a
+        // same-version or ahead peer. 'unknown' (offline / unparseable) keeps it.
+        sev,
       });
     });
     sessionList.appendChild(header);
@@ -3453,7 +3459,10 @@ function openPeerInfoPopover(id, anchorBtn) {
   // against a stale resolve landing after the popover was closed/retargeted.
   peerInfoUpdateBtn.classList.add('hidden');
   peerInfoUpdateBtn.onclick = null;
-  if (st.online) {
+  // Hidden when the peer isn't behind us: same-version or ahead has nothing to
+  // gain from our deploy (the script pulls latest master). Kept for
+  // patch/minor/major and 'unknown' (dev/unparseable — can't rule it out).
+  if (st.online && updateApplies(sev)) {
     window.api.peerDeployConfig(id).then((cfg) => {
       if (!cfg || !cfg.sshHost) return;
       if (peerInfoPopover.classList.contains('hidden') || peerInfoPopover.dataset.peerId !== String(id)) return;

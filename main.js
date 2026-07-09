@@ -1846,7 +1846,7 @@ function resolveProxyBase(proxy) {
 // streaming/refusals, a clodex2 concern).
 // See https://github.com/avirtual/wirescope (INTEGRATION.md).
 
-const { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord, AUTO_COMPACT, shouldAutoCompact, autoCompactDecision, isHumanPtyInput, draftChunkSignal, isDraftOpen, peerStatusLabel, shouldHoldDm } = require('./proxy-util');
+const { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord, AUTO_COMPACT, shouldAutoCompact, autoCompactDecision, isHumanPtyInput, draftChunkSignal, isDraftOpen, peerStatusLabel, shouldHoldDm, updateApplies } = require('./proxy-util');
 const { parseAgentFrontmatter, buildAgentsArg, denyAgentRules } = require('./agents-util');
 const { extractFileTouches, noteFileTouches, vetFileIntent } = require('./file-touch');
 const { classifyNotification } = require('./attention');
@@ -8296,7 +8296,7 @@ app.whenReady().then(() => {
 
   ipcMain.on('peer:header-menu', (e, st) => {
     const win = BrowserWindow.fromWebContents(e.sender);
-    const { id, label, online, canCreate } = st || {};
+    const { id, label, online, canCreate, sev } = st || {};
     const template = [];
     // Create is gated on the peer advertising the 'create' capability (older
     // peers 501 the endpoint); the renderer passes canCreate from st.caps.
@@ -8316,8 +8316,10 @@ app.whenReady().then(() => {
     // "Update Clodex on <box>…" re-runs the idempotent deploy script over ssh.
     // Only offered for peers reached via an ssh host (a url-only peer has no ssh
     // route) and only when online (nothing to update on an unreachable box).
-    // Same deployTargetFor resolver as the popover — reported srcDir wins.
-    const target = online ? deployTargetFor(id) : null;
+    // Same deployTargetFor resolver as the popover — reported srcDir wins. Also
+    // gated on severity (updateApplies): hidden for a same-version or ahead box,
+    // the renderer passes sev from the header row it already computed.
+    const target = (online && updateApplies(sev)) ? deployTargetFor(id) : null;
     if (target) {
       template.push({ type: 'separator' });
       template.push({

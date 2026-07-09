@@ -234,6 +234,51 @@ test('dm doorbell: a doorbell for another origin triggers no claim', async () =>
   conn4.stop();
 });
 
+test('hello: an identity change re-emits peer-state without an offline dip', async () => {
+  // An in-place box Update restarts faster than the hello cadence can observe an
+  // offline transition, so _setOnline never fires — the loop must emit on its own
+  // when the reported identity moves, or the UI keeps the stale version forever.
+  const states = [];
+  const conn5 = new PeerConnection({
+    id: 'p5', label: 'lab5', url: `http://127.0.0.1:${server.port}`, selfLabel: 'idwatch',
+    helloIntervalMs: 30,
+    emit: (channel, ...args) => { if (channel === 'peer-state') states.push(args[1]); },
+  });
+  conn5.start();
+  // First hello: the offline→online transition emits, carrying the seed version.
+  await waitFor(() => states.find((s) => s.online && s.version === '0.0.0-test'), 'initial online state');
+  const beforeFlip = states.length;
+  // Reach into the version the hello route reads (documented seam) — no offline
+  // dip: the box stays up the whole time.
+  server._version = '9.9.9-test';
+  const bumped = await waitFor(
+    () => states.slice(beforeFlip).find((s) => s.version === '9.9.9-test'),
+    'peer-state carrying the updated version');
+  assert.equal(bumped.online, true);
+  // Every state we ever saw stayed online — the version moved with no transition.
+  assert.ok(states.every((s) => s.online === true));
+  conn5.stop();
+  server._version = '0.0.0-test'; // restore for any later readers of the shared server
+});
+
+test('hello: a steady identity emits no spurious peer-state across ticks', async () => {
+  const states = [];
+  const conn6 = new PeerConnection({
+    id: 'p6', label: 'lab6', url: `http://127.0.0.1:${server.port}`, selfLabel: 'steady',
+    helloIntervalMs: 30,
+    emit: (channel, ...args) => { if (channel === 'peer-state') states.push(args[1]); },
+  });
+  conn6.start();
+  // Wait out the initial burst (online transition + first session refresh).
+  await waitFor(() => (conn6.online && conn6.sessions.length === 1 ? true : null), 'online + sessions');
+  await new Promise((r) => setTimeout(r, 60));
+  const settled = states.length;
+  // ~6 more hello ticks at 30ms with nothing changing → not one re-emission.
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(states.length, settled);
+  conn6.stop();
+});
+
 test('attach: replay carries scrollback and owner geometry', async () => {
   conn.attach('alpha');
   const rep = await waitFor(() => events.find((x) => x.channel === 'peer-replay'), 'peer-replay');

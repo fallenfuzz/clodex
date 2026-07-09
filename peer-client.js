@@ -25,11 +25,14 @@ const REQUEST_TIMEOUT_MS = 5000;
 const QUERY_TIMEOUT_MS = 20000;
 
 class PeerConnection {
-  constructor({ id, label, url, emit, selfLabel }) {
+  constructor({ id, label, url, emit, selfLabel, helloIntervalMs }) {
     this.id = id;
     this.label = label;
     this.url = url.replace(/\/+$/, '');
     this._emit = emit;
+    // Poll cadence; overridable so tests can drive multiple hellos in-window
+    // (production always uses the 15s default).
+    this._helloIntervalMs = helloIntervalMs || HELLO_INTERVAL_MS;
     // Our own label as the box will see it (the origin on outbound DMs and the
     // key we claim our inbox under). Computed once by the caller — never per
     // request — so it can't drift mid-session.
@@ -95,7 +98,20 @@ class PeerConnection {
       if (this._stopped) return;
       if (!err && body && body.ok && body.app === 'clodex') {
         const wasOffline = !this.online;
-        this.hello = { host: body.host, version: body.version, caps: body.caps || [], platform: body.platform || null, srcDir: body.srcDir || null };
+        const prev = this.hello;
+        const next = { host: body.host, version: body.version, caps: body.caps || [], platform: body.platform || null, srcDir: body.srcDir || null };
+        // Did the box's reported identity move since the last hello? (caps
+        // compared as a joined string.) An in-place Update restarts the box
+        // faster than the 15s hello cadence can observe an offline dip, so
+        // _setOnline never sees a transition and never emits — without this the
+        // renderer's peerStatuses (and the ⓘ popover reading it) keep the stale
+        // version forever.
+        const identityChanged = !prev ||
+          prev.version !== next.version ||
+          prev.platform !== next.platform ||
+          prev.srcDir !== next.srcDir ||
+          (prev.caps || []).join(',') !== (next.caps || []).join(',');
+        this.hello = next;
         this._setOnline(true);
         if (wasOffline) {
           this._refreshSessions();
@@ -104,6 +120,11 @@ class PeerConnection {
           for (const [name, att] of this._attachments) {
             if (att.wanted && !att.req) this._openAttach(name, att);
           }
+        } else if (identityChanged) {
+          // Stayed online but the identity moved — force the peer-state emission
+          // _setOnline would have made on a transition. Guarded by the else so we
+          // never double-emit when wasOffline already fired one.
+          this._emit('peer-state', this.id, this.status());
         }
         // DM federation: if the box says it has mail queued for us (our label in
         // dmOrigins), claim it now. Every tick, not just on wake — box→consumer
@@ -115,7 +136,7 @@ class PeerConnection {
       } else {
         this._setOnline(false);
       }
-      this._helloTimer = setTimeout(() => this._helloLoop(), HELLO_INTERVAL_MS);
+      this._helloTimer = setTimeout(() => this._helloLoop(), this._helloIntervalMs);
     });
   }
 

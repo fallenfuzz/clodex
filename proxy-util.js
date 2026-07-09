@@ -264,6 +264,15 @@ function versionSeverity(ours, theirs) {
   return 'patch';
 }
 
+// Does offering "Update Clodex" on a peer make sense at severity `sev`? Show for
+// a box genuinely behind us (patch/minor/major) and for 'unknown' — an
+// unparseable/dev version we can't rule an update out for, so keep the escape
+// hatch. Hide for 'current' (nothing to do) and 'newer' (the deploy script pulls
+// latest master, so "updating" a box ahead of us is a pointless restart). Pure.
+function updateApplies(sev) {
+  return sev !== 'current' && sev !== 'newer';
+}
+
 // Best-effort age/behind facts for a peer's version, off a newest-first
 // `releases` list ([{tag, published_at}] as cached from GitHub). Finds the
 // release whose tag matches `v<version>` (leading `v` optional on either side);
@@ -462,6 +471,6 @@ module.exports = {
   PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord, shapeSubagent,
   AUTO_COMPACT, headroomBand, shouldAutoCompact, autoCompactDecision, isHumanPtyInput,
   draftChunkSignal, isDraftOpen,
-  versionSeverity, releaseAgeInfo,
+  versionSeverity, updateApplies, releaseAgeInfo,
   DM_HOLD_IDLE_MS, peerStatusLabel, shouldHoldDm,
 };

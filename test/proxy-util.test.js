@@ -481,7 +481,7 @@ test('peerStatusLabel: permission dialog outranks working and idle', () => {
 });
 
 // --- versionSeverity + releaseAgeInfo: peer identity surfacing ---------------
-const { versionSeverity, releaseAgeInfo } = require('../proxy-util');
+const { versionSeverity, updateApplies, releaseAgeInfo } = require('../proxy-util');
 
 test('versionSeverity: equal versions are current (v-prefix + missing parts tolerated)', () => {
   assert.strictEqual(versionSeverity('2.10.1', '2.10.1'), 'current');
@@ -507,6 +507,20 @@ test('versionSeverity: unparseable on either side is unknown', () => {
   assert.strictEqual(versionSeverity('2.10.1', '2.x.1'), 'unknown');
   assert.strictEqual(versionSeverity('', '2.10.1'), 'unknown');
   assert.strictEqual(versionSeverity('2.10.1', null), 'unknown');
+});
+
+test('updateApplies: offer Update only for a behind or unknown peer', () => {
+  // Behind us — the deploy is worth offering.
+  assert.strictEqual(updateApplies('patch'), true);
+  assert.strictEqual(updateApplies('minor'), true);
+  assert.strictEqual(updateApplies('major'), true);
+  // Can't rule an update out (dev / unparseable version) — keep the escape hatch.
+  assert.strictEqual(updateApplies('unknown'), true);
+  // Nothing to gain — same version, or a box ahead of us (script pulls master).
+  assert.strictEqual(updateApplies('current'), false);
+  assert.strictEqual(updateApplies('newer'), false);
+  // A renderer that never sent sev (undefined) defaults to showing it.
+  assert.strictEqual(updateApplies(undefined), true);
 });
 
 test('releaseAgeInfo: found ⇒ index is releases-behind, age in whole days', () => {

@@ -2291,12 +2291,13 @@ html, body {
 .peer-select:hover { color: var(--text); }
 .peer-select:disabled { opacity: 0.35; cursor: default; }
 .peer-select:disabled:hover { color: var(--text-dim); }
-/* Version-severity tint, shared by the peer-state label, the ⓘ icon, and the
-   popover's severity line. current/newer/unknown stay neutral (a peer AHEAD of
-   us is informational, never alarming); patch/minor/major climb yellow → orange
-   → red. Placed after .peer-select so it wins the equal-specificity tie on the
-   icon; :hover (higher specificity) still brightens it. Orange is mixed from the
-   theme's warn+error so it themes without a new variable. */
+/* Version-severity tint, shared by the peer NAME (only for patch/minor/major —
+   see renderer's nameSev), the ⓘ icon, and the popover's severity line.
+   current/newer/unknown stay neutral (a peer AHEAD of us is informational, never
+   alarming); patch/minor/major climb yellow → orange → red. Placed after
+   .peer-select so it wins the equal-specificity tie on the icon; :hover (higher
+   specificity) still brightens it. Orange is mixed from the theme's warn+error so
+   it themes without a new variable. */
 .peer-sev-current, .peer-sev-newer, .peer-sev-unknown { color: var(--text-dim); }
 .peer-sev-patch { color: var(--warn); }
 .peer-sev-minor { color: color-mix(in srgb, var(--warn) 40%, var(--error)); }
