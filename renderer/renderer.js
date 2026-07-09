@@ -5389,7 +5389,7 @@ const peersOverlay = document.getElementById('peers-overlay');
 // Deploy-line router: main streams `peer-deploy-line` (sshHost, line) globally
 // as the deploy script runs; each in-flight wizard registers a handler keyed by
 // its ssh host so concurrent deploys never cross wires.
-const { parseDeployLine, classifyDeployFolder } = require('../peer-deploy');
+const { parseDeployLine, classifyDeployFolder, classifyPeerDest } = require('../peer-deploy');
 const deployLineHandlers = new Map(); // sshHost -> (line) => void
 window.api.onPeerDeployLine((sshHost, line) => {
   const h = deployLineHandlers.get(sshHost);
@@ -5409,13 +5409,19 @@ function addPeerRow(peer) {
   // full-width break so the primary inputs stay uncrowded.
   const portVal = Number.isInteger(peer.remotePort) ? peer.remotePort : 7900;
   const folderVal = (typeof peer.deployFolder === 'string' && peer.deployFolder) ? peer.deployFolder : '~/wb-wrap-ui';
+  // One smart destination field: ssh host / IP / alias, OR an http(s):// URL. The
+  // scheme prefix disambiguates (classifyPeerDest), so no protocol dropdown. The
+  // settings schema is unchanged — a classified 'ssh' saves peer.sshHost and a
+  // 'url' saves peer.url; only the input surface collapses. Pre-fill from the
+  // stored sshHost, falling back to url for a legacy url-only peer.
+  const destVal = peer.sshHost || peer.url || '';
   row.innerHTML = `
     <input type="text" class="peer-row-label" placeholder="label (e.g. laptop2)" value="${esc(peer.label || '')}">
-    <input type="text" class="peer-row-ssh" placeholder="ssh host (user@laptop2)" value="${esc(peer.sshHost || '')}">
-    <input type="text" class="peer-row-url" placeholder="or URL (advanced)" value="${esc(peer.url || '')}">
+    <input type="text" class="peer-row-dest" placeholder="user@host, IP, or ssh alias — or http://… for direct" value="${esc(destVal)}">
     <button type="button" class="secondary peer-row-test" title="Test the ssh host and check for Clodex; offer to install if absent">Test &amp; Set Up</button>
     <button type="button" class="secondary peer-row-remove" title="Remove peer">&times;</button>
     <div class="peer-row-break"></div>
+    <span class="peer-row-dest-badge hidden"></span>
     <label class="peer-row-advlabel">port</label>
     <input type="text" class="peer-row-port" title="Peer protocol port on the box (default 7900)" value="${esc(String(portVal))}">
     <label class="peer-row-advlabel">folder</label>
@@ -5426,6 +5432,10 @@ function addPeerRow(peer) {
   status.className = 'peer-row-status hidden';
   row.querySelector('.peer-row-remove').addEventListener('click', () => wrap.remove());
   row.querySelector('.peer-row-test').addEventListener('click', () => peerTestAndSetUp(row, status));
+  // Live destination detection badge (→ ssh tunnel / → direct / inline error).
+  const destInput = row.querySelector('.peer-row-dest');
+  destInput.addEventListener('input', () => updatePeerDestBadge(row));
+  updatePeerDestBadge(row); // reflect a pre-filled destination immediately
   wrap.appendChild(row);
   wrap.appendChild(status);
   peersListBox.appendChild(wrap);
@@ -5447,6 +5457,31 @@ function addPeerRow(peer) {
       `<span class="peer-status-ok">✓ Clodex v${esc(st.version)}</span>` +
       `<span class="peer-status-dim"> · caps: ${esc(capList)}${st.platform ? ` · ${esc(st.platform)}` : ''}</span>${delta}`);
   }
+}
+
+// Raw destination string from a row's single smart input (trimmed).
+function peerRowDest(row) {
+  const el = row.querySelector('.peer-row-dest');
+  return el ? el.value.trim() : '';
+}
+
+// Live "what will this become?" badge under the destination input. Dim for the
+// two happy paths (→ ssh tunnel / → direct), warn-colored inline text for a bad
+// value, and hidden when empty. Read-only feedback — the authoritative
+// validation runs in collectPeers on Save.
+function updatePeerDestBadge(row) {
+  const badge = row.querySelector('.peer-row-dest-badge');
+  if (!badge) return;
+  const cls = classifyPeerDest(peerRowDest(row));
+  if (cls.kind === 'empty') {
+    badge.className = 'peer-row-dest-badge hidden';
+    badge.textContent = '';
+    return;
+  }
+  badge.className = 'peer-row-dest-badge';
+  if (cls.kind === 'ssh') badge.innerHTML = '<span class="peer-status-dim">→ ssh tunnel</span>';
+  else if (cls.kind === 'url') badge.innerHTML = '<span class="peer-status-dim">→ direct (no tunnel)</span>';
+  else badge.innerHTML = `<span class="peer-status-warn">${esc(cls.error)}</span>`;
 }
 
 // Per-peer remote port, read live from the row's port input. Returns NaN for a
@@ -5490,8 +5525,15 @@ function validatePeerRowInputs(row) {
 // install; not-clodex / ssh-fail = diagnostics. The wizard is an OFFER — Save
 // still works whether or not you ever click Test.
 async function peerTestAndSetUp(row, status) {
-  const sshHost = row.querySelector('.peer-row-ssh').value.trim();
-  if (!sshHost) { renderPeerStatus(status, `<span class="peer-status-warn">Enter an ssh host first (e.g. user@laptop2).</span>`); return; }
+  const dest = classifyPeerDest(peerRowDest(row));
+  if (dest.kind === 'empty') { renderPeerStatus(status, `<span class="peer-status-warn">Enter an ssh host or URL first (e.g. user@laptop2).</span>`); return; }
+  if (dest.kind === 'error') { renderPeerStatus(status, `<span class="peer-status-warn">${esc(dest.error)}</span>`); return; }
+  if (dest.kind === 'url') {
+    // Probe + deploy are ssh-only; a direct URL peer just connects on Save.
+    renderPeerStatus(status, `<span class="peer-status-dim">Direct URL — nothing to install over ssh; Save and it connects.</span>`);
+    return;
+  }
+  const sshHost = dest.sshHost;
   const v = validatePeerRowInputs(row);
   if (!v.ok) { renderPeerStatus(status, `<span class="peer-status-warn">${esc(v.error)}</span>`); return; }
   const port = v.port;
@@ -5639,19 +5681,29 @@ function renderPeerStatus(status, html) {
 function collectPeers() {
   const out = [];
   for (const row of peersListBox.querySelectorAll('.peer-row')) {
-    const sshHost = row.querySelector('.peer-row-ssh').value.trim();
-    const url = row.querySelector('.peer-row-url').value.trim();
-    if (!sshHost && !url) continue;
+    const destEl = row.querySelector('.peer-row-dest');
+    if (destEl) destEl.classList.remove('invalid');
+    const dest = classifyPeerDest(peerRowDest(row));
+    if (dest.kind === 'empty') continue;
     const label = row.querySelector('.peer-row-label').value.trim();
+    // A malformed destination now errors inline (marks the input, keeps the
+    // dialog open) instead of silently vanishing on Save — and one input can
+    // only be ssh XOR url, so the old sshHost-wins shadowing is gone.
+    if (dest.kind === 'error') {
+      if (destEl) destEl.classList.add('invalid');
+      const status = row.parentElement && row.parentElement.querySelector('.peer-row-status');
+      if (status) renderPeerStatus(status, `<span class="peer-status-warn">${esc(dest.error)}</span>`);
+      return { ok: false, error: dest.error, row };
+    }
     const v = validatePeerRowInputs(row);
     if (!v.ok) {
       const status = row.parentElement && row.parentElement.querySelector('.peer-row-status');
       if (status) renderPeerStatus(status, `<span class="peer-status-warn">${esc(v.error)}</span>`);
       return { ok: false, error: v.error, row };
     }
-    const peer = { id: row.dataset.peerId, label: label || sshHost || url };
-    if (sshHost) peer.sshHost = sshHost;
-    if (url) peer.url = url;
+    const peer = { id: row.dataset.peerId, label: label || dest.sshHost || dest.url };
+    if (dest.kind === 'ssh') peer.sshHost = dest.sshHost;
+    else if (dest.kind === 'url') peer.url = dest.url;
     // Port + folder are settings-file-only overrides (like wirescopePort): carry
     // the row's validated values through the save. A folder equal to the default
     // pre-fill still round-trips harmlessly (main re-validates at deploy time).

@@ -9,7 +9,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const {
   probePeer, parseDeployLine, buildProbeScript, PROBE_NOLISTEN,
-  fixSessionName, buildDeployFixBriefing, classifyDeployFolder,
+  fixSessionName, buildDeployFixBriefing, classifyDeployFolder, classifyPeerDest,
 } = require('../peer-deploy');
 
 // A session name must satisfy the same regex sessions/agents use elsewhere.
@@ -190,4 +190,59 @@ test('classifyDeployFolder: a relative-without-~ path is rejected', () => {
 test('classifyDeployFolder: a bare ~ (no path under home) is rejected', () => {
   assert.strictEqual(classifyDeployFolder('~').ok, false);
   assert.strictEqual(classifyDeployFolder('~/').ok, false);
+});
+
+// --- classifyPeerDest: the single smart destination field --------------------
+test('classifyPeerDest: ssh forms — user@host, bare IP, and ssh-config alias', () => {
+  assert.deepStrictEqual(classifyPeerDest('user@laptop2'), { kind: 'ssh', sshHost: 'user@laptop2' });
+  assert.deepStrictEqual(classifyPeerDest('192.168.1.5'), { kind: 'ssh', sshHost: '192.168.1.5' });
+  assert.deepStrictEqual(classifyPeerDest('laptop2'), { kind: 'ssh', sshHost: 'laptop2' });
+  // Surrounding whitespace is trimmed before classifying.
+  assert.deepStrictEqual(classifyPeerDest('  box  '), { kind: 'ssh', sshHost: 'box' });
+});
+
+test('classifyPeerDest: http(s):// URLs pass through as url', () => {
+  assert.deepStrictEqual(classifyPeerDest('http://host:7900'), { kind: 'url', url: 'http://host:7900' });
+  assert.deepStrictEqual(classifyPeerDest('https://box.example.com:8080/x'),
+    { kind: 'url', url: 'https://box.example.com:8080/x' });
+  // Scheme match is case-insensitive.
+  assert.deepStrictEqual(classifyPeerDest('HTTPS://host'), { kind: 'url', url: 'HTTPS://host' });
+});
+
+test('classifyPeerDest: empty / whitespace-only ⇒ empty', () => {
+  assert.deepStrictEqual(classifyPeerDest(''), { kind: 'empty' });
+  assert.deepStrictEqual(classifyPeerDest('   '), { kind: 'empty' });
+  assert.deepStrictEqual(classifyPeerDest(null), { kind: 'empty' });
+  assert.deepStrictEqual(classifyPeerDest(undefined), { kind: 'empty' });
+});
+
+test('classifyPeerDest: a scheme-less host:port is a targeted error', () => {
+  const r = classifyPeerDest('host:7900');
+  assert.strictEqual(r.kind, 'error');
+  assert.match(r.error, /http:\/\/|ssh config|\.ssh\/config/i);
+});
+
+test('classifyPeerDest: an ssh command (space / ssh prefix) is rejected', () => {
+  const r = classifyPeerDest('ssh user@host');
+  assert.strictEqual(r.kind, 'error');
+  assert.match(r.error, /just the destination|not an ssh command/i);
+  // A bare internal space also trips the ssh-command guard.
+  assert.strictEqual(classifyPeerDest('user @host').kind, 'error');
+});
+
+test('classifyPeerDest: a non-http scheme (ftp://) is rejected', () => {
+  const r = classifyPeerDest('ftp://host/file');
+  assert.strictEqual(r.kind, 'error');
+  assert.match(r.error, /http/i);
+});
+
+test('classifyPeerDest: a malformed http URL is rejected', () => {
+  assert.strictEqual(classifyPeerDest('http://').kind, 'error');
+});
+
+test('classifyPeerDest: an over-long destination (>128 chars) is rejected', () => {
+  const long = 'a'.repeat(129);
+  assert.strictEqual(classifyPeerDest(long).kind, 'error');
+  // Exactly 128 is still a valid ssh alias.
+  assert.deepStrictEqual(classifyPeerDest('a'.repeat(128)), { kind: 'ssh', sshHost: 'a'.repeat(128) });
 });

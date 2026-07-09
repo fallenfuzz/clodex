@@ -203,9 +203,45 @@ function classifyDeployFolder(folder) {
   return { ok: false, error: 'Use an absolute path (/…) or a home path (~/…).' };
 }
 
+// Classify one operator-entered peer DESTINATION into ssh vs URL — the wizard
+// collapses the old two fields into a single smart input, and a scheme prefix
+// makes the two unambiguous (a dropdown would tax the common ssh path). Returns
+// one of:
+//   { kind: 'ssh',   sshHost }  — user@host / bare host / IP / ssh-config alias
+//   { kind: 'url',   url }      — a validated http(s):// direct endpoint
+//   { kind: 'empty' }           — blank (skip the row)
+//   { kind: 'error', error }    — a targeted message for the common mistakes
+// Pure + testable; the settings schema is unchanged (ssh → peer.sshHost, url →
+// peer.url), so this only reshapes the input surface, no migration.
+function classifyPeerDest(raw) {
+  const s = (raw == null ? '' : String(raw)).trim();
+  if (!s) return { kind: 'empty' };
+  // An http(s):// prefix is an explicit "direct URL" — validate the shape.
+  if (/^https?:\/\//i.test(s)) {
+    try { new URL(s); return { kind: 'url', url: s }; }
+    catch { return { kind: 'error', error: "That doesn't look like a valid URL. Example: http://host:7900" }; }
+  }
+  // Any other scheme (ftp://, ws://, …) is a real mistake — reject it clearly
+  // rather than letting it masquerade as an ssh host.
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) {
+    return { kind: 'error', error: 'Only http:// and https:// URLs are supported for a direct peer.' };
+  }
+  // ssh destination charset: user@host, bare host, IPv4, or an ~/.ssh/config
+  // alias. No colon (a host:port belongs in ssh config), no spaces.
+  if (/^[a-zA-Z0-9._@-]{1,128}$/.test(s)) return { kind: 'ssh', sshHost: s };
+  // Targeted errors for the misfires the single field invites.
+  if (/\s/.test(s) || /^ssh\s/i.test(s)) {
+    return { kind: 'error', error: 'Enter just the destination, e.g. user@host — not an ssh command.' };
+  }
+  if (s.includes(':')) {
+    return { kind: 'error', error: 'For a direct URL include http://. For ssh, set the port in ~/.ssh/config, not host:port.' };
+  }
+  return { kind: 'error', error: "That doesn't look like an ssh host or a URL. Example: user@laptop2" };
+}
+
 module.exports = {
   probePeer, buildProbeScript, parseDeployLine,
   fixSessionName, buildDeployFixBriefing,
-  classifyDeployFolder, shSingleQuote,
+  classifyDeployFolder, shSingleQuote, classifyPeerDest,
   PROBE_NOLISTEN, PROBE_BODY,
 };
