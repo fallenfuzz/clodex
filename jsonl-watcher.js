@@ -17,6 +17,11 @@ const path = require('path');
 const { extractText } = require('./transcript');
 const { extractFileTouches } = require('./file-touch');
 
+// Watcher-owned tuning (moved from main.js — M3 left them behind as free
+// identifiers, which broke every non-wire agent spawn at watcher.start()).
+const POLL_INTERVAL = 250; // ms
+const TURN_COMPLETE_TIMEOUT = 1000; // ms
+
 function createJsonlWatcher({ REGISTRY_DIR }) {
   class JsonlWatcher {
     constructor(name, onText, onSessionId, onActivity, onCompactSummary, onFileTouches) {

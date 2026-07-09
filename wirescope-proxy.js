@@ -197,7 +197,16 @@ const ProxyClient = {
 };
 
 
-function createProxyPoller({ log, stripLevelOf, WIRE_TELEMETRY_LIVE }) {
+function createProxyPoller({
+  log, stripLevelOf, WIRE_TELEMETRY_LIVE,
+  // Fix for the M3 leak set (free identifiers that killed the poller tick
+  // silently — .catch(() => {}) ate the ReferenceError and the status bar
+  // never populated): autoCompactOf/peerProxyView are main.js helpers by
+  // value; persistence/remoteServer are whenReady-assigned so they cross as
+  // getters; getContextCommands defers SessionManager.CONTEXT_COMMANDS past
+  // the class's construction (this factory runs before it).
+  autoCompactOf, peerProxyView, getPersistence, getRemoteServer, getContextCommands,
+}) {
   // App-global poller (one per process, shared across windows): a single
   // /_status fetch per distinct proxy base each tick, regardless of window
   // count, fanned out to live routed sessions. Pauses entirely when no session
@@ -323,7 +332,7 @@ function createProxyPoller({ log, stripLevelOf, WIRE_TELEMETRY_LIVE }) {
             payload.base = base; // poller context, not record shape — for the session-page link
             // clodex-side authoritative strip level (the proxy overrides are
             // in-memory and not trustworthy pre-relink). Surfaced for the bar menu.
-            const entry = persistence.get(s.name);
+            const entry = getPersistence().get(s.name);
             const level = stripLevelOf(entry);
             payload.stripLevel = level;
             // Auto-compact-before-cold state, surfaced for the warm menu toggle.
@@ -356,8 +365,8 @@ function createProxyPoller({ log, stripLevelOf, WIRE_TELEMETRY_LIVE }) {
             this.manager._sendToSession(s.name, 'session-proxy', s.name, emitted);
             // Mirror the status-bar payload to attached peers (trimmed to the
             // info-only view). No-op when nobody is attached.
-            if (remoteServer) {
-              try { remoteServer.pushTelemetry(s.name, { proxy: peerProxyView(emitted) }); } catch {}
+            if (getRemoteServer()) {
+              try { getRemoteServer().pushTelemetry(s.name, { proxy: peerProxyView(emitted) }); } catch {}
             }
             // W2 step-4 dark bridge: diff this live emission against the wire's
             // shaped payload into the shadow log (validation evidence for the
@@ -462,7 +471,7 @@ function createProxyPoller({ log, stripLevelOf, WIRE_TELEMETRY_LIVE }) {
           } catch { /* logging must never break the poll */ }
           return;
         }
-        const cmd = (SessionManager.CONTEXT_COMMANDS[s.type] || {}).compact;
+        const cmd = (getContextCommands()[s.type] || {}).compact;
         if (!cmd) return;
         this.autoCompacted.set(s.name, Date.now());
         s._lastAcSuppressReason = null;   // fired — reset so the next near-miss logs

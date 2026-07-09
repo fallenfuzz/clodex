@@ -276,8 +276,6 @@ const log = {
   warn: (tag, message) => writeLog('WARN', tag, message),
   error: (tag, message) => writeLog('ERROR', tag, message),
 };
-const POLL_INTERVAL = 250; // ms
-const TURN_COMPLETE_TIMEOUT = 1000; // ms
 // Phase W1 shadow mode (CLODEUX-PLAN.md): route claude sessions through the
 // in-process wire tee (wire/proxy.js): the live intent + telemetry path for
 // wire-routed claude sessions. Operational + wire-side events land in
@@ -552,7 +550,16 @@ const { probePeer, fixSessionName, buildDeployFixBriefing, classifyDeployFolder,
 // value and uiSettings via getter. PROXY_* tuning consts moved into the proxy
 // module; PROXY_REPORT_TIMEOUT is re-imported (one /_report call still needs it).
 const { ProxyClient, createProxyPoller, PROXY_REPORT_TIMEOUT } = require('./wirescope-proxy');
-const ProxyPoller = createProxyPoller({ log, stripLevelOf, WIRE_TELEMETRY_LIVE });
+const ProxyPoller = createProxyPoller({
+  log, stripLevelOf, WIRE_TELEMETRY_LIVE,
+  // M3-leak fix deps: helpers by value (hoisted fn declarations), whenReady-
+  // assigned singletons as getters, and SessionManager's static command map
+  // deferred past the class construction below.
+  autoCompactOf, peerProxyView,
+  getPersistence: () => persistence,
+  getRemoteServer: () => remoteServer,
+  getContextCommands: () => SessionManager.CONTEXT_COMMANDS,
+});
 const { createWirescopeSupervisor } = require('./wirescope-supervisor');
 const { WirescopeSupervisor } = createWirescopeSupervisor({ log, ProxyClient, getUiSettings: () => uiSettings });
 const wirescope = new WirescopeSupervisor();
