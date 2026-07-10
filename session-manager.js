@@ -247,11 +247,19 @@ function createSessionManager(deps) {
             }
             // Identity backstop: the sentinel's symlink poll is the primary
             // (it fires at CLI boot, before any turn); the receipt keeps
-            // persistence honest even if the hook's symlink got wiped.
+            // persistence honest even if the hook's symlink got wiped — but
+            // only a CORROBORATED id may rebind (see _wireSessionCorroborated:
+            // the wire attributes by proxy route, so a child claude spawned
+            // inside the session mints stray main-line-looking ids; rebinding
+            // to one would point the next --resume at the child's conversation).
             if (t.sessionId && s.sessionId !== t.sessionId) {
-              s.sessionId = t.sessionId;
-              getPersistence().setSessionId(t.agent, t.sessionId);
-              this._noteConversationForDigest(s, t.sessionId);
+              if (this._wireSessionCorroborated(s, t.sessionId)) {
+                s.sessionId = t.sessionId;
+                getPersistence().setSessionId(t.agent, t.sessionId);
+                this._noteConversationForDigest(s, t.sessionId);
+              } else {
+                this._shadowLog({ type: 'wire-stray-session', agent: t.agent, sessionId: t.sessionId });
+              }
             }
           } else if (s && s.agentType === 'claude') {
             // Shadow-compare mode (CLODEX_WIRE_INTENTS=0): record wire
@@ -1608,6 +1616,21 @@ function createSessionManager(deps) {
       if (s.digestNonEmpty) getPersistence().markDigested(s.name, sid);
     }
 
+    // May a wire-observed session id be trusted as THIS PTY's conversation
+    // identity? The transcript symlink is the authority: Claude Code names the
+    // transcript file <conversation-uuid>.jsonl, so a resolvable link that
+    // disagrees with the wire sid means the sid belongs to something else on
+    // the same proxy route (a `claude -p` one-shot / background child spawned
+    // from inside the session — the wire attributes by route, not by process).
+    // An unresolvable link can't testify; accept, preserving the backstop's
+    // original purpose (a wiped symlink must not orphan persistence).
+    _wireSessionCorroborated(s, sid) {
+      try {
+        const real = fs.realpathSync(pathFor(REGISTRY_DIR, s.name, 'transcript'));
+        return path.basename(real, '.jsonl') === sid;
+      } catch { return true; }
+    }
+
     // Boot-digest append-once (the resume path). The hook only delivers to
     // conversations being born; one resumed from before the ledger existed —
     // or born when the store was empty — never got a digest. Deliver it ONCE
@@ -1619,6 +1642,14 @@ function createSessionManager(deps) {
       try {
         if (!sid || s._dead || s.agentType !== 'claude') return;
         if (s.needsAttention) return; // injection would answer the dialog
+        // Only the PTY's OWN conversation gets the digest: a wire sid that
+        // doesn't match the watcher-maintained identity is a stray (a child
+        // claude sharing the session's proxy route — each one minted a
+        // "never-digested" id and earned trader 7 digests in 4 minutes,
+        // 2026-07-10). A skipped match (e.g. s.sessionId briefly stale after
+        // /clear) just retries on a later turn — fail toward a missed
+        // delivery, never a repeat.
+        if (sid !== s.sessionId) return;
         if (isDigested(getPersistence().get(s.name), sid)) return;
         const digest = composeDigest(memoryStore.list(s.name));
         if (!digest) return; // empty store — stay unmarked, try again when units exist

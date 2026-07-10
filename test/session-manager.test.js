@@ -113,3 +113,60 @@ test('create: rejects a duplicate session name before any spawn', async () => {
   m.sessions.set('dup', { name: 'dup' });
   await assert.rejects(() => m.create('dup', 'claude', '/tmp'), /already exists/);
 });
+
+// Stray-wire-session discrimination (the 7-digests-in-4-minutes incident): the
+// wire attributes requests by proxy route, so a child claude spawned inside a
+// session mints fresh main-line-looking conversation ids on the session's own
+// route. Neither the boot-digest path nor the identity backstop may trust an
+// id the transcript symlink doesn't corroborate.
+const fsReal = require('fs');
+const osReal = require('os');
+const pathReal = require('path');
+const { pathFor: pathForReal, runDirFor: runDirForReal } = require('../clodex-paths');
+
+function mkWithTranscript(sessionId, overrides = {}) {
+  const root = fsReal.mkdtempSync(pathReal.join(osReal.tmpdir(), 'clodex-sm-'));
+  fsReal.mkdirSync(runDirForReal(root, 'a'), { recursive: true });
+  if (sessionId) {
+    const target = pathReal.join(root, `${sessionId}.jsonl`);
+    fsReal.writeFileSync(target, '');
+    fsReal.symlinkSync(target, pathForReal(root, 'a', 'transcript'));
+  }
+  const m = mk({
+    REGISTRY_DIR: root, fs: fsReal, path: pathReal, pathFor: pathForReal,
+    ...overrides,
+  });
+  return { m, root };
+}
+
+test('_wireSessionCorroborated: symlink agrees → true, disagrees → false, absent → true (backstop)', () => {
+  const { m } = mkWithTranscript('real-conv-id');
+  const s = { name: 'a' };
+  assert.strictEqual(m._wireSessionCorroborated(s, 'real-conv-id'), true);
+  assert.strictEqual(m._wireSessionCorroborated(s, 'stray-child-id'), false);
+  const { m: m2 } = mkWithTranscript(null); // no symlink — can't testify
+  assert.strictEqual(m2._wireSessionCorroborated({ name: 'a' }, 'anything'), true);
+});
+
+test('_maybeDeliverDigest: stray sid (≠ s.sessionId) neither delivers nor marks', () => {
+  const marked = [];
+  const delivered = [];
+  const m = mk({
+    getPersistence: () => ({
+      get: () => ({ name: 'a', digested: [] }),
+      markDigested: (name, sid) => marked.push(sid),
+    }),
+    isDigested: () => false,
+    memoryStore: { list: () => [{ id: 'u1' }] },
+    composeDigest: () => 'DIGEST',
+  });
+  m._deliverMessage = (to, from, body) => delivered.push(body);
+  const s = { name: 'a', agentType: 'claude', sessionId: 'real-conv-id' };
+  m._maybeDeliverDigest(s, 'stray-child-id');
+  assert.deepStrictEqual(delivered, [], 'stray id: no digest injected');
+  assert.deepStrictEqual(marked, [], 'stray id: ledger untouched');
+  // The PTY's own conversation still gets it.
+  m._maybeDeliverDigest(s, 'real-conv-id');
+  assert.strictEqual(delivered.length, 1);
+  assert.deepStrictEqual(marked, ['real-conv-id']);
+});
