@@ -686,10 +686,10 @@ function applyTypeDefaults({ skipAsyncRefresh = false } = {}) {
   const type = inputType.value;
   if (!skipAsyncRefresh) inputArgs.value = DEFAULT_ARGS[type] || '';
   argsHint.textContent = ARGS_HINTS[type] || '';
-  // Prompt refs and resume aren't template fields (F6 punt / runtime-only), so
-  // template-authoring mode hides those rows even for a type that supports them.
+  // Prompt refs ARE template fields (library-file references), so authoring mode
+  // shows them; only resume/fork stays hidden (runtime-only, still punted).
   const authoring = dialogMode === 'template';
-  const supportsSystemPrompt = (type === 'claude' || type === 'codex') && !authoring;
+  const supportsSystemPrompt = type === 'claude' || type === 'codex';
   systemPromptRow.style.display = supportsSystemPrompt ? '' : 'none';
   if (appendPromptsRow) appendPromptsRow.style.display = supportsSystemPrompt ? '' : 'none';
   if (!supportsSystemPrompt) inputSystemPrompt.value = '';
@@ -964,6 +964,12 @@ function collectFormConfig() {
     disabledSkills: type === 'claude' ? collectSkillChecklist(inputSkillsList) : [],
     injectSkills: type === 'claude' ? collectInjectChecklist(inputInjectSkillsList) : [],
     stripLevel: type === 'claude' ? (Number(inputStripLevel && inputStripLevel.value) || 0) : 0,
+    // Prompt refs are library-file references (system replaces, appends compose)
+    // — captured for BOTH agent types so a codex template round-trips. The
+    // legacy inline body is NEVER captured (F2 guard): doCreate passes param-7
+    // systemPromptBody=null, sourced independently of cfg.
+    systemPromptFile: agentType ? (inputSystemPrompt.value || null) : null,
+    appendPromptFiles: agentType ? collectAppendChecklist(inputAppendList) : [],
   };
 }
 
@@ -971,14 +977,14 @@ async function doCreate() {
   const name = inputName.value.trim();
   const cfg = collectFormConfig();
   const { type, cwd, extraArgs, proxy, agents, denyBuiltins,
-          disabledTools, disabledSkills, injectSkills, stripLevel } = cfg;
+          disabledTools, disabledSkills, injectSkills, stripLevel,
+          systemPromptFile, appendPromptFiles } = cfg;
 
   // Prompts are referenced by library file now (system replaces, appends
-  // compose); the legacy inline body is no longer authored at create.
+  // compose), sourced through cfg (single capture path). The legacy inline body
+  // is NEVER authored at create — param 7 stays null, independent of cfg (F2).
   const supportsPrompts = type === 'claude' || type === 'codex';
   const systemPromptBody = null;
-  const systemPromptFile = supportsPrompts ? (inputSystemPrompt.value || null) : null;
-  const appendPromptFiles = supportsPrompts ? collectAppendChecklist(inputAppendList) : [];
 
   if (!name) return;
   if (!/^[a-zA-Z0-9._-]{1,64}$/.test(name)) {
@@ -1063,6 +1069,16 @@ async function openTemplateEditor(tpl = null) {
   setClaudeToolsCache(settings?.claudeTools || []);
   setDefaultToolDenyCache(settings?.defaultToolDeny || []);
   setAgentLibCache((await window.api.listAgents()) || []);
+  // Prompt refs are agent-type (claude||codex), NOT claude-only — load the
+  // library and prefill the system dropdown + append checklist so a codex
+  // template round-trips its prompts too. fillSystemPromptSelect falls back to
+  // '' when the ref's file is gone (graceful in the UI, like the spawn path).
+  const agentType = inputType.value === 'claude' || inputType.value === 'codex';
+  if (agentType) {
+    await loadPromptLib();
+    fillSystemPromptSelect(inputSystemPrompt, (tpl && tpl.systemPromptFile) || '');
+    renderAppendChecklist(inputAppendList, new Set((tpl && tpl.appendPromptFiles) || []));
+  }
   if (inputType.value === 'claude') {
     renderAgentChecklist(inputAgentsList, new Set((tpl && tpl.agents) || []));
     renderBuiltinChecklist(inputBuiltinsList, new Set((tpl && tpl.denyBuiltins) || []));

@@ -2011,6 +2011,11 @@ function createSessionManager(deps) {
       const disabledTools = (tpl && tpl.disabledTools) || [];
       const disabledSkills = (tpl && tpl.disabledSkills) || [];
       const injectSkills = (tpl && tpl.injectSkills) || [];
+      // Prompt refs are library-file references (like agents/skills), so a
+      // template carries them; a non-template spawn keeps null/[] (unchanged).
+      // Absent-on-target degrades to the CLI default in create() (F1 grace).
+      const systemPromptFile = (tpl && tpl.systemPromptFile) || null;
+      const appendPromptFiles = (tpl && tpl.appendPromptFiles) || [];
 
       // Defer off the JsonlWatcher scan callback that triggered us (same discipline
       // as reload): don't drive a full PTY spawn synchronously from inside a watcher
@@ -2020,7 +2025,7 @@ function createSessionManager(deps) {
           ensureDir(cwd); // self-contained: mkdir the cwd if absent — no external tool
           await this.create(
             name, type, cwd, childArgs, null, workspaceId,
-            null, false, proxy, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills, null, [],
+            null, false, proxy, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills, systemPromptFile, appendPromptFiles,
           );
           // stripLevel + autoCompact are NOT create() params — the poller asserts
           // strip on relink and reads autoCompact from persistence. Apply post-

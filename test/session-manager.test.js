@@ -402,6 +402,10 @@ test('spawn template: threads config into create() + post-create strip/autocompa
   assert.deepStrictEqual(a[11], ['Edit', 'NotebookEdit']); // disabledTools
   assert.deepStrictEqual(a[12], ['s1']);               // disabledSkills
   assert.deepStrictEqual(a[13], ['notes']);            // injectSkills
+  // A template without prompt refs threads null/[] into params 15/16 (unchanged
+  // from a plain spawn) — no prompt applied, back-compat preserved.
+  assert.strictEqual(a[14], null);                     // systemPromptFile absent
+  assert.deepStrictEqual(a[15], []);                   // appendPromptFiles absent
   // Opt-out fields applied post-create onto the entry.
   assert.deepStrictEqual(stripCalls, [['t2', 2]]);
   assert.deepStrictEqual(acCalls, [['t2', false]]);
@@ -463,6 +467,22 @@ test('spawn template: empty template.extraArgs falls back to spawner permission 
   assert.deepStrictEqual(created[0][3], ['--dangerously-skip-permissions']);
 });
 
+test('spawn template: prompt refs thread into create() params 15/16', async () => {
+  // A template carrying library-file prompt refs (system replaces, appends
+  // compose) reproduces a seat's prompts — the refs, never inline bodies.
+  const withPrompts = {
+    ...TRADER_SEAT,
+    systemPromptFile: 'trader-seat',
+    appendPromptFiles: ['00-house-rules', '50-wake'],
+  };
+  const { m, created, spawner } = mkSpawn([withPrompts]);
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: null, template: 'trader-seat' });
+  await tick();
+  assert.strictEqual(created.length, 1);
+  assert.strictEqual(created[0][14], 'trader-seat');                    // systemPromptFile
+  assert.deepStrictEqual(created[0][15], ['00-house-rules', '50-wake']); // appendPromptFiles
+});
+
 // --- spawn template from a JSON FILE path (second source, same apply seam) -----
 // template:VALUE with a '/' or leading ~/. is a file path (resolved against the
 // spawner cwd), read + parsed into the same template object the library lookup
@@ -475,6 +495,7 @@ test('spawn template: a JSON file path resolves + applies its config', async () 
   fsReal.writeFileSync(file, JSON.stringify({
     type: 'claude', cwd: '/proj/desk', extraArgs: ['--model', 'opus'],
     disabledTools: ['Edit'], stripLevel: 1,
+    systemPromptFile: 'trader-seat', appendPromptFiles: ['50-wake'],
   }));
   const { m, created, stripCalls, replies, spawner } = mkSpawn([]); // empty library
   m._handleSpawnIntent(spawner, { name: 't2', cwd: null, template: file });
@@ -484,6 +505,8 @@ test('spawn template: a JSON file path resolves + applies its config', async () 
   assert.strictEqual(created[0][2], pathReal.resolve('/proj/desk'));
   assert.deepStrictEqual(created[0][3], ['--model', 'opus']);
   assert.deepStrictEqual(created[0][11], ['Edit']);
+  assert.strictEqual(created[0][14], 'trader-seat');   // prompt refs ride the file source too
+  assert.deepStrictEqual(created[0][15], ['50-wake']);
   assert.deepStrictEqual(stripCalls, [['t2', 1]]);
   // A file template has no name → the log/reply label falls back to the path.
   assert.match(replies.at(-1), /ok: spawned "t2".*via template/);

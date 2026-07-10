@@ -120,7 +120,11 @@ function registerIpcHandlers(deps) {
   // persistence.get carries the whole entry, so we pick exactly the spawnable
   // config — never identity (name/proxyAgent) or runtime state (sessionId).
   // stripLevel/autoCompact are opt-out fields (present only when non-default),
-  // so they're snapshotted only when set. NO prompt refs (F6 punt).
+  // so they're snapshotted only when set. Prompt refs (systemPromptFile +
+  // appendPromptFiles) are LIBRARY FILE REFERENCES — symmetric with the
+  // agents/skills refs — so a reproducible seat carries its prompts; NEVER the
+  // inline systemPromptBody (legacy param 7). A ref absent on the target
+  // degrades to the CLI default at spawn (resolveSystemPromptFile/readAppendBodies).
   ipcMain.handle('templates:exportFromSession', (_e, name, templateName) => {
     const entry = persistence.get(name);
     if (!entry) return { ok: false, error: `no session "${name}"` };
@@ -137,6 +141,8 @@ function registerIpcHandlers(deps) {
       disabledTools: Array.isArray(entry.disabledTools) ? entry.disabledTools : [],
       disabledSkills: Array.isArray(entry.disabledSkills) ? entry.disabledSkills : [],
       injectSkills: Array.isArray(entry.injectSkills) ? entry.injectSkills : [],
+      systemPromptFile: entry.systemPromptFile || null,
+      appendPromptFiles: Array.isArray(entry.appendPromptFiles) ? entry.appendPromptFiles : [],
     };
     if (entry.stripLevel === 1 || entry.stripLevel === 2) t.stripLevel = entry.stripLevel;
     if (entry.autoCompact === false) t.autoCompact = false;

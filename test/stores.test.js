@@ -127,6 +127,11 @@ test('templates: an old {id,name,type,cwd,extraArgs} template loads unchanged (b
     assert.deepStrictEqual(loaded, legacy);
     assert.strictEqual('agents' in loaded, false);      // no field invented on load
     assert.strictEqual('stripLevel' in loaded, false);
+    // A pre-prompt-refs template has no prompt fields either; the spawn path
+    // maps their absence to null/[] (no prompt applied), so a template authored
+    // before the F6-reversal still spawns unchanged.
+    assert.strictEqual('systemPromptFile' in loaded, false);
+    assert.strictEqual('appendPromptFiles' in loaded, false);
   } finally { cleanup(); }
 });
 
