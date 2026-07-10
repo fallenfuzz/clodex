@@ -6,6 +6,7 @@ const { versionSeverity, updateApplies, releaseAgeInfo } = require('../proxy-uti
 const { STRIP_LEVELS, SEV_LINE, CTX_CAT_LABELS, COST_SPINE, COST_CONTENT, BUST_FAULT, REP_BUCKET_COLOR, REP_BUCKET_LABEL, REP_CAT_COLOR } = require('./lib/constants');
 const { esc, shortPath, fmtTokens, fmtCountdown, fmtAgo, fmtUsd, fmtDur, shortTs, fmtBustTokens, fmtBytes } = require('./lib/format');
 const { renderDiffHtml, costStackBlock, svgCostChart, bustRow } = require('./lib/render-html');
+const { splitModelArg, withModelArg } = require('./lib/args-model');
 const { renderAppendChecklist, collectAppendChecklist, renderAgentChecklist, collectAgentChecklist, renderBuiltinChecklist, collectBuiltinChecklist, renderInjectChecklist, collectInjectChecklist, renderToolChecklist, collectToolChecklist, renderSkillChecklist, collectSkillChecklist, setChecklistAll, wireBulkToggles, setPromptLibCache, setAgentLibCache, setSkillLibCache, setClaudeToolsCache, setDefaultToolDenyCache, getPromptLibCache, getSkillLibCache, getDefaultToolDenyCache } = require('./lib/checklists');
 const { autoEnabledFor, reconcilePartialSelection } = require('../scope-util');
 const { createIpcLog } = require('./ipc-log');
@@ -49,6 +50,8 @@ const inputName = document.getElementById('input-name');
 const inputType = document.getElementById('input-type');
 const inputCwd = document.getElementById('input-cwd');
 const inputArgs = document.getElementById('input-args');
+const inputModel = document.getElementById('input-model');
+const modelRow = document.getElementById('model-row');
 const argsHint = document.getElementById('args-hint');
 const inputTemplate = document.getElementById('input-template');
 const templateRow = document.getElementById('template-row');
@@ -690,6 +693,11 @@ function applyTypeDefaults({ skipAsyncRefresh = false } = {}) {
   // shows them; only resume/fork stays hidden (runtime-only, still punted).
   const authoring = dialogMode === 'template';
   const supportsSystemPrompt = type === 'claude' || type === 'codex';
+  // Model is a projection of extraArgs' --model token — agent-only (both claude
+  // and codex take --model), hidden for bash. Clear on type-change alongside the
+  // args reset (gated so a template-apply's captured model survives).
+  if (modelRow) modelRow.style.display = supportsSystemPrompt ? '' : 'none';
+  if (!skipAsyncRefresh) inputModel.value = '';
   systemPromptRow.style.display = supportsSystemPrompt ? '' : 'none';
   if (appendPromptsRow) appendPromptsRow.style.display = supportsSystemPrompt ? '' : 'none';
   if (!supportsSystemPrompt) inputSystemPrompt.value = '';
@@ -879,7 +887,11 @@ inputTemplate.addEventListener('change', async () => {
   if (!t) return;
   inputType.value = t.type;
   inputCwd.value = t.cwd || homeDir;
-  inputArgs.value = (t.extraArgs || []).join(' ');
+  {
+    const { model, rest } = splitModelArg(t.extraArgs || []);
+    inputModel.value = model;
+    inputArgs.value = rest.join(' ');
+  }
   argsHint.textContent = ARGS_HINTS[t.type] || '';
   // Fix section show/hide for the type WITHOUT firing the default empty-set
   // async renders — we render the rich checklists below with the template's own
@@ -956,7 +968,7 @@ function collectFormConfig() {
   return {
     type,
     cwd: expandPath(inputCwd.value.trim()) || homeDir,
-    extraArgs: parseArgs(inputArgs.value || ''),
+    extraArgs: withModelArg(parseArgs(inputArgs.value || ''), inputModel.value),
     proxy: agentType ? proxyValueFromControls(inputProxyMode, inputProxyUrl) : null,
     agents: type === 'claude' ? collectAgentChecklist(inputAgentsList) : [],
     denyBuiltins: type === 'claude' ? collectBuiltinChecklist(inputBuiltinsList) : [],
@@ -1057,7 +1069,11 @@ async function openTemplateEditor(tpl = null) {
   inputType.value = (tpl && tpl.type) || 'claude';
   inputName.value = (tpl && tpl.name) || '';
   inputCwd.value = (tpl && tpl.cwd) || homeDir;
-  inputArgs.value = tpl ? (tpl.extraArgs || []).join(' ') : '';
+  {
+    const { model, rest } = splitModelArg((tpl && tpl.extraArgs) || []);
+    inputModel.value = model;
+    inputArgs.value = rest.join(' ');
+  }
   argsHint.textContent = ARGS_HINTS[inputType.value] || '';
   if (inputStripLevel) inputStripLevel.value = String((tpl && tpl.stripLevel) || 0);
   for (const sec of [toolsSection, skillsSection, otherSection]) { if (sec) sec.open = false; }
@@ -2714,6 +2730,8 @@ window.api.onRequestOpenPreferences(() => openPrefs());
 
 const argsOverlay = document.getElementById('args-overlay');
 const argsInput = document.getElementById('args-input');
+const argsModel = document.getElementById('args-model');
+const argsModelRow = document.getElementById('args-model-row');
 const argsTarget = document.getElementById('args-target');
 const argsRestart = document.getElementById('args-restart');
 const argsProxyRow = document.getElementById('args-proxy-row');
@@ -2781,8 +2799,13 @@ async function openArgsDialog(name, argsSource = null) {
   });
   argsEditingName = name;
   argsTarget.textContent = `${name} (${res.type}) — new settings apply on next spawn.`;
-  argsInput.value = (res.extraArgs || []).map(a => /\s/.test(a) ? `"${a}"` : a).join(' ');
+  {
+    const { model, rest } = splitModelArg(res.extraArgs || []);
+    argsModel.value = model;
+    argsInput.value = rest.map(a => /\s/.test(a) ? `"${a}"` : a).join(' ');
+  }
   const isAgent = res.type === 'claude' || res.type === 'codex';
+  if (argsModelRow) argsModelRow.style.display = isAgent ? '' : 'none';
   argsProxyRow.style.display = isAgent ? '' : 'none';
   setProxyControls(argsProxyMode, argsProxyUrl, res.proxy, settings?.proxyUrl);
   labelProxyDefault(argsProxyMode, settings);
@@ -2826,7 +2849,7 @@ function closeArgsDialog() {
 document.getElementById('btn-args-cancel').addEventListener('click', closeArgsDialog);
 document.getElementById('btn-args-save').addEventListener('click', async () => {
   if (!argsEditingName) return closeArgsDialog();
-  const parsed = parseArgs(argsInput.value || '');
+  const parsed = withModelArg(parseArgs(argsInput.value || ''), argsModel.value);
   const restart = argsRestart.checked;
   const proxy = argsProxyRow.style.display === 'none'
     ? null : proxyValueFromControls(argsProxyMode, argsProxyUrl);

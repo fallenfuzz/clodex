@@ -59,6 +59,7 @@ const RENDERER_SCANNED_MODULES = [
   'renderer/lib/format.js',
   'renderer/lib/render-html.js',
   'renderer/lib/checklists.js',
+  'renderer/lib/args-model.js',
   'renderer/ipc-log.js',
   'renderer/term-search.js',
   'renderer/banners.js',

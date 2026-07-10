@@ -359,6 +359,10 @@
           <span class="hint-text">Strip wasted re-read carriage from the wire to reclaim cost (needs a wirescope proxy). Best set here at creation — the cache is cold, so it costs nothing; changing it mid-session forces a one-time full-window re-write. Non-destructive: your local transcript is untouched.</span>
         </label>
       </details>
+      <label id="model-row">Model
+        <input type="text" id="input-model" placeholder="(CLI default) — e.g. opus, sonnet" spellcheck="false">
+        <span class="hint-text">The model Clodex launches (and relaunches) this session with. An in-CLI <code>/model</code> change is runtime-only and isn't saved here.</span>
+      </label>
       <label>Extra CLI args
         <input type="text" id="input-args" placeholder="(none)">
         <span class="hint-text" id="args-hint"></span>
@@ -435,6 +439,10 @@
           <option value="custom">Custom URL…</option>
         </select>
         <input type="text" id="args-proxy-url" placeholder="http://127.0.0.1:7800" spellcheck="false" style="display:none;">
+      </label>
+      <label id="args-model-row" class="dialog-wide">Model
+        <input type="text" id="args-model" placeholder="(CLI default) — e.g. opus, sonnet" spellcheck="false">
+        <span class="hint-text">The model Clodex launches (and relaunches) this session with. An in-CLI <code>/model</code> change is runtime-only and isn't saved here.</span>
       </label>
       <label class="dialog-wide">Extra CLI args
         <input type="text" id="args-input" placeholder="(none)">

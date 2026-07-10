@@ -25,6 +25,7 @@
 // guarantee.
 
 const { esc } = require('./lib/format');
+const { splitModelArg } = require('./lib/args-model');
 
 // Scope caption for a library row (point 7 of the scope feature): a dim label
 // derived from the two optional frontmatter keys — `workspace: <name>` and/or
@@ -442,21 +443,11 @@ function initLibraryDrawers({ getActiveSession, setAgentLibCache, setSkillLibCac
   const templatesNew = document.getElementById('templates-new');
   const templatesClose = document.getElementById('templates-close');
 
-  // Pull the model out of extraArgs for the one-line preview (--model X, -m X,
-  // or --model=X); templates carry the model as a CLI arg, not a field.
-  function templateModel(args) {
-    const a = Array.isArray(args) ? args : [];
-    for (let i = 0; i < a.length; i++) {
-      if ((a[i] === '--model' || a[i] === '-m') && a[i + 1]) return a[i + 1];
-      if (a[i].startsWith('--model=')) return a[i].slice('--model='.length);
-    }
-    return null;
-  }
-
   function templateSummary(t) {
     const parts = [];
     if (t.cwd) parts.push(t.cwd);
-    const model = templateModel(t.extraArgs);
+    // Model rides extraArgs' --model token (shared parser with the dialogs).
+    const model = splitModelArg(t.extraArgs).model;
     if (model) parts.push(`model: ${model}`);
     if ((t.agents || []).length) parts.push(`${t.agents.length} agent${t.agents.length > 1 ? 's' : ''}`);
     const gated = (t.disabledTools || []).length + (t.disabledSkills || []).length + (t.denyBuiltins || []).length;
