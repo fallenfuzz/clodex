@@ -182,6 +182,18 @@ window.api.onRequestRenameWorkspace(() => startWorkspaceRename());
 // Session UI
 // ---------------------------------------------------------------------------
 
+// Local session rows stay contiguous ABOVE the peer block: renderPeers removes
+// and re-appends every [data-peer-ui] header/row at the END of sessionList, so
+// a new local row appended naively lands BELOW the peers (the interleaving bug).
+// Anchor before the first peer element instead; no peer block → append as before.
+// Stable under re-render — renderPeers re-appends the peer block at the end, so
+// locals stay above.
+function insertLocalSessionRow(item) {
+  const firstPeer = sessionList.querySelector('[data-peer-ui]');
+  if (firstPeer) sessionList.insertBefore(item, firstPeer);
+  else sessionList.appendChild(item);
+}
+
 // Add a sidebar entry for a session that failed to restore
 function addFailedSessionToSidebar(entry) {
   const item = document.createElement('div');
@@ -226,7 +238,7 @@ function addFailedSessionToSidebar(entry) {
     }
   });
 
-  sessionList.appendChild(item);
+  insertLocalSessionRow(item);
 }
 
 function addSessionToSidebar(name, type, cwd, label) {
@@ -278,7 +290,7 @@ function addSessionToSidebar(name, type, cwd, label) {
     window.api.showSessionContextMenu(name, cwd || '');
   });
 
-  sessionList.appendChild(item);
+  insertLocalSessionRow(item);
 }
 
 // Handle context menu actions from main process
