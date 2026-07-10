@@ -947,7 +947,7 @@ const {
   refreshAppMenu, scheduleAppMenuRefresh, sendToFocused,
 } = createAppMenus({
   // value deps (hoisted fns / early consts — stable at call time)
-  DEFAULT_WORKSPACE_ID, THEME_KEYS, path,
+  DEFAULT_WORKSPACE_ID, LOG_FILE, THEME_KEYS, path,
   checkForUpdate, confirmRestartClodex, createWindow,
   // getter deps (TDZ / whenReady-assigned — lazy)
   getManager: () => manager,

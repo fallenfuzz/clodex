@@ -20,7 +20,7 @@ const { app, BrowserWindow, Menu, Tray, dialog, shell, nativeImage } = require('
 function createAppMenus(deps) {
   const {
     // value deps
-    DEFAULT_WORKSPACE_ID, THEME_KEYS, path,
+    DEFAULT_WORKSPACE_ID, LOG_FILE, THEME_KEYS, path,
     checkForUpdate, confirmRestartClodex, createWindow,
     // getter deps (TDZ / whenReady-assigned when this factory runs)
     getManager, getPeerManager, getUpdateInfo,
@@ -422,6 +422,13 @@ function createAppMenus(deps) {
           { role: 'reload' },
           { role: 'forceReload' },
           { role: 'toggleDevTools' },
+          {
+            // The ops log (~/.clodex/clodex.log) is file-only — errors,
+            // lifecycle, peer transitions, migrations. This is its sole UI
+            // surface; the in-app IPC panel shows agent traffic, not errors.
+            label: 'Open Log File',
+            click: () => { shell.openPath(LOG_FILE); },
+          },
           { type: 'separator' },
           {
             label: 'Theme',
