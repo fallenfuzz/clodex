@@ -542,6 +542,88 @@ test('spawn template: malformed JSON file errors, no spawn', async () => {
   assert.strictEqual(created.length, 0);
 });
 
+// --- Mid-flight DM delivery: park-on-busy (piece 2) + idle-edge drain (piece 3) -
+// A busy agent's DM parks to the on-disk pending store (where the out-of-process
+// PostToolUse hook can drain it mid-loop) instead of the in-memory _injectQueue;
+// the idle-edge Node drain is the turn-end fallback for a pure-text (no-tool)
+// turn. Real pending-store fns + isDraftOpen injected over a temp PENDING_DIR;
+// _injectText captured (no PTY). One atomic rename-claim = exactly-once.
+const { parkDelivery, drainPending, hasPending } = require('../pending-store');
+const { isDraftOpen: isDraftOpenReal } = require('../proxy-util');
+
+function mkPark(overrides = {}) {
+  const PENDING_DIR = fsReal.mkdtempSync(pathReal.join(osReal.tmpdir(), 'clodex-pend-'));
+  const injected = [];
+  const m = mk({
+    PENDING_DIR, parkDelivery, drainPending, isDraftOpen: isDraftOpenReal,
+    INJECT_QUIET_MS: 4000, INJECT_QUIET_MAXWAIT: 3_600_000, // maxwait large: park cap won't fire mid-test
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    ...overrides,
+  });
+  m._injectText = (s, text) => injected.push(text);
+  m._broadcast = () => {};
+  return { m, PENDING_DIR, injected };
+}
+
+test('_maybeParkDelivery: a BUSY (thinking) target parks to pending, not the inject queue', () => {
+  const { m, PENDING_DIR } = mkPark();
+  const target = { name: 'a', agentType: 'claude', activityState: 'thinking' }; // busy, no recent input
+  const parked = m._maybeParkDelivery(target, '[agent:from x] hi');
+  assert.strictEqual(parked, true, 'busy DM is parked (caller must not inject)');
+  assert.ok(hasPending(PENDING_DIR, 'a'), 'the DM landed in the pending store');
+  clearTimeout(target._parkCapTimer); // _armParkCap set a floor timer
+});
+
+test('_maybeParkDelivery: an IDLE, not-composing target does NOT park (falls through to inject)', () => {
+  const { m, PENDING_DIR } = mkPark();
+  const target = { name: 'a', agentType: 'claude', activityState: 'idle' };
+  assert.strictEqual(m._maybeParkDelivery(target, 'hi'), false);
+  assert.strictEqual(hasPending(PENDING_DIR, 'a'), false, 'nothing parked for an idle+quiet target');
+});
+
+test('_maybeParkDelivery: an operator-composing target still parks (typing branch intact)', () => {
+  const { m, PENDING_DIR } = mkPark();
+  const target = { name: 'a', agentType: 'claude', activityState: 'idle', lastUserInputTs: Date.now() };
+  assert.strictEqual(m._maybeParkDelivery(target, 'hi'), true);
+  assert.ok(hasPending(PENDING_DIR, 'a'));
+  clearTimeout(target._parkCapTimer);
+});
+
+test('_drainPendingAtIdle: drains a parked DM via a parkable inject when no draft is open', () => {
+  const { m, PENDING_DIR, injected } = mkPark();
+  parkDelivery(PENDING_DIR, 'a', '[agent:from x] hi', '1');
+  const session = { name: 'a', agentType: 'claude' }; // no draft (no lastUserInputTs)
+  m._drainPendingAtIdle(session);
+  assert.deepStrictEqual(injected, ['[agent:from x] hi'], 'the parked DM stdin-injects at the idle edge');
+  assert.strictEqual(hasPending(PENDING_DIR, 'a'), false, 'claimed + removed from the store');
+});
+
+test('_drainPendingAtIdle: does NOT drain while an operator draft is open (no splice)', () => {
+  const { m, PENDING_DIR, injected } = mkPark();
+  parkDelivery(PENDING_DIR, 'a', '[agent:from x] hi', '1');
+  const session = { name: 'a', agentType: 'claude', lastUserInputTs: Date.now(), lastUserSubmitTs: 0 };
+  m._drainPendingAtIdle(session);
+  assert.deepStrictEqual(injected, [], 'draft open → no inject');
+  assert.ok(hasPending(PENDING_DIR, 'a'), 'DM stays parked for a later drain');
+});
+
+test('_drainPendingAtIdle: exactly-once — a second drain (hook already claimed) is a no-op', () => {
+  const { m, PENDING_DIR, injected } = mkPark();
+  parkDelivery(PENDING_DIR, 'a', '[agent:from x] hi', '1');
+  const session = { name: 'a', agentType: 'claude' };
+  m._drainPendingAtIdle(session);            // first claim wins
+  m._drainPendingAtIdle(session);            // dir gone → ENOENT → [] → no-op
+  assert.deepStrictEqual(injected, ['[agent:from x] hi'], 'delivered once, not twice');
+});
+
+test('_drainPendingAtIdle: a non-claude target is skipped (pending is a Claude-hook store)', () => {
+  const { m, PENDING_DIR, injected } = mkPark();
+  parkDelivery(PENDING_DIR, 'a', 'hi', '1');  // (wouldn't happen, but assert the guard)
+  m._drainPendingAtIdle({ name: 'a', agentType: 'codex' });
+  assert.deepStrictEqual(injected, []);
+  assert.ok(hasPending(PENDING_DIR, 'a'), 'left untouched for a non-claude target');
+});
+
 test('spawn template: a file missing "type" errors, no spawn', async () => {
   const dir = tmpTplDir();
   const file = pathReal.join(dir, 'notype.json');

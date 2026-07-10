@@ -136,11 +136,25 @@ PYEOF
     // are not per-run state); only the drain SCRIPT relocates into run/<name>/.
     const pendingDir = path.join(REGISTRY_DIR, 'pending', name);
     const pendingScriptPath = pathFor(REGISTRY_DIR, name, 'pendingScript');
+    // This script is registered under BOTH UserPromptSubmit and PostToolUse, so it
+    // must NOT hardcode the output hookEventName: Claude Code's docs pair the
+    // returned hookEventName with the event that actually fired, and a mismatch is
+    // undocumented/unsupported (the additionalContext may be silently dropped). So
+    // read the firing event's `hook_event_name` off stdin (the hook input JSON,
+    // same as the attn script's `$(cat)`) and echo it back, defaulting to
+    // UserPromptSubmit if stdin is absent/unparseable. Read stdin only AFTER the
+    // dir guard so the empty case stays a stat-and-exit with no python spawn.
     fs.writeFileSync(pendingScriptPath, `#!/bin/bash
 [ -d "${pendingDir}" ] || exit 0
-python3 - "${pendingDir}" <<'PYEOF'
+IN="$(cat)"
+python3 - "${pendingDir}" "$IN" <<'PYEOF'
 import json, os, sys, glob, shutil
 d = sys.argv[1]
+ev = 'UserPromptSubmit'
+try:
+    ev = json.loads(sys.argv[2]).get('hook_event_name') or ev
+except Exception:
+    pass                          # stdin absent/unparseable => safe default
 claim = d + '.draining.hook.' + str(os.getpid())
 try:
     os.rename(d, claim)          # atomic claim; ENOENT => nothing to drain / lost the race
@@ -158,7 +172,7 @@ for fp in sorted(glob.glob(os.path.join(claim, '*.json'))):
 shutil.rmtree(claim, ignore_errors=True)
 if texts:
     print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "UserPromptSubmit",
+        "hookEventName": ev,
         "additionalContext": "\\n\\n".join(texts)}}))
 PYEOF
 `, { mode: 0o700 });
@@ -204,6 +218,22 @@ PYEOF
             { type: 'command', command: ackScriptPath },
             { type: 'command', command: pendingScriptPath },
             { type: 'command', command: ctxwarnScriptPath },
+          ]
+        }],
+        // Parked-DM drain ONLY (not acks/ctxwarn — those are turn-boundary
+        // bookkeeping that shouldn't fire per-tool). PostToolUse fires between an
+        // agent's tool calls, so a DM parked while the agent is mid-turn/busy is
+        // delivered MID-LOOP as additionalContext next to the tool result — and
+        // Claude Code saves it to the transcript, so it survives into later
+        // requests (the ghost-history defect the wire approach couldn't avoid).
+        // Same pendingScriptPath, same atomic rename-claim as the UserPromptSubmit
+        // drain: whichever event fires first delivers, the other emits nothing.
+        // Cheap on the empty case — the script stats the pending dir and exits
+        // before spawning python when nothing is parked.
+        PostToolUse: [{
+          matcher: '',
+          hooks: [
+            { type: 'command', command: pendingScriptPath },
           ]
         }]
       }

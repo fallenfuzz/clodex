@@ -36,6 +36,25 @@ test('setupClaudeHook: writes the transcript-symlink script + name-only output +
   const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
   assert.ok(Array.isArray(settings.hooks.SessionStart));
   assert.ok(Array.isArray(settings.hooks.UserPromptSubmit));
+  // PostToolUse drains parked DMs MID-LOOP (between tool calls). It must carry
+  // the pending drain ONLY — acks/ctxwarn are turn-boundary bookkeeping and must
+  // not fire per-tool. Pin both facts: PostToolUse exists, and its single hook is
+  // the same pendingScriptPath the UserPromptSubmit block's middle hook uses.
+  assert.ok(Array.isArray(settings.hooks.PostToolUse));
+  const postCmds = settings.hooks.PostToolUse[0].hooks.map((h) => h.command);
+  const pendingCmd = settings.hooks.UserPromptSubmit[0].hooks[1].command; // acks, PENDING, ctxwarn
+  assert.deepStrictEqual(postCmds, [pendingCmd], 'PostToolUse must drain pending only');
+  assert.match(pendingCmd, /pending/); // the pending drain script, not acks/ctxwarn
+
+  // The pending drain runs under BOTH events, so its output hookEventName must be
+  // DERIVED from the firing event (stdin's hook_event_name), never hardcoded — a
+  // PostToolUse hook returning "UserPromptSubmit" is an unsupported mismatch whose
+  // additionalContext Claude Code may silently drop. Pin the derivation so a
+  // regression back to a hardcoded event name is caught.
+  const pendingBody = fs.readFileSync(pendingCmd, 'utf-8');
+  assert.match(pendingBody, /IN="\$\(cat\)"/, 'pending drain must read the hook input off stdin');
+  assert.match(pendingBody, /hook_event_name/, 'pending drain must derive the output event from stdin');
+  assert.match(pendingBody, /"hookEventName": ev/, 'output event name must be the derived variable, not a literal');
 });
 
 test('setupClaudeHook: proxyBase routes ANTHROPIC_BASE_URL through the per-agent path', () => {

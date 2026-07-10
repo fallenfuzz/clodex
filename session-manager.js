@@ -1225,7 +1225,7 @@ function createSessionManager(deps) {
       // activity tracker's quiet-fallback flips to idle.
       if (s && state !== 'idle' && s.needsAttention) this._setAttention(s, null);
       // The idle transition is the busy-hold's release event.
-      if (s && state === 'idle') this._maybeFlushInjectQueue(s);
+      if (s && state === 'idle') { this._maybeFlushInjectQueue(s); this._drainPendingAtIdle(s); }
       this._sendToSession(name, 'session-activity', name, state);
       // notify is only ever true on a real end-of-turn idle, so it doubles as
       // the remote client's "refetch the transcript now" signal.
@@ -1428,6 +1428,37 @@ function createSessionManager(deps) {
       session._injectHoldTimer = null;
       session._injectQueue = [];
       this._injectText(session, queue.join('\n'), { bypassHold: true });
+    }
+
+    // Piece-3 fallback drain for parked DMs at the busy→idle edge. Closes the
+    // no-tool-turn gap: a DM parked while the agent was busy (park-on-busy in
+    // _maybeParkDelivery) is normally picked up MID-LOOP by the PostToolUse hook,
+    // but a pure-text reply calls no tool, so nothing fires that hook — the DM
+    // would then wait for the operator's next UserPromptSubmit (or the long park
+    // cap). Draining here at turn-end restores the old idle-flush latency.
+    //
+    // Exactly-once is the SAME atomic rename-claim the two hooks use: if the
+    // PostToolUse hook already drained this turn, drainPending renames a dir that's
+    // gone → ENOENT → [] → no-op here. Whoever renames first wins; losers see
+    // nothing. So this can't double-deliver against a mid-loop hook drain.
+    //
+    // Draft-gated: if an operator draft is open we must NOT drain — injecting would
+    // risk splicing the draft (the whole reason parking exists). Leave the DMs
+    // parked; they drain on the operator's submit (UserPromptSubmit), the next idle
+    // with the draft closed, or the park cap. The pre-claim gate is the cheap first
+    // line; the parkable inject below is the race backstop (a draft opening between
+    // this gate and the queue's write re-parks via the fire-time divert rather than
+    // splicing). Claude-only: pending is a Claude-hook store (codex never parks).
+    _drainPendingAtIdle(session) {
+      if (!session || session.agentType !== 'claude' || session._dead) return;
+      if (isDraftOpen(session)) return;                 // don't splice an open draft
+      let texts = [];
+      try { texts = drainPending(PENDING_DIR, session.name, `idle.${process.pid}`); } catch {}
+      if (!texts.length) return;                        // hook already drained, or nothing parked
+      // Parkable: if a draft opens before the queue writes, the fire-time divert
+      // re-parks each text instead of splicing (best-effort — falls through to a
+      // normal inject on park failure, never dropping a DM).
+      for (const t of texts) this._injectText(session, t, { parkable: true });
     }
 
     // --- JSONL text scanning (agent mode) ---
@@ -2503,20 +2534,35 @@ function createSessionManager(deps) {
       return id;
     }
 
-    // Park a delivery for the operator's next submit instead of injecting it now,
-    // WHEN the operator is actively composing. Returns true if parked (caller must
-    // not inject), false to fall through to a normal inject. Claude only — the
-    // drain rides a UserPromptSubmit hook, which Codex's hook surface doesn't
-    // provide the same way; Codex keeps the quiet-gate queue. Self-intents and
-    // memory/system lines route through _injectText directly (not here), so they
-    // never park — they're for the CLI/bookkeeping, not conversational deliveries.
+    // Park a delivery for a hook drain instead of injecting it now, in either of
+    // two cases: the operator is actively composing (drain rides the operator's
+    // next UserPromptSubmit), OR the target is mid-turn/busy (drain rides the
+    // PostToolUse hook, which fires between tool calls so a busy agent picks the
+    // DM up MID-LOOP as CLI-authored, natively-persisted additionalContext — not
+    // an in-memory _injectQueue stdin flush at the next idle edge). Returns true
+    // if parked (caller must not inject), false to fall through to a normal inject.
+    // Claude only — both drains ride Claude hook events Codex's surface lacks;
+    // Codex keeps the quiet-gate queue. Self-intents and memory/system lines route
+    // through _injectText directly (not here), so they never park — they're for
+    // the CLI/bookkeeping, not conversational deliveries.
+    //
+    // Exactly-once across the two hooks + the Node idle-edge drain + the park cap
+    // is guaranteed by drainPending's atomic rename-claim: whoever renames the dir
+    // first gets every message then present; the losers see ENOENT and emit nothing.
     _maybeParkDelivery(target, finalText) {
       if (!target || target.agentType !== 'claude' || target._dead) return false;
       // "Composing" = a human touched the pane within the quiet window. Same
       // signal the inject quiet-gate uses (covers local keystrokes AND a peer
       // controller's input, both stamped at the write() choke point).
       const typing = Date.now() - (target.lastUserInputTs || 0) < INJECT_QUIET_MS;
-      if (!typing) return false;
+      // "Busy" = mid-turn ('thinking' from either the wire tracker or the JSONL
+      // watcher). A busy DM used to flow to _injectText's busy-branch _injectQueue
+      // and flush via stdin at the idle edge; parking it instead lets the
+      // out-of-process PostToolUse hook deliver it mid-loop (an external script
+      // can't see the in-memory queue). The idle-edge Node drain is the fallback
+      // for a turn that ends with no tool call (pure-text reply).
+      const busy = target.activityState === 'thinking';
+      if (!typing && !busy) return false;
       try {
         parkDelivery(PENDING_DIR, target.name, finalText, this._nextParkSeq());
       } catch (e) {
