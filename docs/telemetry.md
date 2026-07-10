@@ -66,9 +66,11 @@ below-min-tokens / recent-user-input / cooldown). Key facts:
   A once-per-session WARN flags heavy non-wire-routed sessions.
 - On fire: inject the `/compact` slash command with `bypassHold` (a bare
   slash command must never sit in the turn-batch queue). The in-flight
-  guard + 5min valve (`COMPACT_INFLIGHT_TIMEOUT`) bound the window;
-  suppressions are ops-logged only on reason *transitions* (never
-  per-poll).
+  guard + 5min valve (`COMPACT_INFLIGHT_TIMEOUT`) bound the window. The
+  fire is ops-logged with the context size; transient suppression
+  reason-class transitions go to the **shadow** log
+  (`autocompact-suppressed`), not clodex.log. clodex.log keeps only the
+  fire and the once-per-session structural not-wired WARN.
 - Default ON; sessions.json stores only `autoCompact: false` to opt out.
 
 ## 4. Managed wirescope (wirescope-supervisor.js)

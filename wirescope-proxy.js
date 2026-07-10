@@ -443,31 +443,34 @@ function createProxyPoller({
           lastFiredTs: this.autoCompacted.get(s.name) || 0,
         });
         if (!decision.fire) {
-          // Observability for the silent-never-fired class: log a suppression
-          // ONLY for a heavy-context near-miss (a session light on context isn't
-          // a candidate, so its reason is noise), and only when the reason CHANGES
-          // — this runs on the 5s poll, so per-poll logging would flood. That
-          // yields exactly "crossed the threshold but didn't fire, and here's why"
-          // once per reason transition per session.
+          // Near-miss observability for a heavy-context session (a session light
+          // on context isn't a candidate, so its reason is noise). The transient
+          // suppression reason goes to the SHADOW log, not clodex.log — the
+          // silent-never-fire diagnostic campaign is over, so a per-transition
+          // ops line is just churn. clodex.log keeps only the FIRE and the
+          // once-per-session structural not-wired WARN below.
           try {
             const heavy = payload && payload.context && typeof payload.context.inputTokens === 'number'
               && payload.context.inputTokens >= AUTO_COMPACT.MIN_INPUT_TOKENS;
             if (heavy) {
               // Suspect-A distinguisher (laptop2 silent-never-fire): a session
               // that isn't wire-routed NEVER stamps lastMainStop, so atPrompt is
-              // permanently false and auto-compact is structurally dead — but the
-              // reason-transition log would only ever show 'not-at-prompt', which
-              // can't tell "structural-never" from "transient mid-turn". A
-              // distinct once-per-session WARN kills that ambiguity.
+              // permanently false and auto-compact is structurally dead. That's
+              // actionable and fires once, so it stays a real WARN in clodex.log.
               if (s.intentSource !== 'wire' && !s._acNotWiredLogged) {
                 s._acNotWiredLogged = true;
                 log.warn('autocompact', `unavailable for ${s.name}: not wire-routed (lastMainStop never stamped → can't fire) (~${Math.round(payload.context.inputTokens / 1000)}k ctx)`);
               }
               // Dedup on the CLASS, not the full reason — warmth-headroom embeds
               // the decaying countdown, so the full string differs every poll.
+              // One shadow record per class transition, never per poll.
               if (s._lastAcSuppressReason !== decision.reasonClass) {
                 s._lastAcSuppressReason = decision.reasonClass;
-                log.info('autocompact', `${s.name} suppressed: ${decision.reason} (~${Math.round(payload.context.inputTokens / 1000)}k ctx)`);
+                this.manager._shadowLog({
+                  type: 'autocompact-suppressed', agent: s.name,
+                  reason: decision.reason, reasonClass: decision.reasonClass,
+                  ctxK: Math.round(payload.context.inputTokens / 1000),
+                });
               }
             }
           } catch { /* logging must never break the poll */ }
