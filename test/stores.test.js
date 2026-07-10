@@ -269,3 +269,27 @@ test('uiSettings: peers are sanitized (junk dropped, empty-visible kept)', () =>
     assert.deepStrictEqual(next.peerAttached, {});
   } finally { cleanup(); }
 });
+
+test('uiSettings: peer disabled flag round-trips (strict true only)', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    const next = stores.uiSettings.set({
+      peers: [
+        { id: 'paused', sshHost: 'user@box', disabled: true },   // preserved
+        { id: 'live', sshHost: 'user@box2' },                    // key absent
+        { id: 'truthy', sshHost: 'user@box3', disabled: 'yes' }, // dropped
+        { id: 'one', sshHost: 'user@box4', disabled: 1 },        // dropped
+      ],
+    });
+    const by = Object.fromEntries(next.peers.map(p => [p.id, p]));
+    assert.strictEqual(by.paused.disabled, true);
+    assert.ok(!('disabled' in by.live), 'enabled peer has no disabled key (never false)');
+    assert.ok(!('disabled' in by.truthy), 'truthy-not-true disabled dropped');
+    assert.ok(!('disabled' in by.one), 'numeric truthy disabled dropped');
+    // The shipped bug was strip-on-write: assert the flag survives the actual
+    // disk roundtrip (get() re-loads + re-sanitizes), not just set()'s return.
+    const reread = Object.fromEntries(stores.uiSettings.get().peers.map(p => [p.id, p]));
+    assert.strictEqual(reread.paused.disabled, true);
+    assert.ok(!('disabled' in reread.live), 'absence survives the disk roundtrip');
+  } finally { cleanup(); }
+});

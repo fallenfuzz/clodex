@@ -141,6 +141,11 @@ function sanitizePeers(raw) {
       url, sshHost,
       remotePort: Number.isInteger(p.remotePort) ? p.remotePort : 7900,
       deployFolder,
+      // Pause flag: preserved STRICTLY. setDisabled's enable path deletes the
+      // key, so absence = enabled — never write `disabled: false` (would defeat
+      // the absence invariant syncPeerManager reads). Only a hard `=== true`
+      // survives; truthy-but-not-true is dropped.
+      ...(p.disabled === true ? { disabled: true } : {}),
     });
   }
   return out;
