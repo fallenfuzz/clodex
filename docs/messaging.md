@@ -168,7 +168,10 @@ the two directions use different transports (full wire detail in
   The sender tag uses OUR configured label for that peer (not the box's
   origin string) so the reply trailer routes back through our own config.
 - `SELF_LABEL` = hostname minus `.local`. `[agent:who]` appends federated
-  addresses for online dm-cap peers.
+  addresses for online dm-cap peers. It also lists ALL local agent sessions
+  regardless of workspace (not just the sender's) — parity with that
+  cross-workspace federated listing, and every listed name is a valid dm
+  handle since the session map is globally keyed.
 - Accepted asymmetries: a park on the mailbox leg sends the remote sender
   no notice; the claim endpoint is origin-unauthenticated (tunnel-trust,
   same posture as control acquisition).

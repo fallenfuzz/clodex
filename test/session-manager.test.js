@@ -313,3 +313,29 @@ test('_executeCompact: shared body stashes continuation, injects, arms guard + v
   clearTimeout(s._compactValveTimer);
   clearTimeout(s._injectHoldTimer);
 });
+
+// --- who lists all local agents, every workspace (federated-peer parity) -----
+// who already surfaces `name@peer` agents from other Clodexes to every
+// workspace, so it must also list same-Clodex agents in a different LOCAL
+// workspace — hiding those was the inconsistent case. Two agents in different
+// workspaces; who from one lists the other, flat (no workspace tag), self
+// excluded.
+test('who: lists agent sessions from all workspaces, flat, self excluded', async () => {
+  const injected = [];
+  const m = mk({
+    registry: { listPeers: () => [] },
+    getPeerManager: () => null,
+    peerStatusLabel: () => 'idle',
+  });
+  m._injectText = (s, text) => injected.push(text);
+  m.sessions.set('a', { name: 'a', agentType: 'claude', workspaceId: 'ws1' });
+  m.sessions.set('b', { name: 'b', agentType: 'claude', workspaceId: 'ws2' });
+  m.sessions.set('sh', { name: 'sh', workspaceId: 'ws1' }); // bash: no agentType, excluded
+
+  await m._handleIntent('a', { type: 'who' });
+
+  assert.strictEqual(injected.length, 1);
+  // Exactly the other-workspace agent, labelled, no workspace annotation — proves
+  // cross-workspace visibility, self-exclusion, and bash exclusion in one shot.
+  assert.strictEqual(injected[0], '[agent:peers] b (idle)');
+});

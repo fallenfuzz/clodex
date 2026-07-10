@@ -1498,12 +1498,8 @@ function createSessionManager(deps) {
 
     // --- Intent handling + message routing ---
 
-    async _handleIntent(senderName, intent, senderWorkspaceId = null) {
+    async _handleIntent(senderName, intent) {
       const session = this.sessions.get(senderName);
-      // `who` is workspace-scoped for Clodex-originated intents: it only sees
-      // sessions in the same workspace. External socket peers stay global
-      // because they have no workspace concept.
-      const senderWs = senderWorkspaceId ?? (session && session.workspaceId) ?? null;
 
       switch (intent.type) {
         case 'dm': {
@@ -1616,13 +1612,19 @@ function createSessionManager(deps) {
           break;
         }
         case 'who': {
-          // Only agent sessions in the sender's workspace — bash can't process
-          // intents. Each local peer carries a reachability status (working /
-          // idle-for + cache warmth when known) so senders can weigh whether a
-          // dm is worth waking a cold peer — the same facts the dm hold gate
-          // reads. External socket peers stay bare names: no visibility.
+          // ALL local agent sessions, every workspace — for parity with the
+          // federated-peer listing below, which already surfaces `name@peer`
+          // agents from other machines to every workspace. Once we list agents
+          // next door on another Clodex, hiding the ones merely in a different
+          // LOCAL workspace is the inconsistent case (and every name is a valid
+          // dm handle regardless — a secondary supporting fact). Bash sessions
+          // are excluded — they can't process intents. Each local peer carries a
+          // reachability status (working / idle-for + cache warmth when known)
+          // so senders can weigh whether a dm is worth waking a cold peer — the
+          // same facts the dm hold gate reads. External socket peers stay bare
+          // names: no visibility.
           const localAgents = Array.from(this.sessions.values())
-            .filter(s => s.agentType && (!senderWs || s.workspaceId === senderWs))
+            .filter(s => s.agentType)
             .map(s => ({ name: s.name, label: peerStatusLabel({
               state: s.activityState || 'idle',
               idleMs: Date.now() - (s.activityTs || Date.now()),
