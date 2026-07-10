@@ -25,6 +25,8 @@ window.api = {
     ipcRenderer.invoke('templates:save', template),
   removeTemplate: (id) =>
     ipcRenderer.invoke('templates:remove', id),
+  exportTemplate: (name, templateName) =>
+    ipcRenderer.invoke('templates:exportFromSession', name, templateName),
   listPrompts: (kind) =>
     ipcRenderer.invoke('prompts:list', kind),
   savePrompt: (kind, name, body) =>

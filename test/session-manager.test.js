@@ -339,3 +339,193 @@ test('who: lists agent sessions from all workspaces, flat, self excluded', async
   // cross-workspace visibility, self-exclusion, and bash exclusion in one shot.
   assert.strictEqual(injected[0], '[agent:peers] b (idle)');
 });
+
+// --- spawn with template: applies the template's config -----------------------
+// [agent:spawn name:X template:Y] resolves the template by name and threads its
+// config into create() (proxy/agents/tool+skill gating/extraArgs) plus the
+// post-create strip/autocompact setters. Errors (missing / ambiguous / no cwd)
+// reply synchronously before any spawn. create() is stubbed to capture args.
+const AGENT_NAME_RE_T = /^[a-zA-Z0-9._-]{1,64}$/;
+const tick = () => new Promise((r) => setTimeout(r, 10));
+
+function mkSpawn(templatesList, persistedEntries = {}) {
+  const stripCalls = [], acCalls = [];
+  const persistence = {
+    list: () => [],
+    get: (n) => persistedEntries[n] || null,
+    setStripLevel: (n, l) => stripCalls.push([n, l]),
+    setAutoCompact: (n, on) => acCalls.push([n, on]),
+  };
+  const m = mk({
+    getPersistence: () => persistence,
+    getTemplates: () => ({ list: () => templatesList }),
+    AGENT_NAME_RE: AGENT_NAME_RE_T,
+    DEFAULT_WORKSPACE_ID: 'default',
+    ensureDir: () => {},
+    fs: fsReal,
+    path: pathReal,
+    os: osReal,
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+  });
+  const created = [], replies = [];
+  m._injectText = (_s, text) => replies.push(text);
+  m._sendToSession = () => {};
+  m._broadcast = () => {};
+  m.create = async (...args) => { created.push(args); };
+  const spawner = { name: 'clodex', type: 'claude', workspaceId: 'default', proxy: null };
+  return { m, created, replies, stripCalls, acCalls, spawner };
+}
+
+const TRADER_SEAT = {
+  id: 'tpl-1', name: 'trader-seat', type: 'claude', cwd: '/proj/desk',
+  extraArgs: ['--model', 'opus'],
+  proxy: false, agents: ['reviewer'], denyBuiltins: ['WebSearch'],
+  disabledTools: ['Edit', 'NotebookEdit'], disabledSkills: ['s1'],
+  injectSkills: ['notes'], stripLevel: 2, autoCompact: false,
+};
+
+test('spawn template: threads config into create() + post-create strip/autocompact', async () => {
+  const { m, created, replies, stripCalls, acCalls, spawner } = mkSpawn([TRADER_SEAT]);
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: null, template: 'trader-seat' });
+  await tick();
+  assert.strictEqual(created.length, 1, 'create called once');
+  const a = created[0];
+  // create(name, type, cwd, extraArgs, resumeId, workspaceId, sysBody, fork,
+  //        proxy, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills, sysFile, appendFiles)
+  assert.strictEqual(a[0], 't2');
+  assert.strictEqual(a[1], 'claude');                  // type from template
+  assert.strictEqual(a[2], pathReal.resolve('/proj/desk')); // cwd from template
+  assert.deepStrictEqual(a[3], ['--model', 'opus']);   // extraArgs verbatim (model rides here)
+  assert.strictEqual(a[8], false);                     // proxy from template
+  assert.deepStrictEqual(a[9], ['reviewer']);          // agents
+  assert.deepStrictEqual(a[10], ['WebSearch']);        // denyBuiltins
+  assert.deepStrictEqual(a[11], ['Edit', 'NotebookEdit']); // disabledTools
+  assert.deepStrictEqual(a[12], ['s1']);               // disabledSkills
+  assert.deepStrictEqual(a[13], ['notes']);            // injectSkills
+  // Opt-out fields applied post-create onto the entry.
+  assert.deepStrictEqual(stripCalls, [['t2', 2]]);
+  assert.deepStrictEqual(acCalls, [['t2', false]]);
+  assert.match(replies.at(-1), /ok: spawned "t2".*via template "trader-seat"/);
+});
+
+test('spawn template: name match is case-insensitive', async () => {
+  const { m, created, spawner } = mkSpawn([TRADER_SEAT]);
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: null, template: 'TRADER-SEAT' });
+  await tick();
+  assert.strictEqual(created.length, 1);
+  assert.strictEqual(created[0][0], 't2');
+});
+
+test('spawn template: intent cwd overrides the template cwd', async () => {
+  const { m, created, spawner } = mkSpawn([TRADER_SEAT]);
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: '/other/dir', template: 'trader-seat' });
+  await tick();
+  assert.strictEqual(created[0][2], pathReal.resolve('/other/dir'));
+});
+
+test('spawn template: missing template errors synchronously, listing available names', async () => {
+  const { m, created, replies, spawner } = mkSpawn([TRADER_SEAT]);
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: '/tmp/x', template: 'nope' });
+  // Error is synchronous — no setImmediate spawn scheduled.
+  assert.match(replies.at(-1), /no template named "nope".*available: trader-seat/);
+  await tick();
+  assert.strictEqual(created.length, 0, 'no spawn on a missing template');
+});
+
+test('spawn template: ambiguous name errors, never silent-picks', async () => {
+  const dupA = { ...TRADER_SEAT, id: 'a', name: 'dup' };
+  const dupB = { ...TRADER_SEAT, id: 'b', name: 'DUP' };  // case-insensitive collision
+  const { m, created, replies, spawner } = mkSpawn([dupA, dupB]);
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: '/tmp/x', template: 'dup' });
+  assert.match(replies.at(-1), /ambiguous — 2 templates named "dup"/);
+  await tick();
+  assert.strictEqual(created.length, 0);
+});
+
+test('spawn template: no cwd from intent OR template errors', async () => {
+  const noCwd = { ...TRADER_SEAT, cwd: null };
+  const { m, created, replies, spawner } = mkSpawn([noCwd]);
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: null, template: 'trader-seat' });
+  assert.match(replies.at(-1), /template "trader-seat" has no cwd/);
+  await tick();
+  assert.strictEqual(created.length, 0);
+});
+
+test('spawn template: empty template.extraArgs falls back to spawner permission posture (F5)', async () => {
+  // Template carries no extraArgs; the spawner is persisted with yolo → the
+  // child inherits ONLY that posture flag (not a full extraArgs copy).
+  const bare = { ...TRADER_SEAT, extraArgs: [] };
+  const { m, created, spawner } = mkSpawn([bare], {
+    clodex: { extraArgs: ['--dangerously-skip-permissions'] },
+  });
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: null, template: 'trader-seat' });
+  await tick();
+  assert.deepStrictEqual(created[0][3], ['--dangerously-skip-permissions']);
+});
+
+// --- spawn template from a JSON FILE path (second source, same apply seam) -----
+// template:VALUE with a '/' or leading ~/. is a file path (resolved against the
+// spawner cwd), read + parsed into the same template object the library lookup
+// yields — so config application can't drift between the two sources.
+const tmpTplDir = () => fsReal.mkdtempSync(pathReal.join(osReal.tmpdir(), 'clodex-tpl-'));
+
+test('spawn template: a JSON file path resolves + applies its config', async () => {
+  const dir = tmpTplDir();
+  const file = pathReal.join(dir, 'seat.json');
+  fsReal.writeFileSync(file, JSON.stringify({
+    type: 'claude', cwd: '/proj/desk', extraArgs: ['--model', 'opus'],
+    disabledTools: ['Edit'], stripLevel: 1,
+  }));
+  const { m, created, stripCalls, replies, spawner } = mkSpawn([]); // empty library
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: null, template: file });
+  await tick();
+  assert.strictEqual(created.length, 1);
+  assert.strictEqual(created[0][1], 'claude');
+  assert.strictEqual(created[0][2], pathReal.resolve('/proj/desk'));
+  assert.deepStrictEqual(created[0][3], ['--model', 'opus']);
+  assert.deepStrictEqual(created[0][11], ['Edit']);
+  assert.deepStrictEqual(stripCalls, [['t2', 1]]);
+  // A file template has no name → the log/reply label falls back to the path.
+  assert.match(replies.at(-1), /ok: spawned "t2".*via template/);
+});
+
+test('spawn template: a ./relative file resolves against the spawner cwd', async () => {
+  const dir = tmpTplDir();
+  fsReal.writeFileSync(pathReal.join(dir, 'seat.json'), JSON.stringify({ type: 'claude', cwd: '/proj/x' }));
+  const { m, created, spawner } = mkSpawn([]);
+  spawner.cwd = dir;                                  // spawner fires from here
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: null, template: './seat.json' });
+  await tick();
+  assert.strictEqual(created.length, 1);
+  assert.strictEqual(created[0][2], pathReal.resolve('/proj/x'));
+});
+
+test('spawn template: a missing file path errors, no spawn', async () => {
+  const { m, created, replies, spawner } = mkSpawn([]);
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: '/tmp/x', template: '/no/such/seat.json' });
+  assert.match(replies.at(-1), /template file \/no\/such\/seat\.json: not found/);
+  await tick();
+  assert.strictEqual(created.length, 0);
+});
+
+test('spawn template: malformed JSON file errors, no spawn', async () => {
+  const dir = tmpTplDir();
+  const file = pathReal.join(dir, 'bad.json');
+  fsReal.writeFileSync(file, '{ not valid json ');
+  const { m, created, replies, spawner } = mkSpawn([]);
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: '/tmp/x', template: file });
+  assert.match(replies.at(-1), /invalid JSON/);
+  await tick();
+  assert.strictEqual(created.length, 0);
+});
+
+test('spawn template: a file missing "type" errors, no spawn', async () => {
+  const dir = tmpTplDir();
+  const file = pathReal.join(dir, 'notype.json');
+  fsReal.writeFileSync(file, JSON.stringify({ cwd: '/x', disabledTools: ['Edit'] }));
+  const { m, created, replies, spawner } = mkSpawn([]);
+  m._handleSpawnIntent(spawner, { name: 't2', cwd: '/tmp/x', template: file });
+  assert.match(replies.at(-1), /not a template object \(needs a "type"\)/);
+  await tick();
+  assert.strictEqual(created.length, 0);
+});

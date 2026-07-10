@@ -94,6 +94,42 @@ test('templates: save/list/remove', () => {
   } finally { cleanup(); }
 });
 
+test('templates: schemaless store round-trips the full config subset verbatim', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    // A rich template (as "Export as Template…" snapshots it) survives a
+    // save → load round-trip byte-for-byte — the store keeps the whole object.
+    const rich = {
+      id: 'tpl-1', name: 'trader-seat', type: 'claude', cwd: '/proj/desk',
+      extraArgs: ['--model', 'opus', '--dangerously-skip-permissions'],
+      proxy: false,
+      agents: ['reviewer'],
+      denyBuiltins: ['WebSearch'],
+      disabledTools: ['Edit', 'NotebookEdit'],
+      disabledSkills: ['some-skill'],
+      injectSkills: ['trader-notes'],
+      stripLevel: 2,
+      autoCompact: false,
+    };
+    stores.templates.save(rich);
+    assert.deepStrictEqual(stores.templates.list()[0], rich);
+  } finally { cleanup(); }
+});
+
+test('templates: an old {id,name,type,cwd,extraArgs} template loads unchanged (back-compat)', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    // Pre-config templates carry none of the new fields; they must load as-is
+    // (missing config = clodex defaults are supplied at spawn, not here).
+    const legacy = { id: 'old', name: 'Legacy', type: 'codex', cwd: '/x', extraArgs: ['-a'] };
+    stores.templates.save(legacy);
+    const loaded = stores.templates.list()[0];
+    assert.deepStrictEqual(loaded, legacy);
+    assert.strictEqual('agents' in loaded, false);      // no field invented on load
+    assert.strictEqual('stripLevel' in loaded, false);
+  } finally { cleanup(); }
+});
+
 test('workspaces: list seeds a default, upsert/get/setName/sortedByRecent', () => {
   const { stores, cleanup } = freshStores();
   try {

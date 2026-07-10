@@ -175,6 +175,31 @@ plus setter-added `sessionIds[]` history, label, stripLevel, and
 `autoCompact` (stored only as `false` to opt out). Writes validate before
 backing up to `.bak`; load falls back to the backup.
 
+**templates.json** stores reusable session configs. Base fields
+(`id/name/type/cwd/extraArgs`) plus the config subset snapshotted by the
+session context menu's **Export as Template…** (agent sessions only):
+`proxy/agents/denyBuiltins/disabledTools/disabledSkills/injectSkills` and the
+opt-out fields `stripLevel/autoCompact` (present only when non-default). The
+store is schemaless (whole object saved verbatim), so the fields are additive
+— an old `{id,name,type,cwd,extraArgs}` template loads fine (missing config =
+clodex defaults at spawn). A template carries NO per-session identity
+(`proxyAgent`, minted fresh per spawn) and NO prompt refs (clodex defaults).
+Model isn't a field — it rides `extraArgs` (`--model X`), captured verbatim.
+Spawn a matching session via `[agent:spawn name:X template:Y]`
+(`_handleSpawnIntent`) or by selecting it in the New Session dialog, which
+applies the full config to the form so Create threads it through
+`session:create` verbatim. `Y` resolves TWO ways off one apply seam: a bare
+token is a **library name** (case-insensitive exact; ambiguous/missing →
+error), while a `Y` containing `/` or starting with `~`/`.` is a **JSON file
+path** (expanded, resolved against the spawner's cwd, read + parsed; ENOENT /
+bad-JSON / non-object / missing-`type` → error, never a half-configured
+spawn). A file template may omit `id`/`name`; reading it is same-trust (the
+spawner can already read files with its own tools). cwd precedence is
+unchanged (intent > template > error). stripLevel/autoCompact aren't create()
+params — they're applied post-create onto the entry (poller re-asserts strip
+on relink; autoCompact read from persistence), mirroring the ipc-handlers
+`session:create` seed.
+
 ## 6. Workspaces
 
 One BrowserWindow per workspace (`SessionManager.windows` map); sessions

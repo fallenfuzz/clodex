@@ -81,11 +81,23 @@ test('parseIntent: memory sub-command carries body', () => {
 
 test('parseIntent: spawn parses name + cwd in any order', () => {
   assert.deepStrictEqual(parseIntent('[agent:spawn name:worker cwd:/tmp/x]'),
-    { type: 'spawn', name: 'worker', cwd: '/tmp/x' });
+    { type: 'spawn', name: 'worker', cwd: '/tmp/x', template: null });
   assert.deepStrictEqual(parseIntent('[agent:spawn cwd:/tmp/x name:worker]'),
-    { type: 'spawn', name: 'worker', cwd: '/tmp/x' });
+    { type: 'spawn', name: 'worker', cwd: '/tmp/x', template: null });
   assert.deepStrictEqual(parseIntent('[agent:spawn name:solo]'),
-    { type: 'spawn', name: 'solo', cwd: null });
+    { type: 'spawn', name: 'solo', cwd: null, template: null });
+});
+
+test('parseIntent: spawn parses optional template: ref, with or without cwd', () => {
+  // template + cwd (cwd overrides the template's).
+  assert.deepStrictEqual(parseIntent('[agent:spawn name:t2 cwd:/tmp/y template:trader-seat]'),
+    { type: 'spawn', name: 't2', cwd: '/tmp/y', template: 'trader-seat' });
+  // template alone (cwd comes from the template at apply time).
+  assert.deepStrictEqual(parseIntent('[agent:spawn name:t2 template:trader-seat]'),
+    { type: 'spawn', name: 't2', cwd: null, template: 'trader-seat' });
+  // order-independent.
+  assert.deepStrictEqual(parseIntent('[agent:spawn template:seat name:t2]'),
+    { type: 'spawn', name: 't2', cwd: null, template: 'seat' });
 });
 
 test('parseIntent: file view/open with spaces in path', () => {

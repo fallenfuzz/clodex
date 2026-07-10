@@ -86,10 +86,15 @@ function parseIntent(rawLine) {
     const argstr = spawnMatch[1];
     const nameM = argstr.match(/\bname:(\S+)/);
     const cwdM = argstr.match(/\bcwd:(\S+)/);
+    // Optional template: reference — matched by NAME (case-insensitive exact) at
+    // apply time. Whitespace-free by construction (\S+), so spaced template
+    // names are UI-only and can't be referenced from an intent.
+    const tplM = argstr.match(/\btemplate:(\S+)/);
     return {
       type: 'spawn',
       name: nameM ? nameM[1] : null,
       cwd: cwdM ? cwdM[1] : null,
+      template: tplM ? tplM[1] : null,
     };
   }
 

@@ -1055,6 +1055,7 @@ const SessionManager = createSessionManager({
   // getter deps — stores + late-bound singletons are assigned in
   // app.whenReady(), after this line runs, so they cross as getters.
   getPersistence: () => persistence,
+  getTemplates: () => templates,
   getUiSettings: () => uiSettings,
   getPromptLibrary: () => promptLibrary,
   getAgentLibrary: () => agentLibrary,

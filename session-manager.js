@@ -126,7 +126,7 @@ function createSessionManager(deps) {
     writeClaudeDigestFile,
     writeSkillPlugin,
     // getter deps (whenReady-assigned; see header)
-    getPersistence, getUiSettings, getPromptLibrary, getAgentLibrary, getRemoteServer, getPeerManager,
+    getPersistence, getTemplates, getUiSettings, getPromptLibrary, getAgentLibrary, getRemoteServer, getPeerManager,
     // electron seam fns (see header)
     getUserDataPath, openPath, notifyOS, setAppQuitting,
   } = deps;
@@ -1893,18 +1893,22 @@ function createSessionManager(deps) {
     }
 
     // Spawn a NEW persistent peer session from inside a running agent (spec
-    // Piece 2). `name` + `cwd` are the only required inputs; everything structural
-    // is clodex's job. type / workspace / proxy inherit the spawner; prompts and
-    // tool-gating take clodex defaults. The IPC protocol does NOT need an append
-    // ref — IPC_PROMPT is prepended unconditionally for every agent session
-    // (see mergeClaudeSystemPrompt / mergeCodexSystemPrompt), so a child spawned
-    // with appendPromptFiles=[] still speaks dm/who/context. Replies (ok + every
-    // error) inject straight back into the spawner's input as an [agent:spawn] line.
+    // Piece 2). `name` is always required; `cwd` comes from the intent or a
+    // referenced template. Without a template, everything structural is
+    // clodex's job: type / workspace / proxy inherit the spawner, prompts and
+    // tool-gating take clodex defaults, only the permission posture is
+    // inherited. With `template:Y`, the template supplies type + the full
+    // config subset (proxy / agents / tool+skill gating / strip / autocompact)
+    // — the automation Bogdan asked for: spawn-matching-a-template by name.
+    // The IPC protocol does NOT need an append ref — IPC_PROMPT is prepended
+    // unconditionally for every agent session (see mergeClaudeSystemPrompt /
+    // mergeCodexSystemPrompt), so a child spawned with appendPromptFiles=[]
+    // still speaks dm/who/context (templates carry no prompt refs — F6). Replies
+    // (ok + every error) inject straight back into the spawner's input.
     _handleSpawnIntent(spawner, intent) {
       const reply = (msg) => this._injectText(spawner, `[agent:spawn] ${msg}`, { parkable: true });
       const name = (intent.name || '').trim();
-      const rawCwd = (intent.cwd || '').trim();
-      if (!name || !rawCwd) { reply('error: usage [agent:spawn name:X cwd:Y]'); return; }
+      if (!name) { reply('error: usage [agent:spawn name:X cwd:Y [template:Z]]'); return; }
       // Validate-hard BEFORE touching disk (same discipline as the rename inventory).
       if (!AGENT_NAME_RE.test(name)) {
         reply(`error: invalid name "${name}" — allowed [a-zA-Z0-9._-], 1-64 chars`);
@@ -1916,21 +1920,97 @@ function createSessionManager(deps) {
         reply(`error: name taken "${name}"`);
         return;
       }
+
+      // Template resolution: `template:VALUE` names a LIBRARY template OR points
+      // at a JSON template FILE, resolving to ONE template object fed to the
+      // single apply path below (so library and file spawns can't drift).
+      // DISCRIMINATOR: a VALUE containing '/' or starting with '~' or '.' is a
+      // PATH; a bare token is always a library name — keeping the common named
+      // case unambiguous (use ./x.json for a cwd-relative file).
+      let tpl = null;
+      if (intent.template) {
+        const v = intent.template;
+        if (v.includes('/') || v.startsWith('~') || v.startsWith('.')) {
+          // File path — expand ~, resolve relative to the SPAWNER's cwd, read +
+          // parse. TRUST: the spawner is same-trust-domain and can already read
+          // files with its own tools, so reading a JSON template it names adds no
+          // exposure — no cwd-confinement here (unlike the file-VIEW intent, which
+          // paints the operator's screen).
+          let p = v.replace(/^~(?=$|\/)/, os.homedir());
+          if (!path.isAbsolute(p)) p = path.resolve(spawner.cwd || os.homedir(), p);
+          let obj;
+          try {
+            obj = JSON.parse(fs.readFileSync(p, 'utf-8'));
+          } catch (e) {
+            const why = e.code === 'ENOENT' ? 'not found'
+              : (e instanceof SyntaxError ? `invalid JSON (${e.message})` : e.message);
+            reply(`error: template file ${v}: ${why}`);
+            return;
+          }
+          // Template-shaped: a usable `type` is the floor; id/name are optional in
+          // a file (the library needs them for lookup, a path spawn doesn't).
+          if (!obj || typeof obj !== 'object' || Array.isArray(obj) || !obj.type) {
+            reply(`error: template file ${v}: not a template object (needs a "type")`);
+            return;
+          }
+          tpl = obj;
+        } else {
+          // Library name — case-insensitive exact. Templates key on id, not name,
+          // and nothing enforces name uniqueness, so 0 matches errors with the
+          // choices and >1 errors asking to disambiguate. NEVER silent-pick.
+          const wanted = v.toLowerCase();
+          const all = getTemplates().list();
+          const matches = all.filter(t => (t.name || '').toLowerCase() === wanted);
+          if (matches.length === 0) {
+            const names = all.map(t => t.name).filter(Boolean);
+            reply(`error: no template named "${v}"${names.length ? ` — available: ${names.join(', ')}` : ' — none saved'}`);
+            return;
+          }
+          if (matches.length > 1) {
+            reply(`error: ambiguous — ${matches.length} templates named "${v}", rename to disambiguate`);
+            return;
+          }
+          tpl = matches[0];
+        }
+      }
+      // Display label for logs/replies — a file template may carry no name.
+      const tplLabel = tpl ? (tpl.name || intent.template) : null;
+
+      // cwd from the intent or the template (intent wins); required from at least one.
+      const rawCwd = (intent.cwd || (tpl && tpl.cwd) || '').trim();
+      if (!rawCwd) {
+        reply(tpl
+          ? `error: template "${tplLabel}" has no cwd — add cwd: to the spawn`
+          : 'error: usage [agent:spawn name:X cwd:Y [template:Z]]');
+        return;
+      }
       // Expand a leading ~ and resolve to absolute so ensureDir/create get a real path.
       const cwd = path.resolve(rawCwd.replace(/^~(?=$|\/)/, os.homedir()));
-      const type = spawner.type || 'claude';
+      const type = tpl ? (tpl.type || 'claude') : (spawner.type || 'claude');
       const workspaceId = spawner.workspaceId || DEFAULT_WORKSPACE_ID;
-      const proxy = spawner.proxy ?? null;
-      // Inherit the spawner's PERMISSION POSTURE, not its full extraArgs: a headless
-      // peer that blocks on a permission prompt defeats operator-independence, but
-      // force-yolo would be surprising — so the child carries
+
+      // The spawner's PERMISSION POSTURE is the no-template default for extraArgs: a
+      // headless peer that blocks on a permission prompt defeats operator-
+      // independence, but force-yolo would be surprising — so the child carries
       // --dangerously-skip-permissions iff the spawner has it (sandboxed parent →
-      // sandboxed child). Only that one flag is inherited; all other tool-gating
-      // stays at clodex defaults (the session object doesn't carry extraArgs, so
-      // read the spawner's persisted entry).
+      // sandboxed child). The session object doesn't carry extraArgs, so read the
+      // spawner's persisted entry.
       const spawnerArgs = (getPersistence().get(spawner.name)?.extraArgs) || [];
-      const childArgs = spawnerArgs.includes('--dangerously-skip-permissions')
+      const postureArgs = spawnerArgs.includes('--dangerously-skip-permissions')
         ? ['--dangerously-skip-permissions'] : [];
+
+      // Config: a template supplies the full subset; otherwise clodex defaults
+      // (empty gating) + spawner-inherited proxy. F5: template.extraArgs is used
+      // VERBATIM when present (it snapshots the source session's posture, incl.
+      // yolo), else fall back to the spawner-posture inherit.
+      const proxy = tpl ? (tpl.proxy ?? null) : (spawner.proxy ?? null);
+      const childArgs = (tpl && Array.isArray(tpl.extraArgs) && tpl.extraArgs.length)
+        ? tpl.extraArgs : postureArgs;
+      const agents = (tpl && tpl.agents) || [];
+      const denyBuiltins = (tpl && tpl.denyBuiltins) || [];
+      const disabledTools = (tpl && tpl.disabledTools) || [];
+      const disabledSkills = (tpl && tpl.disabledSkills) || [];
+      const injectSkills = (tpl && tpl.injectSkills) || [];
 
       // Defer off the JsonlWatcher scan callback that triggered us (same discipline
       // as reload): don't drive a full PTY spawn synchronously from inside a watcher
@@ -1940,8 +2020,15 @@ function createSessionManager(deps) {
           ensureDir(cwd); // self-contained: mkdir the cwd if absent — no external tool
           await this.create(
             name, type, cwd, childArgs, null, workspaceId,
-            null, false, proxy, [], [], [], [], [], null, [],
+            null, false, proxy, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills, null, [],
           );
+          // stripLevel + autoCompact are NOT create() params — the poller asserts
+          // strip on relink and reads autoCompact from persistence. Apply post-
+          // create onto the entry, mirroring the ipc-handlers session:create seed.
+          if (tpl) {
+            if (tpl.stripLevel === 1 || tpl.stripLevel === 2) getPersistence().setStripLevel(name, tpl.stripLevel);
+            if (tpl.autoCompact === false) getPersistence().setAutoCompact(name, false);
+          }
           // The intent path bypasses the renderer's create flow, so tell the owning
           // window to draw the sidebar tab + terminal (reused verbatim from reload).
           // Dropped harmlessly if the window is detached — the session still spawned
@@ -1950,10 +2037,10 @@ function createSessionManager(deps) {
             action: 'reattach', name, type, cwd,
           });
           this._broadcast('ipc-message', {
-            type: 'spawn', from: spawner.name, to: name, body: `spawn → ${name} @ ${cwd}`,
+            type: 'spawn', from: spawner.name, to: name, body: `spawn → ${name} @ ${cwd}` + (tpl ? ` (template ${tplLabel})` : ''),
           });
-          log.info('intent', `spawn by ${spawner.name} → ${name} (${type}) @ ${cwd}`);
-          reply(`ok: spawned "${name}" (${type}) @ ${cwd}`);
+          log.info('intent', `spawn by ${spawner.name} → ${name} (${type}) @ ${cwd}` + (tpl ? ` via template "${tplLabel}"` : ''));
+          reply(`ok: spawned "${name}" (${type}) @ ${cwd}` + (tpl ? ` via template "${tplLabel}"` : ''));
         } catch (err) {
           log.error('intent', `spawn by ${spawner.name} → ${name} failed: ${err.message}`);
           reply(`error: ${err.message}`);

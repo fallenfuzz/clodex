@@ -73,7 +73,8 @@ compact there can still be dropped by the CLI (documented degradation).
   literal text everywhere, and never terminates a multi-line body.
 - Intents: `dm` (`target`, optional `urgent`, body), `resend <id>`, `who`,
   `name`, `context <sub>`, `memory <sub>`, `file <view|open> <path>`,
-  `spawn name:X cwd:Y`.
+  `spawn name:X cwd:Y` (optional `template:Z` — matched by name, supplies
+  type/config; see sessions.md §5).
 - **Multi-line bodies** are captured in `_extractIntents`, not the scanner:
   a body runs from the intent line to the next column-1 real intent or end
   of turn (applies to dm, memory remember, context compact/reload).

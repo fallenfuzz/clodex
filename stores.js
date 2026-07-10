@@ -425,7 +425,13 @@ function initStores(userDataPath, { log, registryDir } = {}) {
       return this._load();
     },
     save(template) {
-      // template: { id, name, type, cwd, extraArgs }
+      // template: { id, name, type, cwd, extraArgs } plus optional config the
+      // "Export as Template…" path snapshots from a session: proxy, agents,
+      // denyBuiltins, disabledTools, disabledSkills, injectSkills, stripLevel,
+      // autoCompact. Schemaless — the whole object is stored verbatim, so new
+      // fields are additive and an old {id,name,type,cwd,extraArgs} template
+      // loads fine (missing config = clodex defaults at spawn). NEVER a
+      // per-session identity (proxyAgent) or runtime state (sessionId).
       const all = this._load();
       const idx = all.findIndex(t => t.id === template.id);
       if (idx >= 0) all[idx] = template;

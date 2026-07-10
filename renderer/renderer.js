@@ -348,6 +348,19 @@ window.api.onSessionContextAction(({ action, name, type, cwd }) => {
         }
       });
       break;
+    case 'exportTemplate': {
+      // Snapshot this session's config into a named, reusable template (spawnable
+      // by name via [agent:spawn … template:Y] or the New Session dropdown).
+      const tn = prompt(`Export "${name}" as a template — template name:`, '');
+      if (tn && tn.trim()) {
+        window.api.exportTemplate(name, tn.trim()).then((res) => {
+          if (!res || !res.ok) {
+            alert(`Export as template failed: ${res && res.error ? res.error : 'unknown error'}`);
+          }
+        });
+      }
+      break;
+    }
   }
 });
 
@@ -602,9 +615,13 @@ function removeSession(name, { keepPersisted = false } = {}) {
 
 let sessionCounter = 0;
 
-function applyTypeDefaults() {
+// skipAsyncRefresh: when a template is being applied, the caller re-renders the
+// skill/inject/tool checklists itself with the template's captured sets — so
+// suppress the default (empty-set) async renders here to avoid a last-write-wins
+// race between the two. Also skips resetting extraArgs (the template supplies it).
+function applyTypeDefaults({ skipAsyncRefresh = false } = {}) {
   const type = inputType.value;
-  inputArgs.value = DEFAULT_ARGS[type] || '';
+  if (!skipAsyncRefresh) inputArgs.value = DEFAULT_ARGS[type] || '';
   argsHint.textContent = ARGS_HINTS[type] || '';
   const supportsSystemPrompt = type === 'claude' || type === 'codex';
   systemPromptRow.style.display = supportsSystemPrompt ? '' : 'none';
@@ -617,7 +634,7 @@ function applyTypeDefaults() {
   for (const sec of [toolsSection, skillsSection, otherSection]) {
     if (sec) sec.style.display = claudeOnly ? '' : 'none';
   }
-  if (claudeOnly) { refreshNewSessionSkills(); refreshNewSessionInjectSkills(); refreshNewSessionTools(); }
+  if (claudeOnly && !skipAsyncRefresh) { refreshNewSessionSkills(); refreshNewSessionInjectSkills(); refreshNewSessionTools(); }
   const supportsResume = type === 'claude' || type === 'codex';
   resumeRow.style.display = supportsResume ? '' : 'none';
   if (!supportsResume) {
@@ -711,24 +728,26 @@ async function refreshNewSessionInjectSkills(enabledSet = new Set()) {
 // Populate the new-session Skills checklist for the currently-entered cwd. The
 // catalog (known built-ins + whatever a lower settings layer for that cwd
 // disables) and provenance both depend on cwd, so this re-runs when cwd changes.
-async function refreshNewSessionSkills() {
+async function refreshNewSessionSkills(disabledSet = new Set()) {
   if (inputType.value !== 'claude') return;
   const cwd = expandPath(inputCwd.value.trim()) || homeDir;
   const res = await window.api.getSkillCatalogFor(cwd);
-  if (!res || !res.ok) { renderSkillChecklist(inputSkillsList, [], new Set()); return; }
-  renderSkillChecklist(inputSkillsList, res.names || [], new Set(),
+  if (!res || !res.ok) { renderSkillChecklist(inputSkillsList, [], disabledSet); return; }
+  renderSkillChecklist(inputSkillsList, res.names || [], disabledSet,
     res.effective || {}, { skillsLocked: res.skillsLocked, canReenable: res.canReenable });
 }
 // Tool provenance for the new-session dialog — same cwd-dependence as skills: a
 // lower settings layer for the chosen cwd may already deny tools, shown
 // read-only here. claudeToolsCache is seeded from getSettings in openDialog.
-async function refreshNewSessionTools() {
+async function refreshNewSessionTools(disabledSet = null) {
   if (inputType.value !== 'claude') return;
   const cwd = expandPath(inputCwd.value.trim()) || homeDir;
   const res = await window.api.getToolCatalogFor(cwd);
-  // Pre-uncheck the global default deny set so a fresh session inherits the
-  // shared, lean tools loadout out of the box (still editable here per session).
-  renderToolChecklist(inputToolsList, new Set(getDefaultToolDenyCache()), (res && res.ok && res.effective) || {});
+  // Default: pre-uncheck the global default deny set so a fresh session inherits
+  // the shared, lean tools loadout out of the box (still editable here per
+  // session). A template supplies its OWN captured disabled set instead.
+  const disabled = disabledSet || new Set(getDefaultToolDenyCache());
+  renderToolChecklist(inputToolsList, disabled, (res && res.ok && res.effective) || {});
 }
 
 async function openDialog() {
@@ -766,7 +785,7 @@ async function openDialog() {
   setTimeout(() => inputName.select(), 50);
 }
 
-inputType.addEventListener('change', applyTypeDefaults);
+inputType.addEventListener('change', () => applyTypeDefaults());
 // cwd drives the skill catalog's provenance (which lower-layer settings apply),
 // so re-fetch when it changes.
 inputCwd.addEventListener('change', refreshNewSessionSkills);
@@ -777,7 +796,11 @@ inputProxyMode.addEventListener('change', () => {
   if (inputProxyMode.value === 'custom') inputProxyUrl.focus();
 });
 
-// Apply a template's values to the form when selected
+// Apply a template's values to the form when selected. A template carries the
+// full config subset, so the dialog Create threads it through session:create
+// verbatim (no silent partial-apply footgun): type/cwd/args plus the Claude-only
+// agent/tool/skill gating, strip level, and proxy. Prompt refs are NOT in a
+// template (F6), so the prompt controls are left at their current values.
 inputTemplate.addEventListener('change', async () => {
   const id = inputTemplate.value;
   if (!id) return;
@@ -788,6 +811,22 @@ inputTemplate.addEventListener('change', async () => {
   inputCwd.value = t.cwd || homeDir;
   inputArgs.value = (t.extraArgs || []).join(' ');
   argsHint.textContent = ARGS_HINTS[t.type] || '';
+  // Fix section show/hide for the type WITHOUT firing the default empty-set
+  // async renders — we render the rich checklists below with the template's own
+  // captured sets, and a competing default render would race them.
+  applyTypeDefaults({ skipAsyncRefresh: true });
+  if (t.type === 'claude') {
+    renderAgentChecklist(inputAgentsList, new Set(t.agents || []));
+    renderBuiltinChecklist(inputBuiltinsList, new Set(t.denyBuiltins || []));
+    await refreshNewSessionTools(new Set(t.disabledTools || []));
+    await refreshNewSessionSkills(new Set(t.disabledSkills || []));
+    await refreshNewSessionInjectSkills(new Set(t.injectSkills || []));
+    if (inputStripLevel) inputStripLevel.value = String(t.stripLevel || 0);
+  }
+  // Proxy is an agent-type field; reflect the template's tri-state choice.
+  if (t.type === 'claude' || t.type === 'codex') {
+    setProxyControls(inputProxyMode, inputProxyUrl, t.proxy ?? null, inputProxyUrl.value);
+  }
 });
 
 btnTemplateDelete.addEventListener('click', async () => {

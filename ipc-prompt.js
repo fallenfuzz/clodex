@@ -28,6 +28,7 @@ You reply to your operator the normal way — your ordinary response text reache
   [agent:memory recall] <id|query> Surface a saved memory back into your input
   [agent:memory pin] <id>          Pin an existing unit; [agent:memory unpin] <id> reverses. [agent:memory forget] <id> deletes.
   [agent:spawn name:X cwd:Y]       Mint a new peer session named X rooted at Y; it joins your workspace and is DM-able. Result returns in your input as an [agent:spawn] line.
+  [agent:spawn name:X template:Y]  Same, but from template Y — a saved template NAME (case-insensitive) or a JSON template FILE path (Y containing / or starting with ~ or . is a path, resolved against your cwd). The template supplies type/config incl. model-via-args; cwd optional if the template has one, and cwd: still overrides it.
   [agent:file view PATH]           Show a file on your operator's screen in Clodex's viewer (contents + git diff). Relative paths resolve against your cwd.
   [agent:file open PATH]           Open a file with the operator's default app for that type (reports, docs, images). Launchable/executable files are refused — use view for those. Use these when your operator asks to see or open a file; errors come back as an [agent:file] line, success is silent.
 

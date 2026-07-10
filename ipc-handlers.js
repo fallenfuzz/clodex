@@ -109,6 +109,34 @@ function registerIpcHandlers(deps) {
   ipcMain.handle('templates:list', () => templates.list());
   ipcMain.handle('templates:save', (_e, template) => { templates.save(template); return templates.list(); });
   ipcMain.handle('templates:remove', (_e, id) => { templates.remove(id); return templates.list(); });
+  // Snapshot a live session's PERSISTED config subset into a named template.
+  // persistence.get carries the whole entry, so we pick exactly the spawnable
+  // config — never identity (name/proxyAgent) or runtime state (sessionId).
+  // stripLevel/autoCompact are opt-out fields (present only when non-default),
+  // so they're snapshotted only when set. NO prompt refs (F6 punt).
+  ipcMain.handle('templates:exportFromSession', (_e, name, templateName) => {
+    const entry = persistence.get(name);
+    if (!entry) return { ok: false, error: `no session "${name}"` };
+    const tn = (templateName || '').trim();
+    if (!tn) return { ok: false, error: 'template name required' };
+    const t = {
+      id: `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: tn,
+      type: entry.type,
+      cwd: entry.cwd || null,
+      extraArgs: Array.isArray(entry.extraArgs) ? entry.extraArgs : [],
+      proxy: entry.proxy ?? null,
+      agents: Array.isArray(entry.agents) ? entry.agents : [],
+      denyBuiltins: Array.isArray(entry.denyBuiltins) ? entry.denyBuiltins : [],
+      disabledTools: Array.isArray(entry.disabledTools) ? entry.disabledTools : [],
+      disabledSkills: Array.isArray(entry.disabledSkills) ? entry.disabledSkills : [],
+      injectSkills: Array.isArray(entry.injectSkills) ? entry.injectSkills : [],
+    };
+    if (entry.stripLevel === 1 || entry.stripLevel === 2) t.stripLevel = entry.stripLevel;
+    if (entry.autoCompact === false) t.autoCompact = false;
+    templates.save(t);
+    return { ok: true, templates: templates.list() };
+  });
 
   // Prompts library (~/.clodex/library/prompts/{system,append}/*.md). Both
   // Claude and Codex; referenced by session (system replaces, append composes).
@@ -931,6 +959,12 @@ function registerIpcHandlers(deps) {
         label: 'Export Conversation as Markdown…',
         click: () => e.sender.send('session:context-action', { action: 'export', name }),
       },
+      // Agent-only: a template snapshots the config subset (type/cwd/args/proxy/
+      // tool+skill gating/strip/autocompact), which a bash session can't carry.
+      ...(isAgent ? [{
+        label: 'Export as Template…',
+        click: () => e.sender.send('session:context-action', { action: 'exportTemplate', name }),
+      }] : []),
       { type: 'separator' },
       {
         label: 'Kill Session',
