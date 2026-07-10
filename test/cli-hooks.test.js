@@ -8,6 +8,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const cp = require('child_process');
 const { createCliHooks } = require('../cli-hooks');
 const { pathFor, runDirFor } = require('../clodex-paths');
 
@@ -136,4 +137,77 @@ test('generated scripts: heredoc terminators at column 0, python unindented', ()
         `${f}:${i + 1}: python top-level line indented: ${JSON.stringify(ln)}`);
     }
   }
+});
+
+// @-inline at hook drain: the parked '@<path>' spill pointer is a PTY-stdin
+// affordance (Claude expands @ only when TYPED). When the same text drains as
+// additionalContext the @ is inert, so the pending-drain python inlines small
+// files under ~/.clodex/messages/ and downgrades large ones to a read-pointer.
+// These run the GENERATED bash/python end to end against a real pending dir —
+// the only faithful test of the drain-time transform. The idle-edge PTY path is
+// untouched (not exercised here); codex hooks never get this transform.
+function drainPending(REGISTRY_DIR, name, texts) {
+  const pendDir = path.join(REGISTRY_DIR, 'pending', name);
+  fs.rmSync(pendDir, { recursive: true, force: true });
+  fs.mkdirSync(pendDir, { recursive: true });
+  texts.forEach((t, i) => fs.writeFileSync(path.join(pendDir, `m${i}.json`), JSON.stringify({ text: t })));
+  const out = cp.execFileSync('bash', [pathFor(REGISTRY_DIR, name, 'pendingScript')], { input: '' }).toString();
+  return out.trim() ? JSON.parse(out).hookSpecificOutput.additionalContext : '';
+}
+
+test('pending drain @-inline: small file under messages/ is inlined, prefix + trailer preserved', () => {
+  const REGISTRY_DIR = tmp();
+  const h = mk(REGISTRY_DIR);
+  h.setupClaudeHook('inl1');
+  const msgFile = path.join(REGISTRY_DIR, 'messages', 'clodex', 'msg-1.txt');
+  fs.mkdirSync(path.dirname(msgFile), { recursive: true });
+  fs.writeFileSync(msgFile, 'line one\nline two\n');
+  const ctx = drainPending(REGISTRY_DIR, 'inl1',
+    [`[agent:from clodex] Message (17 bytes) attached: @${msgFile} (reply: start a line with [agent:dm clodex])`]);
+  assert.match(ctx, /^\[agent:from clodex\] Message \(17 bytes\)/); // prefix preserved
+  assert.match(ctx, /--- attached file: /);                        // delimited inline
+  assert.match(ctx, /line one\nline two/);                         // body inlined verbatim
+  assert.match(ctx, /--- end attached file ---/);
+  assert.match(ctx, /\(reply: start a line with \[agent:dm clodex\]\)$/); // trailer preserved
+  assert.ok(!ctx.includes('@' + msgFile), 'the @-pointer must be gone once inlined');
+});
+
+test('pending drain @-inline: file over ~10KB is stripped to a read-pointer, not inlined', () => {
+  const REGISTRY_DIR = tmp();
+  const h = mk(REGISTRY_DIR);
+  h.setupClaudeHook('inl2');
+  const msgFile = path.join(REGISTRY_DIR, 'messages', 'clodex', 'msg-big.txt');
+  fs.mkdirSync(path.dirname(msgFile), { recursive: true });
+  fs.writeFileSync(msgFile, 'X'.repeat(11000));
+  const ctx = drainPending(REGISTRY_DIR, 'inl2',
+    [`[agent:from clodex] Message (11000 bytes) attached: @${msgFile} (reply: start a line with [agent:dm clodex])`]);
+  assert.match(ctx, new RegExp(`saved to ${msgFile.replace(/[.]/g, '\\.')} — read it with your Read tool\\.`));
+  assert.ok(!ctx.includes('@' + msgFile), 'the @ must be stripped so the CLI does not attach it');
+  assert.ok(!ctx.includes('XXXX'), 'a large file must NOT be inlined');
+  assert.match(ctx, /\(reply: start a line with \[agent:dm clodex\]\)/); // trailer preserved
+});
+
+test('pending drain @-inline: a path OUTSIDE messages/ is left byte-unchanged (containment)', () => {
+  const REGISTRY_DIR = tmp();
+  const h = mk(REGISTRY_DIR);
+  h.setupClaudeHook('inl3');
+  const text = `[agent:from clodex] Message (10 bytes) attached: @/etc/hosts (reply: x)`;
+  assert.strictEqual(drainPending(REGISTRY_DIR, 'inl3', [text]), text);
+});
+
+test('pending drain @-inline: a missing file is left byte-unchanged (fail-open)', () => {
+  const REGISTRY_DIR = tmp();
+  const h = mk(REGISTRY_DIR);
+  h.setupClaudeHook('inl4');
+  const gone = path.join(REGISTRY_DIR, 'messages', 'clodex', 'nope.txt');
+  const text = `[agent:from clodex] Message (10 bytes) attached: @${gone} (reply: x)`;
+  assert.strictEqual(drainPending(REGISTRY_DIR, 'inl4', [text]), text);
+});
+
+test('pending drain @-inline: text without a spill pointer is untouched', () => {
+  const REGISTRY_DIR = tmp();
+  const h = mk(REGISTRY_DIR);
+  h.setupClaudeHook('inl5');
+  const text = `[agent:from clodex] short inline body\n(reply: start a line with [agent:dm clodex])`;
+  assert.strictEqual(drainPending(REGISTRY_DIR, 'inl5', [text]), text);
 });

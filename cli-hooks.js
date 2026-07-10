@@ -147,14 +147,44 @@ PYEOF
     fs.writeFileSync(pendingScriptPath, `#!/bin/bash
 [ -d "${pendingDir}" ] || exit 0
 IN="$(cat)"
-python3 - "${pendingDir}" "$IN" <<'PYEOF'
-import json, os, sys, glob, shutil
+python3 - "${pendingDir}" "$IN" "${msgDir}" <<'PYEOF'
+import json, os, sys, glob, shutil, re
 d = sys.argv[1]
 ev = 'UserPromptSubmit'
 try:
     ev = json.loads(sys.argv[2]).get('hook_event_name') or ev
 except Exception:
     pass                          # stdin absent/unparseable => safe default
+# Inline a spilled-message @-pointer at drain time. The '@\${path}' form in a
+# parked delivery is a PTY-stdin affordance (Claude expands @ only when TYPED
+# into the prompt); arriving here as additionalContext it is inert text and the
+# recipient burns a Read call per message. So when the SAME text drains through
+# the hook, inline small files and downgrade large ones to a plain read-pointer.
+# The idle-edge PTY drain keeps the @ form untouched (expansion works there).
+# Fail-open: any stat/read/containment problem leaves the text byte-unchanged.
+msgroot = os.path.realpath(sys.argv[3]) if len(sys.argv) > 3 else ''
+def inline_spill(t):
+    m = re.search(r'attached: @(\\S+)', t)
+    if not m:
+        return t                  # no spill pointer => nothing to inline
+    p = m.group(1)
+    try:
+        rp = os.path.realpath(p)
+        # containment: only ever inline files under ~/.clodex/messages/ — never
+        # an arbitrary path that happens to follow an @.
+        if not msgroot or (rp != msgroot and not rp.startswith(msgroot + os.sep)):
+            return t
+        if os.stat(rp).st_size <= 10240:
+            with open(rp, encoding='utf-8', errors='replace') as f:
+                body = f.read().rstrip('\\n')
+            head = t[:m.start()].rstrip()
+            trailer = t[m.end():].strip()
+            out = head + '\\n--- attached file: ' + p + ' ---\\n' + body + '\\n--- end attached file ---'
+            return out + ('\\n' + trailer if trailer else '')
+        # too large to inline: strip the @, reword to the plain read-pointer form
+        return t[:m.start()] + 'saved to ' + p + ' — read it with your Read tool.' + t[m.end():]
+    except Exception:
+        return t                  # fail-open: recipient can still Read the file
 claim = d + '.draining.hook.' + str(os.getpid())
 try:
     os.rename(d, claim)          # atomic claim; ENOENT => nothing to drain / lost the race
@@ -166,7 +196,7 @@ for fp in sorted(glob.glob(os.path.join(claim, '*.json'))):
         with open(fp) as f:
             obj = json.load(f)
         if isinstance(obj.get('text'), str):
-            texts.append(obj['text'])
+            texts.append(inline_spill(obj['text']))
     except Exception:
         pass                      # skip a corrupt entry, never abort the drain
 shutil.rmtree(claim, ignore_errors=True)
