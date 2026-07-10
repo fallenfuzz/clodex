@@ -130,6 +130,43 @@ test('templates: an old {id,name,type,cwd,extraArgs} template loads unchanged (b
   } finally { cleanup(); }
 });
 
+test('templates: saveByName mints an id, then overwrites the same name in place', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    // First save has no id — saveByName mints one and returns the stored object.
+    const first = stores.templates.saveByName({ name: 'seat', type: 'claude', cwd: '/a' });
+    assert.match(first.id, /^tpl-/);
+    assert.strictEqual(stores.templates.list().length, 1);
+    // Re-saving the same name reuses that id and overwrites in place (no dup).
+    const second = stores.templates.saveByName({ name: 'seat', type: 'codex', cwd: '/b' });
+    assert.strictEqual(second.id, first.id);
+    assert.strictEqual(stores.templates.list().length, 1);
+    assert.strictEqual(stores.templates.list()[0].type, 'codex');
+    assert.strictEqual(stores.templates.list()[0].cwd, '/b');
+  } finally { cleanup(); }
+});
+
+test('templates: saveByName matches names case-insensitively (no near-dup)', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    const a = stores.templates.saveByName({ name: 'Trader-Seat', type: 'claude', cwd: '/a' });
+    const b = stores.templates.saveByName({ name: 'trader-seat', type: 'claude', cwd: '/b' });
+    assert.strictEqual(b.id, a.id);                       // same identity
+    assert.strictEqual(stores.templates.list().length, 1); // collapsed onto one row
+    assert.strictEqual(stores.templates.list()[0].cwd, '/b');
+  } finally { cleanup(); }
+});
+
+test('templates: saveByName preserves an explicit id when the name is new', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    // A caller passing its own id (drawer-authored New with a pre-set id) keeps it.
+    const stored = stores.templates.saveByName({ id: 'mine', name: 'fresh', type: 'claude' });
+    assert.strictEqual(stored.id, 'mine');
+    assert.strictEqual(stores.templates.list()[0].id, 'mine');
+  } finally { cleanup(); }
+});
+
 test('workspaces: list seeds a default, upsert/get/setName/sortedByRecent', () => {
   const { stores, cleanup } = freshStores();
   try {

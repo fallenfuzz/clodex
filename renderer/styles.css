@@ -1260,6 +1260,42 @@ html, body {
   display: none;
 }
 
+/* Lightweight text-input modal (promptText): a real in-app replacement for the
+   no-op window.prompt(). Sits above the New Session dialog (z100) and the
+   context menu (z200) since it can be raised from either. */
+.prompt-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+}
+.prompt-modal {
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.prompt-modal h3 { margin: 0; }
+.prompt-modal input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--input-bg, var(--active-bg));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+}
+.prompt-modal input:focus { outline: none; border-color: var(--accent); }
+
 /* New-session-on-a-peer dialog: a simple single-column form (name/type/cwd),
    not the two-column grid of the full new-session dialog. */
 #peer-session-dialog {
@@ -1890,7 +1926,7 @@ html, body {
 
 /* Agents library drawer (mirrors the prompts drawer) */
 
-#agents-drawer, #skills-drawer {
+#agents-drawer, #skills-drawer, #templates-drawer {
   position: fixed;
   top: 0;
   left: var(--sidebar-width);
@@ -1904,9 +1940,9 @@ html, body {
   box-shadow: 4px 0 20px rgba(0, 0, 0, 0.4);
 }
 
-#agents-drawer.hidden, #skills-drawer.hidden { display: none; }
+#agents-drawer.hidden, #skills-drawer.hidden, #templates-drawer.hidden { display: none; }
 
-#agents-header, #skills-header {
+#agents-header, #skills-header, #templates-header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1914,7 +1950,7 @@ html, body {
   border-bottom: 1px solid var(--border);
 }
 
-#agents-new, #skills-new {
+#agents-new, #skills-new, #templates-new {
   background: var(--accent);
   color: white;
   border: none;
@@ -1925,9 +1961,9 @@ html, body {
   font-weight: 500;
 }
 
-#agents-new:hover, #skills-new:hover { opacity: 0.85; }
+#agents-new:hover, #skills-new:hover, #templates-new:hover { opacity: 0.85; }
 
-#agents-close, #skills-close {
+#agents-close, #skills-close, #templates-close {
   background: transparent;
   border: none;
   color: var(--text-dim);
@@ -1939,18 +1975,18 @@ html, body {
   padding: 0;
 }
 
-#agents-close:hover, #skills-close:hover {
+#agents-close:hover, #skills-close:hover, #templates-close:hover {
   background: var(--sidebar-hover);
   color: var(--text);
 }
 
-#agents-list, #skills-list {
+#agents-list, #skills-list, #templates-list {
   flex: 1;
   overflow-y: auto;
   padding: 6px 8px;
 }
 
-#agents-empty, #skills-empty {
+#agents-empty, #skills-empty, #templates-empty {
   padding: 20px;
   text-align: center;
   color: var(--text-dim);

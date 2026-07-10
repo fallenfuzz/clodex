@@ -381,6 +381,13 @@ function createAppMenus(deps) {
               if (win) win.webContents.send('request-open-prompts-drawer');
             },
           },
+          {
+            label: 'Templates…',
+            click: () => {
+              const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+              if (win) win.webContents.send('request-open-templates-drawer');
+            },
+          },
           { type: 'separator' },
           {
             label: 'Rename Workspace…',

@@ -438,6 +438,28 @@ function initStores(userDataPath, { log, registryDir } = {}) {
       else all.push(template);
       this._save(all);
     },
+    // Name-keyed upsert for the user-facing save paths (export-from-session, the
+    // form's "Save as Template", template-mode New). A case-insensitive name
+    // match reuses that template's id and overwrites in place, so re-exporting or
+    // re-saving the same name updates rather than piling up duplicates — and
+    // pre-empts the >1-ambiguous state the spawn resolver rejects. No match: keep
+    // the object's own id, or mint one if it lacks it. Returns the stored object
+    // (with its resolved id) so callers can select it. The generic id-keyed
+    // save() above stays for the drawer's rename-in-place (a known id).
+    saveByName(template) {
+      const all = this._load();
+      const wanted = (template.name || '').toLowerCase();
+      const idx = all.findIndex(t => (t.name || '').toLowerCase() === wanted);
+      const stored = idx >= 0
+        ? { ...template, id: all[idx].id }
+        : (template.id
+            ? template
+            : { ...template, id: `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` });
+      if (idx >= 0) all[idx] = stored;
+      else all.push(stored);
+      this._save(all);
+      return stored;
+    },
     remove(id) {
       this._save(this._load().filter(t => t.id !== id));
     },

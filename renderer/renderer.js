@@ -89,6 +89,52 @@ function labelProxyDefault(modeSel, settings) {
 }
 const btnTemplateDelete = document.getElementById('btn-template-delete');
 const btnSaveTemplate = document.getElementById('btn-save-template');
+const btnCreate = document.getElementById('btn-create');
+const dialogTitle = document.getElementById('dialog-title');
+const nameFieldLabel = document.getElementById('name-field-label');
+
+// New Session dialog doubles as the Templates library editor (F4a): 'create'
+// spawns a session, 'template' saves a template (no spawn). editingTemplateId is
+// the id being edited in template-mode (null = New). templatesDrawerRefresh is
+// the open Templates drawer's list-refresh, captured from initLibraryDrawers so
+// a dialog-side save repaints it.
+let dialogMode = 'create';
+let editingTemplateId = null;
+let templatesDrawerRefresh = null;
+
+// A real in-app text-input modal — window.prompt() is a no-op in Electron. Used
+// by the session-menu "Export as Template" (no dialog open) and the dialog's own
+// "Save as Template" button. Resolves the entered string, or null on cancel.
+function promptText(title, initial = '') {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'prompt-modal-overlay';
+    overlay.innerHTML = `
+      <div class="prompt-modal">
+        <h3></h3>
+        <input type="text" spellcheck="false">
+        <div class="dialog-actions">
+          <div style="flex:1;"></div>
+          <button class="secondary" data-act="cancel" type="button">Cancel</button>
+          <button data-act="ok" type="button">OK</button>
+        </div>
+      </div>`;
+    overlay.querySelector('h3').textContent = title;
+    const input = overlay.querySelector('input');
+    input.value = initial;
+    document.body.appendChild(overlay);
+    const done = (val) => { overlay.remove(); resolve(val); };
+    overlay.querySelector('[data-act="ok"]').addEventListener('click', () => done(input.value));
+    overlay.querySelector('[data-act="cancel"]').addEventListener('click', () => done(null));
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) done(null); });
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation(); // keep global shortcuts / the dialog's Enter handler out
+      if (e.key === 'Enter') done(input.value);
+      else if (e.key === 'Escape') done(null);
+    });
+    setTimeout(() => input.focus(), 50);
+  });
+}
 
 // Default extra CLI args per session type — user can edit or clear
 const DEFAULT_ARGS = {
@@ -363,14 +409,19 @@ window.api.onSessionContextAction(({ action, name, type, cwd }) => {
     case 'exportTemplate': {
       // Snapshot this session's config into a named, reusable template (spawnable
       // by name via [agent:spawn … template:Y] or the New Session dropdown).
-      const tn = prompt(`Export "${name}" as a template — template name:`, '');
-      if (tn && tn.trim()) {
-        window.api.exportTemplate(name, tn.trim()).then((res) => {
+      promptText(`Export "${name}" as a template`, name).then((tn) => {
+        if (!tn) return;
+        tn = tn.trim();
+        if (!/^[a-zA-Z0-9._-]{1,64}$/.test(tn)) {
+          alert('Template name must be 1–64 chars: letters, digits, . _ -');
+          return;
+        }
+        window.api.exportTemplate(name, tn).then((res) => {
           if (!res || !res.ok) {
             alert(`Export as template failed: ${res && res.error ? res.error : 'unknown error'}`);
           }
         });
-      }
+      });
       break;
     }
   }
@@ -635,7 +686,10 @@ function applyTypeDefaults({ skipAsyncRefresh = false } = {}) {
   const type = inputType.value;
   if (!skipAsyncRefresh) inputArgs.value = DEFAULT_ARGS[type] || '';
   argsHint.textContent = ARGS_HINTS[type] || '';
-  const supportsSystemPrompt = type === 'claude' || type === 'codex';
+  // Prompt refs and resume aren't template fields (F6 punt / runtime-only), so
+  // template-authoring mode hides those rows even for a type that supports them.
+  const authoring = dialogMode === 'template';
+  const supportsSystemPrompt = (type === 'claude' || type === 'codex') && !authoring;
   systemPromptRow.style.display = supportsSystemPrompt ? '' : 'none';
   if (appendPromptsRow) appendPromptsRow.style.display = supportsSystemPrompt ? '' : 'none';
   if (!supportsSystemPrompt) inputSystemPrompt.value = '';
@@ -647,15 +701,17 @@ function applyTypeDefaults({ skipAsyncRefresh = false } = {}) {
     if (sec) sec.style.display = claudeOnly ? '' : 'none';
   }
   if (claudeOnly && !skipAsyncRefresh) { refreshNewSessionSkills(); refreshNewSessionInjectSkills(); refreshNewSessionTools(); }
-  const supportsResume = type === 'claude' || type === 'codex';
-  resumeRow.style.display = supportsResume ? '' : 'none';
-  if (!supportsResume) {
+  const agentType = type === 'claude' || type === 'codex';
+  // Resume/fork is runtime-only — hidden while authoring a template.
+  resumeRow.style.display = (agentType && !authoring) ? '' : 'none';
+  if (!agentType) {
     inputResume.value = '';
     inputFork.checked = false;
   }
-  // Proxy routing only makes sense for agent types
-  proxyRow.style.display = supportsResume ? '' : 'none';
-  if (!supportsResume) {
+  // Proxy routing only makes sense for agent types — and it IS a template field,
+  // so it stays visible in template-authoring mode.
+  proxyRow.style.display = agentType ? '' : 'none';
+  if (!agentType) {
     inputProxyMode.value = '';
     inputProxyUrl.style.display = 'none';
   }
@@ -763,6 +819,8 @@ async function refreshNewSessionTools(disabledSet = null) {
 }
 
 async function openDialog() {
+  editingTemplateId = null;
+  setDialogMode('create'); // reset chrome if the last use was a template edit
   sessionCounter++;
   inputName.value = `session-${sessionCounter}`;
   inputType.value = 'claude';
@@ -850,18 +908,20 @@ btnTemplateDelete.addEventListener('click', async () => {
 });
 
 btnSaveTemplate.addEventListener('click', async () => {
-  const templateName = prompt('Template name:', '');
-  if (!templateName || !templateName.trim()) return;
-  const template = {
-    id: `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    name: templateName.trim(),
-    type: inputType.value,
-    cwd: inputCwd.value || homeDir,
-    extraArgs: parseArgs(inputArgs.value || ''),
-  };
-  await window.api.saveTemplate(template);
+  const templateName = await promptText('Save as Template', '');
+  if (!templateName) return;
+  const name = templateName.trim();
+  if (!/^[a-zA-Z0-9._-]{1,64}$/.test(name)) {
+    alert('Template name must be 1–64 chars: letters, digits, . _ -');
+    return;
+  }
+  // Full config (F2 fix — the old path saved only type/cwd/args, silently
+  // dropping proxy/agents/tools/skills/strip). Name-keyed so re-saving a name
+  // overwrites rather than duplicating.
+  const res = await window.api.saveTemplateByName({ name, ...collectFormConfig() });
   await refreshTemplatesDropdown();
-  inputTemplate.value = template.id;
+  if (res && res.template) inputTemplate.value = res.template.id;
+  if (templatesDrawerRefresh) templatesDrawerRefresh();
 });
 
 function closeDialog() {
@@ -886,11 +946,32 @@ function expandPath(p) {
   return p;
 }
 
+// The config subset a template captures — the single source shared by session
+// creation (doCreate) and every template save path (F2 fix: the old quick-save
+// snapshotted only type/cwd/args and silently dropped the rest). Runtime-only
+// bits (resume/fork, prompt refs) are NOT here — doCreate adds those itself.
+function collectFormConfig() {
+  const type = inputType.value;
+  const agentType = type === 'claude' || type === 'codex';
+  return {
+    type,
+    cwd: expandPath(inputCwd.value.trim()) || homeDir,
+    extraArgs: parseArgs(inputArgs.value || ''),
+    proxy: agentType ? proxyValueFromControls(inputProxyMode, inputProxyUrl) : null,
+    agents: type === 'claude' ? collectAgentChecklist(inputAgentsList) : [],
+    denyBuiltins: type === 'claude' ? collectBuiltinChecklist(inputBuiltinsList) : [],
+    disabledTools: type === 'claude' ? collectToolChecklist(inputToolsList) : [],
+    disabledSkills: type === 'claude' ? collectSkillChecklist(inputSkillsList) : [],
+    injectSkills: type === 'claude' ? collectInjectChecklist(inputInjectSkillsList) : [],
+    stripLevel: type === 'claude' ? (Number(inputStripLevel && inputStripLevel.value) || 0) : 0,
+  };
+}
+
 async function doCreate() {
   const name = inputName.value.trim();
-  const type = inputType.value;
-  const cwd = expandPath(inputCwd.value.trim()) || homeDir;
-  const extraArgs = parseArgs(inputArgs.value || '');
+  const cfg = collectFormConfig();
+  const { type, cwd, extraArgs, proxy, agents, denyBuiltins,
+          disabledTools, disabledSkills, injectSkills, stripLevel } = cfg;
 
   // Prompts are referenced by library file now (system replaces, appends
   // compose); the legacy inline body is no longer authored at create.
@@ -905,16 +986,8 @@ async function doCreate() {
     return;
   }
 
-  const resumeId = (type === 'claude' || type === 'codex') ? inputResume.value.trim() || null : null;
-  const fork = (type === 'claude' || type === 'codex') ? inputFork.checked : false;
-  const proxy = (type === 'claude' || type === 'codex')
-    ? proxyValueFromControls(inputProxyMode, inputProxyUrl) : null;
-  const agents = type === 'claude' ? collectAgentChecklist(inputAgentsList) : [];
-  const denyBuiltins = type === 'claude' ? collectBuiltinChecklist(inputBuiltinsList) : [];
-  const disabledTools = type === 'claude' ? collectToolChecklist(inputToolsList) : [];
-  const disabledSkills = type === 'claude' ? collectSkillChecklist(inputSkillsList) : [];
-  const injectSkills = type === 'claude' ? collectInjectChecklist(inputInjectSkillsList) : [];
-  const stripLevel = type === 'claude' ? (Number(inputStripLevel && inputStripLevel.value) || 0) : 0;
+  const resumeId = supportsPrompts ? inputResume.value.trim() || null : null;
+  const fork = supportsPrompts ? inputFork.checked : false;
 
   closeDialog();
 
@@ -932,19 +1005,101 @@ async function doCreate() {
   switchSession(name);
 }
 
+// The dialog's primary action depends on which mode it was opened in: create a
+// session, or save a template (no spawn).
+function submitDialog() {
+  if (dialogMode === 'template') saveTemplateFromForm();
+  else doCreate();
+}
+
 document.getElementById('btn-new').addEventListener('click', openDialog);
 document.getElementById('btn-cancel').addEventListener('click', closeDialog);
-document.getElementById('btn-create').addEventListener('click', doCreate);
+btnCreate.addEventListener('click', submitDialog);
 
 document.getElementById('btn-browse').addEventListener('click', async () => {
   const dir = await window.api.selectDirectory();
   if (dir) { inputCwd.value = dir; refreshNewSessionSkills(); refreshNewSessionTools(); }
 });
 
-// Enter to create (Escape no longer closes — only Cancel button does)
+// Enter to submit (Escape no longer closes — only Cancel button does)
 dialogOverlay.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') doCreate();
+  if (e.key === 'Enter') submitDialog();
 });
+
+// --- Templates library editing: the New Session dialog doubles as the template
+// editor (F4a — a template IS this form's config; no duplicate control set). ---
+
+// Toggle the dialog's chrome between session-create and template-authoring.
+// applyTypeDefaults also reads dialogMode to keep prompt/resume rows hidden while
+// authoring even when the type changes.
+function setDialogMode(mode) {
+  dialogMode = mode;
+  const authoring = mode === 'template';
+  dialogTitle.textContent = authoring ? (editingTemplateId ? 'Edit Template' : 'New Template') : 'New Session';
+  nameFieldLabel.textContent = authoring ? 'Template name' : 'Name';
+  btnCreate.textContent = authoring ? 'Save Template' : 'Create';
+  // The spawn-from-a-template dropdown and the quick "Save as Template" button
+  // are create-mode affordances; in template-mode you're already editing one.
+  btnSaveTemplate.style.display = authoring ? 'none' : '';
+  if (authoring) templateRow.style.display = 'none'; // create-mode: refreshTemplatesDropdown owns it
+}
+
+// Open the dialog as a template editor. tpl = null → blank "New Template"; a
+// template object → prefilled "Edit Template" keyed to its id.
+async function openTemplateEditor(tpl = null) {
+  editingTemplateId = tpl ? tpl.id : null;
+  inputType.value = (tpl && tpl.type) || 'claude';
+  inputName.value = (tpl && tpl.name) || '';
+  inputCwd.value = (tpl && tpl.cwd) || homeDir;
+  inputArgs.value = tpl ? (tpl.extraArgs || []).join(' ') : '';
+  argsHint.textContent = ARGS_HINTS[inputType.value] || '';
+  if (inputStripLevel) inputStripLevel.value = String((tpl && tpl.stripLevel) || 0);
+  for (const sec of [toolsSection, skillsSection, otherSection]) { if (sec) sec.open = false; }
+  setDialogMode('template');
+  // Fix section show/hide for the type without firing the default empty-set async
+  // renders — we render the rich checklists below from the template's own sets.
+  applyTypeDefaults({ skipAsyncRefresh: true });
+  const settings = await window.api.getSettings();
+  setClaudeToolsCache(settings?.claudeTools || []);
+  setDefaultToolDenyCache(settings?.defaultToolDeny || []);
+  setAgentLibCache((await window.api.listAgents()) || []);
+  if (inputType.value === 'claude') {
+    renderAgentChecklist(inputAgentsList, new Set((tpl && tpl.agents) || []));
+    renderBuiltinChecklist(inputBuiltinsList, new Set((tpl && tpl.denyBuiltins) || []));
+    await refreshNewSessionTools(new Set((tpl && tpl.disabledTools) || []));
+    await refreshNewSessionSkills(new Set((tpl && tpl.disabledSkills) || []));
+    await refreshNewSessionInjectSkills(new Set((tpl && tpl.injectSkills) || []));
+  }
+  setProxyControls(inputProxyMode, inputProxyUrl, (tpl && tpl.proxy) ?? null, settings?.proxyUrl);
+  labelProxyDefault(inputProxyMode, settings);
+  inputName.style.borderColor = '';
+  dialogOverlay.classList.remove('hidden');
+  setTimeout(() => inputName.select(), 50);
+}
+
+// Save the form as a template (template-mode primary action). New / quick-save
+// are name-keyed upserts; Edit renames in place on the known id, blocking a
+// rename that would collide with a DIFFERENT template's name (F3 edge — a nudge
+// rather than silently merging the other one away).
+async function saveTemplateFromForm() {
+  const name = inputName.value.trim();
+  if (!/^[a-zA-Z0-9._-]{1,64}$/.test(name)) {
+    inputName.style.borderColor = '#e94560';
+    return;
+  }
+  const cfg = collectFormConfig();
+  if (editingTemplateId) {
+    const list = await window.api.listTemplates();
+    const clash = list.find(t => t.id !== editingTemplateId && (t.name || '').toLowerCase() === name.toLowerCase());
+    if (clash) { inputName.style.borderColor = '#e94560'; return; }
+    await window.api.saveTemplate({ ...cfg, id: editingTemplateId, name }); // rename-in-place
+  } else {
+    await window.api.saveTemplateByName({ ...cfg, name });
+  }
+  closeDialog();
+  await refreshTemplatesDropdown();
+  if (templatesDrawerRefresh) templatesDrawerRefresh();
+}
 
 // ---------------------------------------------------------------------------
 // PTY data routing
@@ -2708,10 +2863,14 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
 
 // Moved to library-drawers.js AS-IS (not de-duped — see that file's header).
 // FLAG: takes getActiveSession (prompt inject) + the checklists cache setters.
-initLibraryDrawers({
+// The templates drawer reuses the New Session dialog as its editor, so it calls
+// back into the core's openTemplateEditor; the core keeps the drawer's list
+// refresh so a dialog-side save repaints the open drawer.
+({ refreshTemplatesList: templatesDrawerRefresh } = initLibraryDrawers({
   getActiveSession: () => activeSession,
   setAgentLibCache, setSkillLibCache,
-});
+  openTemplateEditor,
+}));
 
 // ---------------------------------------------------------------------------
 // Restore sessions on startup

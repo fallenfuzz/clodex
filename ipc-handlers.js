@@ -108,6 +108,13 @@ function registerIpcHandlers(deps) {
 
   ipcMain.handle('templates:list', () => templates.list());
   ipcMain.handle('templates:save', (_e, template) => { templates.save(template); return templates.list(); });
+  // Name-keyed upsert: the form's "Save as Template" and template-mode New route
+  // here so re-saving a name overwrites rather than duplicating. Returns the
+  // stored template (with its resolved id) so the caller can select it.
+  ipcMain.handle('templates:saveByName', (_e, template) => {
+    const t = templates.saveByName(template);
+    return { ok: true, template: t, templates: templates.list() };
+  });
   ipcMain.handle('templates:remove', (_e, id) => { templates.remove(id); return templates.list(); });
   // Snapshot a live session's PERSISTED config subset into a named template.
   // persistence.get carries the whole entry, so we pick exactly the spawnable
@@ -120,7 +127,6 @@ function registerIpcHandlers(deps) {
     const tn = (templateName || '').trim();
     if (!tn) return { ok: false, error: 'template name required' };
     const t = {
-      id: `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       name: tn,
       type: entry.type,
       cwd: entry.cwd || null,
@@ -134,7 +140,9 @@ function registerIpcHandlers(deps) {
     };
     if (entry.stripLevel === 1 || entry.stripLevel === 2) t.stripLevel = entry.stripLevel;
     if (entry.autoCompact === false) t.autoCompact = false;
-    templates.save(t);
+    // Name-keyed: re-exporting the same session overwrites its template instead
+    // of piling up duplicates (saveByName mints the id when the name is new).
+    templates.saveByName(t);
     return { ok: true, templates: templates.list() };
   });
 

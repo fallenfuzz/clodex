@@ -23,6 +23,8 @@ window.api = {
     ipcRenderer.invoke('templates:list'),
   saveTemplate: (template) =>
     ipcRenderer.invoke('templates:save', template),
+  saveTemplateByName: (template) =>
+    ipcRenderer.invoke('templates:saveByName', template),
   removeTemplate: (id) =>
     ipcRenderer.invoke('templates:remove', id),
   exportTemplate: (name, templateName) =>
@@ -138,6 +140,8 @@ window.api = {
     ipcRenderer.on('request-open-skills-drawer', (_e, name) => callback(name)),
   onRequestOpenPromptsDrawer: (callback) =>
     ipcRenderer.on('request-open-prompts-drawer', () => callback()),
+  onRequestOpenTemplatesDrawer: (callback) =>
+    ipcRenderer.on('request-open-templates-drawer', () => callback()),
   onRequestOpenIpcLog: (callback) =>
     ipcRenderer.on('request-open-ipc-log', () => callback()),
 

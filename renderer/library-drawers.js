@@ -54,7 +54,7 @@ function scopeBadgeHtml(meta) {
   return parts.length ? `<div class="prompt-item-scope">${esc(parts.join(' · '))}</div>` : '';
 }
 
-function initLibraryDrawers({ getActiveSession, setAgentLibCache, setSkillLibCache }) {
+function initLibraryDrawers({ getActiveSession, setAgentLibCache, setSkillLibCache, openTemplateEditor }) {
   const promptsDrawer = document.getElementById('prompts-drawer');
   const promptsList = document.getElementById('prompts-list');
   const promptsEmpty = document.getElementById('prompts-empty');
@@ -427,6 +427,98 @@ function initLibraryDrawers({ getActiveSession, setAgentLibCache, setSkillLibCac
   window.api.onRequestOpenSkillsDrawer((name) => openSkillsDrawer(name));
   window.api.onRequestOpenAgentsDrawer((name) => openAgentsDrawer(name));
   window.api.onRequestOpenPromptsDrawer(() => openPromptsDrawer());
+
+  // ---------------------------------------------------------------------------
+  // Templates library — saved session configs (~/Library/.../templates.json).
+  // Unlike the other libraries this drawer has NO inline editor: New/Edit reuse
+  // the New Session dialog in template-authoring mode (injected as
+  // openTemplateEditor), so a template is edited by the same 8 controls that
+  // author a session. This drawer is just the list + New / Edit / Delete.
+  // ---------------------------------------------------------------------------
+
+  const templatesDrawer = document.getElementById('templates-drawer');
+  const templatesListEl = document.getElementById('templates-list');
+  const templatesEmpty = document.getElementById('templates-empty');
+  const templatesNew = document.getElementById('templates-new');
+  const templatesClose = document.getElementById('templates-close');
+
+  // Pull the model out of extraArgs for the one-line preview (--model X, -m X,
+  // or --model=X); templates carry the model as a CLI arg, not a field.
+  function templateModel(args) {
+    const a = Array.isArray(args) ? args : [];
+    for (let i = 0; i < a.length; i++) {
+      if ((a[i] === '--model' || a[i] === '-m') && a[i + 1]) return a[i + 1];
+      if (a[i].startsWith('--model=')) return a[i].slice('--model='.length);
+    }
+    return null;
+  }
+
+  function templateSummary(t) {
+    const parts = [];
+    if (t.cwd) parts.push(t.cwd);
+    const model = templateModel(t.extraArgs);
+    if (model) parts.push(`model: ${model}`);
+    if ((t.agents || []).length) parts.push(`${t.agents.length} agent${t.agents.length > 1 ? 's' : ''}`);
+    const gated = (t.disabledTools || []).length + (t.disabledSkills || []).length + (t.denyBuiltins || []).length;
+    if (gated) parts.push(`−${gated} gated`);
+    if ((t.injectSkills || []).length) parts.push(`+${t.injectSkills.length} skill${t.injectSkills.length > 1 ? 's' : ''}`);
+    if (t.stripLevel) parts.push(`strip L${t.stripLevel}`);
+    if (t.proxy === false) parts.push('proxy off');
+    else if (typeof t.proxy === 'string') parts.push('proxy custom');
+    return parts.join(' · ') || '(defaults)';
+  }
+
+  async function refreshTemplatesList() {
+    const items = (await window.api.listTemplates()) || [];
+    templatesListEl.innerHTML = '';
+    if (items.length === 0) {
+      templatesEmpty.style.display = '';
+      return;
+    }
+    templatesEmpty.style.display = 'none';
+    for (const t of items) {
+      const el = document.createElement('div');
+      el.className = 'prompt-item';
+      el.innerHTML = `
+        <div class="prompt-item-title">${esc(t.name)} <span class="prompt-kind-badge">${esc(t.type || 'claude')}</span></div>
+        <div class="prompt-item-preview">${esc(templateSummary(t))}</div>
+        <div class="prompt-item-actions">
+          <button data-action="edit">Edit</button>
+          <button data-action="delete">Delete</button>
+        </div>
+      `;
+      el.querySelector('[data-action="edit"]').addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeTemplatesDrawer();
+        openTemplateEditor(t);
+      });
+      el.querySelector('[data-action="delete"]').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Delete template "${t.name}"?`)) return;
+        await window.api.removeTemplate(t.id);
+        refreshTemplatesList();
+      });
+      el.addEventListener('click', () => { closeTemplatesDrawer(); openTemplateEditor(t); });
+      templatesListEl.appendChild(el);
+    }
+  }
+
+  function openTemplatesDrawer() {
+    templatesDrawer.classList.remove('hidden');
+    refreshTemplatesList();
+  }
+  function closeTemplatesDrawer() {
+    templatesDrawer.classList.add('hidden');
+  }
+
+  templatesClose.addEventListener('click', closeTemplatesDrawer);
+  templatesNew.addEventListener('click', () => { closeTemplatesDrawer(); openTemplateEditor(null); });
+
+  window.api.onRequestOpenTemplatesDrawer(() => openTemplatesDrawer());
+
+  // Hand the core the drawer's list refresh so a dialog-side template save (from
+  // the reused New Session dialog) can repaint an open drawer.
+  return { refreshTemplatesList };
 }
 
 module.exports = { initLibraryDrawers };

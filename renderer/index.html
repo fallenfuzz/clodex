@@ -131,6 +131,21 @@
     </div>
   </div>
 
+  <!-- Templates library drawer. No separate editor modal: New/Edit reuse the New
+       Session dialog in template-authoring mode (a template IS that form's config). -->
+  <div id="templates-drawer" class="hidden">
+    <div id="templates-header">
+      <span class="prompts-title">Templates</span>
+      <button id="templates-new" title="New template" type="button">+ New</button>
+      <button id="templates-close" title="Close" type="button">×</button>
+    </div>
+    <div id="templates-list"></div>
+    <div id="templates-empty" class="hint">
+      No templates yet. Click <strong>+ New</strong> to author one, or use <strong>Export as Template…</strong> on a running agent's right-click menu.<br><br>
+      A template is a saved session config (type, cwd, args incl. model, proxy, agents, tools, skills). Spawn from one with <code>[agent:spawn name:X template:Y]</code> or pick it in the New Session dialog.
+    </div>
+  </div>
+
   <div id="main">
     <div id="search-bar" class="hidden">
       <input type="text" id="search-input" placeholder="Find in terminal…">
@@ -272,7 +287,7 @@
   <!-- New session dialog -->
   <div id="dialog-overlay" class="hidden">
     <div id="dialog">
-      <h3>New Session</h3>
+      <h3 id="dialog-title">New Session</h3>
       <label id="template-row" style="display:none;">Template
         <div class="template-picker">
           <select id="input-template">
@@ -281,7 +296,7 @@
           <button id="btn-template-delete" class="secondary" type="button" title="Delete selected template">×</button>
         </div>
       </label>
-      <label>Name
+      <label><span id="name-field-label">Name</span>
         <input type="text" id="input-name" placeholder="e.g. alice">
       </label>
       <label>Type
