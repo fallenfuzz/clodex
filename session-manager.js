@@ -104,6 +104,7 @@ function createSessionManager(deps) {
     parseAndValidate,
     parseCtxFile,
     parseIntent,
+    parseRemindSpec,
     path,
     pathFor,
     peerStatusLabel,
@@ -130,7 +131,7 @@ function createSessionManager(deps) {
     writeClaudeDigestFile,
     writeSkillPlugin,
     // getter deps (whenReady-assigned; see header)
-    getPersistence, getTemplates, getUiSettings, getPromptLibrary, getAgentLibrary, getRemoteServer, getPeerManager,
+    getPersistence, getTemplates, getUiSettings, getPromptLibrary, getAgentLibrary, getRemoteServer, getPeerManager, getRemindScheduler,
     // electron seam fns (see header)
     getUserDataPath, openPath, notifyOS, setAppQuitting,
   } = deps;
@@ -1300,6 +1301,14 @@ function createSessionManager(deps) {
       // Summary landed = compact completed normally: cancel the in-flight valve
       // so it can't later clear state / log a false "never landed".
       this._clearCompactValve(session);
+      // Fire this agent's `on compact` self-reminders. This is the single choke
+      // point for EVERY compact flavor — self-fired [agent:context compact],
+      // manual /compact, and auto-compact all land the same isCompactSummary
+      // entry (jsonl-watcher), and BOTH observation paths (the legacy watcher's
+      // onCompactSummary callback and the wire sentinel's armCompact) route here
+      // — so hooking the event trigger once covers them all.
+      const sched = getRemindScheduler && getRemindScheduler();
+      if (sched) { try { sched.fireCompactFor(session.name); } catch {} }
       const cont = session._compactContinuation;
       if (cont) {
         session._compactContinuation = null;
@@ -1785,7 +1794,67 @@ function createSessionManager(deps) {
           this._handleExecIntent(session, intent.cmd, intent.body || '');
           break;
         }
+        case 'remind': {
+          // Agent scheduling a durable SELF-reminder (see remind-scheduler.js).
+          // Agent sessions only — bash can't process intents, and the delivery
+          // rides the DM pipeline which only reaches agent sessions.
+          if (!session || !session.agentType) break;
+          this._handleRemindIntent(session, intent.spec, intent.body || '');
+          break;
+        }
       }
+    }
+
+    // [agent:remind <spec>] text — schedule/manage a durable self-reminder. The
+    // scheduler (injected) owns timing + persistence; this is the intent seam:
+    // parse the spec's HEAD to split management (list/cancel) from scheduling,
+    // and match exec's result tone — SILENT on a clean schedule/cancel (no
+    // re-bill), LOUD `[agent:remind] …` bounce on any parse error or a cancel of
+    // an unknown id. `list` always replies (it's a query). Guarded on the
+    // scheduler dep so a build without it (shouldn't happen post-whenReady) is a
+    // clean no-op rather than a crash.
+    _handleRemindIntent(session, spec, body) {
+      const reply = (msg) => this._injectText(session, `[agent:remind] ${msg}`, { parkable: true });
+      const who = session.name;
+      const sched = getRemindScheduler && getRemindScheduler();
+      if (!sched) { reply('reminders are unavailable'); return; }
+
+      const parsed = parseRemindSpec(spec);
+      if (!parsed.ok) {
+        reply(parsed.error);
+        this._broadcast('ipc-message', { type: 'remind', from: who, to: who, body: `err: ${parsed.error}` });
+        return;
+      }
+
+      if (parsed.kind === 'list') {
+        const mine = sched.listForAgent(who);
+        if (!mine.length) { reply('no reminders scheduled'); return; }
+        const lines = mine.map((r) => `  ${r.id}  ${r.spec}${r.body ? ` — ${r.body.split('\n')[0].slice(0, 60)}` : ''}`);
+        reply(`${mine.length} reminder(s):\n${lines.join('\n')}`);
+        return;
+      }
+
+      if (parsed.kind === 'cancel') {
+        if (sched.cancel(who, parsed.id)) {
+          log.info('intent', `remind cancel ${parsed.id} by ${who}: ok`);
+          this._broadcast('ipc-message', { type: 'remind', from: who, to: who, body: `cancel ${parsed.id}: ok` });
+        } else {
+          reply(`no reminder ${parsed.id}`); // unknown or not this agent's — loud, identical bounce
+          this._broadcast('ipc-message', { type: 'remind', from: who, to: who, body: `err: no reminder ${parsed.id}` });
+        }
+        return;
+      }
+
+      // A real schedule (every/in/at/cron/on compact).
+      const r = sched.add(who, spec, body);
+      if (!r.ok) {
+        reply(r.error);
+        this._broadcast('ipc-message', { type: 'remind', from: who, to: who, body: `err: ${r.error}` });
+        return;
+      }
+      // Silent success (no re-bill), like a clean exec. Audit only.
+      log.info('intent', `remind ${r.record.kind} by ${who}: scheduled ${r.record.id}`);
+      this._broadcast('ipc-message', { type: 'remind', from: who, to: who, body: `scheduled ${r.record.id} (${spec})` });
     }
 
     // [agent:exec <cmd>] {json} — fire-and-forget invocation of an OPERATOR-
@@ -2649,7 +2718,9 @@ function createSessionManager(deps) {
       // 1, so IntentScanner (which only fires on a cleaned line STARTING with
       // [agent:) can't mistake it for a real intent. Empty when not applicable,
       // so the pointer line's load-bearing trailing space is preserved.
-      const trailer = (mtype === 'dm' && senderName !== 'user')
+      // `reminder` is a synthetic self-reminder sender, not a repliable agent —
+      // suppressed like `user` so we don't invite a reply to the agent's own loop.
+      const trailer = (mtype === 'dm' && senderName !== 'user' && senderName !== 'reminder')
         ? `(reply: start a line with [agent:dm ${senderName}])`
         : '';
 
@@ -2684,6 +2755,51 @@ function createSessionManager(deps) {
         this._injectText(target, finalText, { parkable: true });
       }
       this._sendToSession(targetName, 'session-mention', targetName, mtype, senderName);
+    }
+
+    // Deliver a fired self-reminder (the remind-scheduler's deliver seam routes
+    // here via main.js). Three cases, because a reminder's whole value is
+    // durability — a fire must NOT be silently dropped the way a plain dm to an
+    // absent target is:
+    //   LIVE (session in the map)          → the normal DM inject path.
+    //   OFFLINE but resumable (name still  → PARK into the pending store so it
+    //     in persistence: exited-naturally,  drains through the UserPromptSubmit
+    //     or not-yet-restored at launch —    hook on the agent's next prompt after
+    //     start()'s catch-up runs BEFORE     resume. Keyed by name, so a later
+    //     windows/sessions restore)          respawn under the same name picks it up.
+    //   GONE (no persistence entry — the   → drop, and signal the caller so it can
+    //     agent was killed from the UI by     prune the now-ownerless schedule
+    //     operator intent)                    (recurring would otherwise recompute
+    //                                          and drop forever).
+    // Returns 'delivered' | 'parked' | 'gone' | 'error'. The `reminder` sender
+    // gets no reply trailer (suppressed in _buildDeliveryText) — it's the
+    // agent's own loop, not a conversational dm. The live path still emits the
+    // session-mention badge via _deliverMessage, deliberately: the operator
+    // seeing the tab light up on a fire is useful signal.
+    _deliverReminder(agent, body) {
+      const target = this.sessions.get(agent);
+      if (target && target.agentType) {
+        this._deliverMessage(agent, 'reminder', body, 'dm');
+        return 'delivered';
+      }
+      const entry = getPersistence().get(agent);
+      if (!entry) {
+        log.info('intent', `remind fire for ${agent} dropped — no live session, no persisted entry`);
+        return 'gone';
+      }
+      // Build the delivery bytes without a live session — _buildDeliveryText only
+      // needs a name (spill filename) and agentType (claude @-mention vs codex
+      // read-pointer), both known from the persisted entry. No resend id: a self-
+      // reminder has no sender to escalate, and drainPending reads id-less parks.
+      const finalText = this._buildDeliveryText({ name: agent, agentType: entry.type }, 'reminder', body, 'dm');
+      try {
+        parkDelivery(PENDING_DIR, agent, finalText, this._nextParkSeq());
+        log.info('intent', `remind fire for ${agent} parked (offline) — drains on resume`);
+        return 'parked';
+      } catch (e) {
+        log.error('intent', `remind park for ${agent} failed: ${e.message}`);
+        return 'error';
+      }
     }
 
     // Monotonic, lexically-sortable park seq so a drain reads in arrival order,

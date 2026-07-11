@@ -374,9 +374,12 @@ const INJECT_QUIET_MAXWAIT = 5 * 60 * 1000;
 // ---------------------------------------------------------------------------
 
 let persistence, templates, workspaces, promptLibrary,
-  agentDefaults, agentLibrary, skillLibrary, execLibrary, uiSettings;
+  agentDefaults, agentLibrary, skillLibrary, execLibrary, reminders, uiSettings;
+// Durable self-reminder scheduler ([agent:remind …]). Constructed in whenReady
+// once the `reminders` store exists; crosses to SessionManager as a getter.
+let remindScheduler = null;
 // Workspace-rename → library rescope helper (from initStores). Not one of the
-// eight stores — a cross-library maintenance fn used by workspace:setName to
+// nine stores — a cross-library maintenance fn used by workspace:setName to
 // keep `workspace:`-scoped skills/agents pointing at the renamed workspace.
 let renameWorkspaceScope;
 
@@ -545,6 +548,8 @@ const { parkDelivery, drainPending, hasPending, parkIdInUse, claimParkedById } =
 const { enqueueOutbox, claimOutbox, outboxHasOrigin, listOutboxOrigins } = require('./peer-outbox');
 const { parseIntent, shadowIntentKey } = require('./intent-scanner');
 const { isFilenameToken, parseAndValidate, DEFAULT_MAX_BYTES } = require('./exec-schema');
+const { parseRemindSpec } = require('./remind-schedule');
+const { createRemindScheduler } = require('./remind-scheduler');
 const { mergeClaudeSystemPrompt, mergeCodexInstructions, parseCtxFile } = require('./argv-merge');
 const { renderClaudeStatusScript, codexStatusLineArg, normalizeProxyBase, resolveProxyBase } = require('./statusline');
 const { jsonlToMarkdown, jsonlToMessages, extractText } = require('./transcript');
@@ -1032,6 +1037,7 @@ const SessionManager = createSessionManager({
     parseAndValidate,
     parseCtxFile,
     parseIntent,
+    parseRemindSpec,
     path,
     pathFor,
     peerStatusLabel,
@@ -1066,6 +1072,7 @@ const SessionManager = createSessionManager({
   getAgentLibrary: () => agentLibrary,
   getRemoteServer: () => remoteServer,
   getPeerManager: () => peerManager,
+  getRemindScheduler: () => remindScheduler,
   // electron seam fns — the only route from the class to electron. Keeping
   // these here is what lets session-manager.js never require('electron').
   getUserDataPath: () => app.getPath('userData'),
@@ -1627,9 +1634,34 @@ if (!singleInstance) {
 
 app.whenReady().then(() => {
   ({ persistence, templates, workspaces, promptLibrary,
-    agentDefaults, agentLibrary, skillLibrary, execLibrary, uiSettings, renameWorkspaceScope } =
+    agentDefaults, agentLibrary, skillLibrary, execLibrary, reminders, uiSettings, renameWorkspaceScope } =
     initStores(app.getPath('userData'), { log, registryDir: REGISTRY_DIR }));
   proxyPoller.start();
+
+  // Durable self-reminder scheduler: real clock + timers, the reminders store,
+  // and a deliver seam onto the existing DM pipeline. The reminder arrives as a
+  // dm from a synthetic `reminder` sender, its body prefixed with the schedule
+  // id + original spec so the agent recognizes its own loop (not a teammate).
+  // start() catches up missed fires (coalesced to one per schedule) and arms the
+  // nearest-fire timer — note it runs HERE, before windows/sessions restore, so
+  // a launch catch-up fire lands while the session map is still empty; the
+  // deliver seam parks those (see _deliverReminder) rather than dropping them.
+  remindScheduler = createRemindScheduler({
+    now: () => Date.now(),
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: (h) => clearTimeout(h),
+    store: reminders,
+    deliver: (agent, id, spec, body) => {
+      const prefix = `[${id} ${spec}]`;
+      const status = manager._deliverReminder(agent, body ? `${prefix} ${body}` : prefix);
+      // Agent gone for good (killed from the UI — no persistence entry): prune
+      // the ownerless schedule so a recurring one doesn't recompute + drop on
+      // every future fire. A transient park 'error' is NOT pruned, so a recurring
+      // reminder retries on its next tick.
+      if (status === 'gone') reminders.remove(id);
+    },
+  });
+  remindScheduler.start();
 
   initLog();
   log.info('app', `startup — Clodex ${app.getVersion()} (electron ${process.versions.electron}, pid ${process.pid})`);

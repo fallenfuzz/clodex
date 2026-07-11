@@ -893,3 +893,203 @@ test('remind: multi-line reminder text is captured greedily (allow-set), stops a
   assert.deepStrictEqual(both.map((x) => x.type), ['remind', 'who']);
   assert.strictEqual(both[0].body, 'reassess');
 });
+
+// --- _handleRemindIntent — [agent:remind <spec>] text -----------------------
+// The intent seam over the scheduler: parse the spec head to split management
+// (list/cancel) from scheduling, and match exec's tone — SILENT on a clean
+// schedule/cancel, LOUD [agent:remind] bounce on a bad spec or unknown id;
+// `list` always replies. A fake scheduler captures the add/cancel/list calls;
+// the REAL parseRemindSpec drives the list/cancel/schedule split.
+const { parseRemindSpec: parseRemindSpecReal } = require('../remind-schedule');
+
+function mkRemind({ addResult, cancelResult = false, listResult = [] } = {}) {
+  const calls = { add: [], cancel: [], list: [] };
+  const scheduler = {
+    add: (agent, spec, body) => { calls.add.push({ agent, spec, body }); return addResult || { ok: true, record: { id: 'ab12', kind: parseRemindSpecReal(spec).kind } }; },
+    cancel: (agent, id) => { calls.cancel.push({ agent, id }); return cancelResult; },
+    listForAgent: (agent) => { calls.list.push(agent); return listResult; },
+  };
+  const m = mk({
+    parseRemindSpec: parseRemindSpecReal,
+    getRemindScheduler: () => scheduler,
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+  });
+  const replies = [], ipc = [];
+  m._injectText = (_s, t) => replies.push(t);
+  m._broadcast = (_c, msg) => ipc.push(msg);
+  const session = { name: 't1', agentType: 'claude' };
+  return { m, session, replies, ipc, calls };
+}
+
+test('_handleRemindIntent: valid schedule is silent (no reply), audited via ipc', () => {
+  const { m, session, replies, ipc, calls } = mkRemind();
+  m._handleRemindIntent(session, 'every 30m', 'check the build');
+  assert.strictEqual(replies.length, 0); // silent success
+  assert.deepStrictEqual(calls.add, [{ agent: 't1', spec: 'every 30m', body: 'check the build' }]);
+  assert.match(ipc.at(-1).body, /scheduled ab12/);
+});
+
+test('_handleRemindIntent: a bad spec bounces loudly with the parser error', () => {
+  const { m, session, replies, calls } = mkRemind();
+  m._handleRemindIntent(session, 'every 10s', 'x'); // under the 60s floor
+  assert.strictEqual(calls.add.length, 0); // never reached the scheduler
+  assert.match(replies.at(-1), /^\[agent:remind\] /);
+  assert.match(replies.at(-1), /at least 60s/);
+});
+
+test('_handleRemindIntent: list with no schedules replies "none"', () => {
+  const { m, session, replies } = mkRemind({ listResult: [] });
+  m._handleRemindIntent(session, 'list', '');
+  assert.match(replies.at(-1), /no reminders/);
+});
+
+test('_handleRemindIntent: list renders ids + specs', () => {
+  const { m, session, replies, calls } = mkRemind({ listResult: [
+    { id: 'ab12', spec: 'every 30m', body: 'check build' },
+    { id: 'cd34', spec: 'on compact', body: '' },
+  ] });
+  m._handleRemindIntent(session, 'list', '');
+  assert.deepStrictEqual(calls.list, ['t1']);
+  const out = replies.at(-1);
+  assert.match(out, /2 reminder\(s\)/);
+  assert.match(out, /ab12  every 30m — check build/);
+  assert.match(out, /cd34  on compact/);
+});
+
+test('_handleRemindIntent: cancel of a known id is silent success', () => {
+  const { m, session, replies, ipc, calls } = mkRemind({ cancelResult: true });
+  m._handleRemindIntent(session, 'cancel ab12', '');
+  assert.strictEqual(replies.length, 0); // silent
+  assert.deepStrictEqual(calls.cancel, [{ agent: 't1', id: 'ab12' }]);
+  assert.match(ipc.at(-1).body, /cancel ab12: ok/);
+});
+
+test('_handleRemindIntent: cancel of an unknown id bounces loudly', () => {
+  const { m, session, replies } = mkRemind({ cancelResult: false });
+  m._handleRemindIntent(session, 'cancel zz99', '');
+  assert.match(replies.at(-1), /^\[agent:remind\] no reminder zz99/);
+});
+
+test('_handleRemindIntent: scheduler add failure (past at) bounces with its error', () => {
+  const { m, session, replies } = mkRemind({ addResult: { ok: false, error: 'that time is already in the past' } });
+  m._handleRemindIntent(session, 'at 2020-01-01T00:00:00', 'nope');
+  assert.match(replies.at(-1), /already in the past/);
+});
+
+// --- _deliverReminder — durable fire routing (live / park-offline / drop) ----
+// The reminder deliver seam: a fired self-reminder must never be silently lost
+// the way a plain dm to an absent target is. Live → the DM path; offline but
+// still in persistence (exited-naturally, or not-yet-restored at launch) → PARK
+// into the real pending store so it drains on resume; gone from persistence
+// (UI-killed) → dropped with a 'gone' signal so main.js prunes the schedule.
+// Real temp PENDING_DIR + real parkDelivery/hasPending; persistence faked.
+const { createRemindScheduler: createRemindSchedulerReal } = require('../remind-scheduler');
+const { initStores: initStoresReal } = require('../stores');
+
+function mkDeliver({ persisted = null } = {}) {
+  const PENDING_DIR = fsReal.mkdtempSync(pathReal.join(osReal.tmpdir(), 'clodex-remind-pending-'));
+  const persistence = { list: () => [], get: (n) => (persisted && persisted.name === n ? persisted : null) };
+  const m = mk({
+    PENDING_DIR, parkDelivery, fs: fsReal, path: pathReal, os: osReal,
+    randBase36: () => Math.random().toString(36).slice(2, 7),
+    parkIdInUse: () => false,
+    MSG_SPILL_THRESHOLD: 500,
+    getPersistence: () => persistence,
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+  });
+  const injected = [];
+  m._injectText = (_s, t) => injected.push(t);
+  m._broadcast = () => {};
+  m._sendToSession = () => {};
+  m._maybeParkDelivery = () => false; // force the direct inject on the live path
+  return { m, PENDING_DIR, injected };
+}
+
+test('_deliverReminder: live session → injected via the DM path, returns "delivered"', () => {
+  const { m, PENDING_DIR, injected } = mkDeliver();
+  m.sessions.set('t1', { name: 't1', agentType: 'claude' });
+  const status = m._deliverReminder('t1', '[ab12 every 30m] check build');
+  assert.strictEqual(status, 'delivered');
+  assert.match(injected.at(-1), /\[agent:from reminder\] \[ab12 every 30m\] check build/);
+  // No reply trailer for the synthetic reminder sender (agent's own loop).
+  assert.doesNotMatch(injected.at(-1), /reply: start a line/);
+  assert.strictEqual(hasPending(PENDING_DIR, 't1'), false); // live → not parked
+});
+
+test('_deliverReminder: offline WITH a persistence entry → parked (drains on resume)', () => {
+  const { m, PENDING_DIR } = mkDeliver({ persisted: { name: 't1', type: 'claude' } });
+  // sessions map is EMPTY (agent exited naturally / not yet restored).
+  const status = m._deliverReminder('t1', '[ab12 in 1h] ship it');
+  assert.strictEqual(status, 'parked');
+  assert.strictEqual(hasPending(PENDING_DIR, 't1'), true);
+  // The parked bytes are the real delivery text.
+  const drained = drainPending(PENDING_DIR, 't1', 'test');
+  assert.match(drained.join('\n'), /\[agent:from reminder\] \[ab12 in 1h\] ship it/);
+});
+
+test('_deliverReminder: offline WITHOUT a persistence entry → dropped, returns "gone"', () => {
+  const { m, PENDING_DIR } = mkDeliver({ persisted: null });
+  const status = m._deliverReminder('t1', '[ab12 in 1h] ship it');
+  assert.strictEqual(status, 'gone');
+  assert.strictEqual(hasPending(PENDING_DIR, 't1'), false); // not parked — nothing accumulates
+});
+
+test('remind: start()-before-restore race — launch fire into an empty map is parked, not lost', () => {
+  // Reproduce the whenReady ordering: scheduler.start() runs BEFORE sessions
+  // restore, so a coalesced missed fire lands on an empty session map. With the
+  // real store + the real deliver seam, that fire must PARK (persistence still
+  // has the resumable entry) rather than vanish.
+  const userData = fsReal.mkdtempSync(pathReal.join(osReal.tmpdir(), 'remind-race-ud-'));
+  const registryDir = fsReal.mkdtempSync(pathReal.join(osReal.tmpdir(), 'remind-race-reg-'));
+  const stores = initStoresReal(userData, { log: console, registryDir });
+  try {
+    const { m, PENDING_DIR } = mkDeliver({ persisted: { name: 't1', type: 'claude' } });
+    // A schedule due in the PAST (app was "down"): pre-seed the store with a
+    // stale nextFireAt so start()'s catch-up fires it immediately.
+    stores.reminders.add({ agent: 't1', kind: 'every', spec: 'every 30m', body: 'reassess', nextFireAt: Date.now() - 60_000 });
+    const scheduler = createRemindSchedulerReal({
+      now: () => Date.now(), setTimer: () => 1, clearTimer: () => {},
+      store: stores.reminders,
+      deliver: (agent, id, spec, body) => {
+        const prefix = `[${id} ${spec}]`;
+        const status = m._deliverReminder(agent, body ? `${prefix} ${body}` : prefix);
+        if (status === 'gone') stores.reminders.remove(id);
+      },
+    });
+    // sessions map is empty (restore hasn't happened) — exactly the race.
+    scheduler.start();
+    scheduler.stop();
+    assert.strictEqual(hasPending(PENDING_DIR, 't1'), true); // parked, not dropped
+    const drained = drainPending(PENDING_DIR, 't1', 'test');
+    assert.match(drained.join('\n'), /reassess/);
+    // Recurring survived + recomputed forward (still scheduled, not consumed away).
+    assert.strictEqual(stores.reminders.listForAgent('t1').length, 1);
+  } finally {
+    fsReal.rmSync(userData, { recursive: true, force: true });
+    fsReal.rmSync(registryDir, { recursive: true, force: true });
+  }
+});
+
+test('remind: a gone agent\'s recurring schedule is pruned by the deliver seam (no zombie)', () => {
+  const userData = fsReal.mkdtempSync(pathReal.join(osReal.tmpdir(), 'remind-gone-ud-'));
+  const registryDir = fsReal.mkdtempSync(pathReal.join(osReal.tmpdir(), 'remind-gone-reg-'));
+  const stores = initStoresReal(userData, { log: console, registryDir });
+  try {
+    const { m } = mkDeliver({ persisted: null }); // no persistence entry → 'gone'
+    stores.reminders.add({ agent: 't1', kind: 'every', spec: 'every 30m', body: 'x', nextFireAt: Date.now() - 60_000 });
+    const scheduler = createRemindSchedulerReal({
+      now: () => Date.now(), setTimer: () => 1, clearTimer: () => {},
+      store: stores.reminders,
+      deliver: (agent, id, spec, body) => {
+        const status = m._deliverReminder(agent, `[${id} ${spec}] ${body}`);
+        if (status === 'gone') stores.reminders.remove(id);
+      },
+    });
+    scheduler.start();
+    scheduler.stop();
+    assert.strictEqual(stores.reminders.list().length, 0); // pruned — won't recompute+drop forever
+  } finally {
+    fsReal.rmSync(userData, { recursive: true, force: true });
+    fsReal.rmSync(registryDir, { recursive: true, force: true });
+  }
+});

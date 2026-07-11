@@ -71,16 +71,20 @@ function createRemindScheduler({ now, setTimer, clearTimer, store, deliver }) {
     // from `nowMs` (so a normal fire and a coalesced late fire both resume from
     // the actual fire instant, never the stale slot); one-shot is removed; a
     // recurring whose next fire is unreachable (e.g. an impossible cron) is
-    // treated as spent and removed.
+    // treated as spent and removed. An UNPARSEABLE record (only reachable via a
+    // hand-edited store file) is dropped WITHOUT delivering — matching
+    // _schedFor's "skip defensively": we don't spam the agent with a garbage
+    // spec, we just remove the bad row so the timer stops re-selecting it.
     _fireRecord(rec, nowMs) {
       const sched = this._schedFor(rec);
+      if (!sched) { store.remove(rec.id); return; } // corrupt row → silent drop
       try { deliver(rec.agent, rec.id, rec.spec, rec.body); } catch {}
-      if (sched && RECURRING.has(rec.kind)) {
+      if (RECURRING.has(rec.kind)) {
         const next = nextFireAt(sched, nowMs);
         if (typeof next === 'number') store.markFired(rec.id, nowMs, next);
         else store.remove(rec.id); // recurring with no reachable next → spent
       } else {
-        store.remove(rec.id); // one-shot (in/at), or an unparseable record
+        store.remove(rec.id); // one-shot (in/at)
       }
     },
 
