@@ -164,6 +164,44 @@ html, body {
   padding: 4px 8px;
 }
 
+/* Sidebar footer — the always-visible operator-inbox opener + unread badge. */
+#sidebar-footer {
+  border-top: 1px solid var(--border);
+  padding: 6px 8px;
+}
+
+#inbox-open {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+#inbox-open:hover { background: var(--sidebar-hover); color: var(--text); }
+
+.inbox-count {
+  margin-left: auto;
+  font-size: 10px;
+  background: var(--accent);
+  color: white;
+  border-radius: 10px;
+  padding: 1px 7px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.inbox-count.zero {
+  background: var(--border);
+  color: var(--text-dim);
+}
+
 .session-item {
   display: flex;
   align-items: center;
@@ -1926,7 +1964,7 @@ html, body {
 
 /* Agents library drawer (mirrors the prompts drawer) */
 
-#agents-drawer, #skills-drawer, #templates-drawer, #exec-drawer {
+#agents-drawer, #skills-drawer, #templates-drawer, #exec-drawer, #inbox-drawer {
   position: fixed;
   top: 0;
   left: var(--sidebar-width);
@@ -1940,9 +1978,9 @@ html, body {
   box-shadow: 4px 0 20px rgba(0, 0, 0, 0.4);
 }
 
-#agents-drawer.hidden, #skills-drawer.hidden, #templates-drawer.hidden, #exec-drawer.hidden { display: none; }
+#agents-drawer.hidden, #skills-drawer.hidden, #templates-drawer.hidden, #exec-drawer.hidden, #inbox-drawer.hidden { display: none; }
 
-#agents-header, #skills-header, #templates-header, #exec-header {
+#agents-header, #skills-header, #templates-header, #exec-header, #inbox-header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1963,7 +2001,7 @@ html, body {
 
 #agents-new:hover, #skills-new:hover, #templates-new:hover, #exec-new:hover { opacity: 0.85; }
 
-#agents-close, #skills-close, #templates-close, #exec-close {
+#agents-close, #skills-close, #templates-close, #exec-close, #inbox-close {
   background: transparent;
   border: none;
   color: var(--text-dim);
@@ -1975,24 +2013,97 @@ html, body {
   padding: 0;
 }
 
-#agents-close:hover, #skills-close:hover, #templates-close:hover, #exec-close:hover {
+#agents-close:hover, #skills-close:hover, #templates-close:hover, #exec-close:hover, #inbox-close:hover {
   background: var(--sidebar-hover);
   color: var(--text);
 }
 
-#agents-list, #skills-list, #templates-list, #exec-list {
+#agents-list, #skills-list, #templates-list, #exec-list, #inbox-list {
   flex: 1;
   overflow-y: auto;
   padding: 6px 8px;
 }
 
-#agents-empty, #skills-empty, #templates-empty, #exec-empty {
+#agents-empty, #skills-empty, #templates-empty, #exec-empty, #inbox-empty {
   padding: 20px;
   text-align: center;
   color: var(--text-dim);
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* Inbox drawer — note rows + the "Mark all read" header button. */
+
+#inbox-mark-all {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+#inbox-mark-all:hover {
+  background: var(--sidebar-hover);
+  color: var(--text);
+}
+
+.inbox-item {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+
+.inbox-item:hover { background: var(--sidebar-hover); }
+
+.inbox-item.unread {
+  background: rgba(233, 69, 96, 0.08);
+  border-left-color: var(--accent);
+}
+
+.inbox-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+
+.inbox-from {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.inbox-item.unread .inbox-from { color: var(--accent); }
+
+.inbox-ws {
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.inbox-ago {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.inbox-body {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.inbox-item.unread .inbox-body { color: var(--text); }
 
 #agent-editor, #skill-editor, #exec-editor {
   position: fixed;

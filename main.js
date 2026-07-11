@@ -1780,7 +1780,7 @@ app.whenReady().then(() => {
     // and the workspace-rename → library rescope helper.
     sessionScopeCtx, renameWorkspaceScope,
     templates, workspaces, promptLibrary, agentDefaults,
-    agentLibrary, skillLibrary, execLibrary, uiSettings,
+    agentLibrary, skillLibrary, execLibrary, notifications, uiSettings,
     getRemoteServer: () => remoteServer,
     getRemoteError: () => remoteError,
     getPeerManager: () => peerManager,

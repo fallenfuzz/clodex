@@ -149,7 +149,9 @@ Conventions the refactor established:
   caches behind setters).
 - **Islands** (own state + DOM, `init*(deps)`): `ipc-log.js`,
   `term-search.js`, `banners.js`, `themes.js`, `library-drawers.js`
-  (prompts/agents/skills drawers), `subagent-popover.js`.
+  (prompts/agents/skills drawers), `subagent-popover.js`,
+  `inbox-drawer.js` (operator inbox for `[agent:notify-user]` notes +
+  the sidebar-footer unread badge; self-contained, no core deps).
 - **renderer/popovers/** — the popover family behind `popoverApi`:
   `report-panel.js`, `context-popover.js`, `cost-popover.js`,
   `bust-popover.js`, `files-popover.js` (also exports `openFilePeek` +

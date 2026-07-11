@@ -62,6 +62,19 @@ window.api = {
     ipcRenderer.invoke('exec:save', name, content),
   removeExecCommand: (name) =>
     ipcRenderer.invoke('exec:remove', name),
+
+  // Operator inbox ([agent:notify-user] notes). list is chronological; the
+  // renderer reverses for newest-first. markRead is idempotent.
+  listNotifications: () =>
+    ipcRenderer.invoke('notifications:list'),
+  markNotificationRead: (id) =>
+    ipcRenderer.invoke('notifications:markRead', id),
+  markAllNotificationsRead: () =>
+    ipcRenderer.invoke('notifications:markAllRead'),
+  removeNotification: (id) =>
+    ipcRenderer.invoke('notifications:remove', id),
+  notificationUnreadCount: () =>
+    ipcRenderer.invoke('notifications:unreadCount'),
   checkForUpdate: () =>
     ipcRenderer.invoke('update:check'),
   getUpdateInfo: () =>
@@ -148,6 +161,8 @@ window.api = {
     ipcRenderer.on('request-open-skills-drawer', (_e, name) => callback(name)),
   onRequestOpenExecDrawer: (callback) =>
     ipcRenderer.on('request-open-exec-drawer', (_e, name) => callback(name)),
+  onRequestOpenInboxDrawer: (callback) =>
+    ipcRenderer.on('request-open-inbox-drawer', () => callback()),
   onRequestOpenPromptsDrawer: (callback) =>
     ipcRenderer.on('request-open-prompts-drawer', () => callback()),
   onRequestOpenTemplatesDrawer: (callback) =>

@@ -10,6 +10,7 @@ const { splitModelArg, withModelArg } = require('./lib/args-model');
 const { renderAppendChecklist, collectAppendChecklist, renderAgentChecklist, collectAgentChecklist, renderExecChecklist, collectExecChecklist, renderBuiltinChecklist, collectBuiltinChecklist, renderInjectChecklist, collectInjectChecklist, renderToolChecklist, collectToolChecklist, renderSkillChecklist, collectSkillChecklist, setChecklistAll, wireBulkToggles, setPromptLibCache, setAgentLibCache, setSkillLibCache, setExecLibCache, setClaudeToolsCache, setDefaultToolDenyCache, getPromptLibCache, getSkillLibCache, getDefaultToolDenyCache } = require('./lib/checklists');
 const { autoEnabledFor, reconcilePartialSelection } = require('../scope-util');
 const { createIpcLog } = require('./ipc-log');
+const { createInboxDrawer } = require('./inbox-drawer');
 const { createTermSearch } = require('./term-search');
 const { initBanners } = require('./banners');
 const { initThemes } = require('./themes');
@@ -1944,6 +1945,11 @@ window.api.onSessionMention((name, mtype /* 'dm' */) => {
 // reassignable let) — as factory params. `appendIpcEntry` is the only handle
 // renderer.js keeps (for the synthetic deploy-failure line).
 const { appendIpcEntry } = createIpcLog({ sessions, getActiveSession: () => activeSession });
+
+// Operator inbox drawer + sidebar unread badge (inbox-drawer.js). Self-contained
+// — driven by the `notify` ipc broadcast and its own window.api queries, so it
+// takes no core state.
+createInboxDrawer();
 
 // ---------------------------------------------------------------------------
 // Peered Clodexes — self-contained subsystem (peers-ui.js). Owns the peer bar,

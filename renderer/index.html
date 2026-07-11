@@ -25,6 +25,12 @@
       <span class="diag-dot">▲</span>
       <span id="diag-text">Sessions can't start</span>
     </div>
+    <div id="sidebar-footer">
+      <button id="inbox-open" title="Operator inbox — notes agents raised for you" type="button">
+        <span class="inbox-label">Inbox</span>
+        <span class="inbox-count zero" id="inbox-count">0</span>
+      </button>
+    </div>
   </div>
 
   <!-- Prompts library drawer -->
@@ -161,6 +167,20 @@
         <button id="exec-cancel" class="secondary" type="button">Cancel</button>
         <button id="exec-save" type="button">Save</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Operator inbox drawer. Notes agents raised via [agent:notify-user] when
+       blocked on Bogdan's decision. Newest-first, read-on-click; no editor. -->
+  <div id="inbox-drawer" class="hidden">
+    <div id="inbox-header">
+      <span class="prompts-title">Inbox</span>
+      <button id="inbox-mark-all" title="Mark every note read" type="button">Mark all read</button>
+      <button id="inbox-close" title="Close" type="button">×</button>
+    </div>
+    <div id="inbox-list"></div>
+    <div id="inbox-empty" class="hint">
+      No notes yet. Agents raise one with <code>[agent:notify-user]</code> when they're blocked on a decision only you can make — it lands here and fires a notification.
     </div>
   </div>
 

@@ -44,7 +44,7 @@ function registerIpcHandlers(deps) {
     // `let persistence, templates, …` list) — value-injected: initStores runs
     // before this factory in whenReady and the stores are never reassigned.
     templates, workspaces, promptLibrary, agentDefaults,
-    agentLibrary, skillLibrary, execLibrary, uiSettings,
+    agentLibrary, skillLibrary, execLibrary, notifications, uiSettings,
     // read-only mutable singletons (get seams)
     getRemoteServer, getRemoteError, getPeerManager, getTunnelManager,
     getUpdateInfo, getReleasesCache,
@@ -236,6 +236,15 @@ function registerIpcHandlers(deps) {
   ipcMain.handle('exec:remove', (_e, name) => {
     return { ok: true, commands: execLibrary.remove(name) };
   });
+
+  // Operator inbox ([agent:notify-user]). Read/mark/remove over the notifications
+  // store; the main-side handler owns the writes on arrival. list() is chronolog-
+  // ical (the drawer reverses for newest-first); markRead is idempotent.
+  ipcMain.handle('notifications:list', () => notifications.list());
+  ipcMain.handle('notifications:markRead', (_e, id) => notifications.markRead(id));
+  ipcMain.handle('notifications:markAllRead', () => notifications.markAllRead());
+  ipcMain.handle('notifications:remove', (_e, id) => notifications.remove(id));
+  ipcMain.handle('notifications:unreadCount', () => notifications.unreadCount());
 
   ipcMain.handle('prompts:inject', (_e, name, body) => {
     const s = manager.sessions.get(name);
