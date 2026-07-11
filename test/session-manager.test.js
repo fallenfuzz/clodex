@@ -894,6 +894,18 @@ test('remind: multi-line reminder text is captured greedily (allow-set), stops a
   assert.strictEqual(both[0].body, 'reassess');
 });
 
+test('notify-user: multi-line note is captured greedily (allow-set), stops at next intent', () => {
+  const m = mkExtract();
+  // Free-text body spans lines (greedy like dm).
+  const r = m._extractIntents('[agent:notify-user] blocked on the schema\nneed a decision')[0];
+  assert.strictEqual(r.type, 'notify-user');
+  assert.strictEqual(r.body, 'blocked on the schema\nneed a decision');
+  // A following col-1 intent ends the note and fires as its own intent.
+  const both = m._extractIntents('[agent:notify-user] decide please\n[agent:who]');
+  assert.deepStrictEqual(both.map((x) => x.type), ['notify-user', 'who']);
+  assert.strictEqual(both[0].body, 'decide please');
+});
+
 // --- _handleRemindIntent — [agent:remind <spec>] text -----------------------
 // The intent seam over the scheduler: parse the spec head to split management
 // (list/cancel) from scheduling, and match exec's tone — SILENT on a clean

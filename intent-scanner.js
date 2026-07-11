@@ -1,7 +1,8 @@
 // Intent Scanner (port of wb-wrap/scanner.py). Turns one line of assistant
 // output into a structured `[agent:…]` intent (or null). Pure string work — no
 // Electron, no main.js state — so the grammar (dm/who/name/context/memory/
-// spawn/file/resend + the `\[agent:` escape) is unit-testable in isolation.
+// spawn/file/resend/exec/remind/notify-user + the `\[agent:` escape) is
+// unit-testable in isolation.
 // Seam: plain named functions on raw strings; the caller owns column-1
 // anchoring by feeding it a single line at a time.
 // Gotcha: cleanLine strips a leading run of DECORATOR glyphs (bullets, box
@@ -103,6 +104,15 @@ function parseIntent(rawLine) {
   // remind-schedule.parseRemindSpec, invoked by the handler, not here.
   const remindMatch = cleaned.match(/^\[agent:remind\s+([^\]]+)\]\s*(.*)/s);
   if (remindMatch) return { type: 'remind', spec: remindMatch[1].trim(), body: remindMatch[2] };
+
+  // `notify-user` = raise a note into the operator's persistent inbox to get
+  // Bogdan's attention when the agent is blocked on his decision. No
+  // sub-command, no target — the whole thing is a free-text body, captured to
+  // the next col-1 intent like dm (multi-line — notify-user MUST join
+  // _extractIntents' allow-set or the body truncates at the first newline). The
+  // empty-body bounce + 16KB cap live in the handler, not here.
+  const notifyMatch = cleaned.match(/^\[agent:notify-user\]\s*(.*)/s);
+  if (notifyMatch) return { type: 'notify-user', body: notifyMatch[1] };
 
   const spawnMatch = cleaned.match(/^\[agent:spawn\s+(.+)\]\s*$/);
   if (spawnMatch) {

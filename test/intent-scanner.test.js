@@ -166,6 +166,33 @@ test('shadowIntentKey: remind keys on spec + body', () => {
   assert.strictEqual(shadowIntentKey('t2', a), shadowIntentKey('t2', a2));
 });
 
+test('parseIntent: notify-user captures a free-text body (no sub/target)', () => {
+  assert.deepStrictEqual(parseIntent('[agent:notify-user] blocked on which API to use'),
+    { type: 'notify-user', body: 'blocked on which API to use' });
+  // Empty body is legal at the scanner (the handler bounces it, not here).
+  assert.deepStrictEqual(parseIntent('[agent:notify-user]'),
+    { type: 'notify-user', body: '' });
+  assert.deepStrictEqual(parseIntent('[agent:notify-user] '),
+    { type: 'notify-user', body: '' });
+});
+
+test('parseIntent: notify-user body spans multiple lines and keeps brackets', () => {
+  // The s flag keeps multi-line text; a ] in the body stays put (no spec to
+  // terminate). The manager also captures to the next col-1 intent.
+  const r = parseIntent('[agent:notify-user] need a call on [option A]\nvs option B');
+  assert.strictEqual(r.type, 'notify-user');
+  assert.strictEqual(r.body, 'need a call on [option A]\nvs option B');
+});
+
+test('shadowIntentKey: notify-user keys on body (no head discriminator)', () => {
+  const a = parseIntent('[agent:notify-user] decide on the schema');
+  assert.strictEqual(shadowIntentKey('t3', a), 't3|notify-user||decide on the schema');
+  const b = parseIntent('[agent:notify-user] decide on the schema');
+  assert.strictEqual(shadowIntentKey('t3', a), shadowIntentKey('t3', b));
+  const c = parseIntent('[agent:notify-user] something else');
+  assert.notStrictEqual(shadowIntentKey('t3', a), shadowIntentKey('t3', c));
+});
+
 test('parseIntent: non-intent / blank lines return null', () => {
   assert.strictEqual(parseIntent(''), null);
   assert.strictEqual(parseIntent('just some prose'), null);
