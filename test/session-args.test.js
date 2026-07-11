@@ -54,6 +54,32 @@ test('resolver: no prev entry → undefined fields default to empty/null', () =>
   assert.equal(out.systemPrompt, null);
   assert.equal(out.systemPromptFile, null);
   assert.deepEqual(out.appendPromptFiles, []);
+  assert.equal(out.intents, null, 'absent intents → all-enabled (null)');
+});
+
+// Intents gate — the dialog now OWNS it, so the patch value wins over the persisted
+// gate (the U9 lesson applied live). Shapes: null = all-enabled/cleared, an array
+// (incl [] = everything gated) is a real value, undefined = untouched (preserve).
+test('resolver: intents null in patch clears the gate (patch wins over persisted subset)', () => {
+  const out = resolveSessionArgsPatch({ intents: null }, { intents: ['dm'] });
+  assert.equal(out.intents, null);
+});
+
+test('resolver: intents subset in patch applies (patch wins over persisted)', () => {
+  const out = resolveSessionArgsPatch({ intents: ['dm', 'exec'] }, { intents: ['spawn'] });
+  assert.deepEqual(out.intents, ['dm', 'exec']);
+});
+
+test('resolver: intents [] in patch applies ([] = everything gated, a real value)', () => {
+  const out = resolveSessionArgsPatch({ intents: [] }, { intents: ['dm'] });
+  assert.deepEqual(out.intents, [], 'empty array is NOT treated as absent — everything gated');
+});
+
+test('resolver: intents undefined in patch preserves the persisted gate', () => {
+  assert.deepEqual(resolveSessionArgsPatch({}, { intents: ['dm'] }).intents, ['dm'],
+    'omitted intents keep the persisted subset');
+  assert.equal(resolveSessionArgsPatch({}, { intents: null }).intents, null,
+    'omitted intents keep a null (all-enabled) gate');
 });
 
 // ---- 2. remote endpoints (cap gating + 501) --------------------------------

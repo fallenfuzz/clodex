@@ -16,7 +16,7 @@
 function resolveSessionArgsPatch(patch = {}, prev = null) {
   const {
     agents, denyBuiltins, disabledTools, disabledSkills, injectSkills,
-    systemPrompt, systemPromptFile, appendPromptFiles,
+    systemPrompt, systemPromptFile, appendPromptFiles, intents,
   } = patch;
   return {
     agents: agents !== undefined ? (agents || []) : (prev?.agents || []),
@@ -30,6 +30,14 @@ function resolveSessionArgsPatch(patch = {}, prev = null) {
     systemPrompt: systemPrompt !== undefined ? (systemPrompt || null) : (prev?.systemPrompt || null),
     systemPromptFile: systemPromptFile !== undefined ? (systemPromptFile || null) : (prev?.systemPromptFile || null),
     appendPromptFiles: appendPromptFiles !== undefined ? (appendPromptFiles || []) : (prev?.appendPromptFiles || []),
+    // Intents gate allowlist. Unlike the fields above (empty = a real clear), the
+    // gate's shapes are: an array (incl [] = everything gated, a real value) or null
+    // (all-enabled — the absent/default state). The Edit dialog now OWNS it and sends
+    // an explicit value (null when all boxes checked, else the subset); undefined =
+    // untouched keeps the persisted gate for any patch that omits intents.
+    intents: intents !== undefined
+      ? (Array.isArray(intents) ? intents.map(String) : null)
+      : (Array.isArray(prev?.intents) ? prev.intents : null),
   };
 }
 

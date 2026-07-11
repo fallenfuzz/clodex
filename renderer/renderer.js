@@ -2827,6 +2827,8 @@ const argsToolsRow = document.getElementById('args-tools-row');
 const argsToolsList = document.getElementById('args-tools-list');
 const argsToolsSection = document.getElementById('args-tools-section');
 const argsOtherSection = document.getElementById('args-other-section');
+const argsIntentsList = document.getElementById('args-intents-list');
+const argsIntentsSection = document.getElementById('args-intents-section');
 wireBulkToggles(argsToolsRow, argsToolsList);
 let argsEditingName = null;
 // Non-null when the open dialog targets a PEER session: a { fetch, save,
@@ -2912,7 +2914,13 @@ async function openArgsDialog(name, argsSource = null) {
   argsToolsSection.style.display = isClaude ? '' : 'none';
   setClaudeToolsCache(settings?.claudeTools || []);
   renderToolChecklist(argsToolsList, new Set(res.disabledTools || []), res.effectiveTools || {});
-  for (const sec of [argsAppendSection, argsToolsSection, argsOtherSection]) sec.open = false;
+  // Intents gate — Claude-only, mirroring the New-Session/template checklist. Prefill
+  // from the seat's persisted allowlist: res.intents is the raw value (null = all
+  // enabled → every box checked; array = membership), read straight into the shared
+  // widget. Editing here OWNS intents (the save patch carries the result).
+  argsIntentsSection.style.display = isClaude ? '' : 'none';
+  renderIntentChecklist(argsIntentsList, res.intents);
+  for (const sec of [argsAppendSection, argsToolsSection, argsOtherSection, argsIntentsSection]) sec.open = false;
   argsRestart.checked = false;
   argsOverlay.classList.remove('hidden');
   setTimeout(() => argsInput.focus(), 50);
@@ -2941,6 +2949,14 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
   const denyBuiltins = argsAgentsRow.style.display === 'none'
     ? [] : collectBuiltinChecklist(argsBuiltinsList);
   const disabledTools = argsToolsRow.style.display === 'none' ? [] : collectToolChecklist(argsToolsList);
+  // Intents: this dialog OWNS the gate now (Claude-only section). collect returns
+  // null when every box is checked (clear the gate / stay all-enabled) or the
+  // enabled subset (incl [] = everything gated, a real value). Non-Claude sessions
+  // carry no gate, so null there matches the always-null create-time default — same
+  // clear-on-hidden shape as the sibling tools/agents fields above. Both are explicit
+  // values that OVERWRITE (the U9 lesson live: an owned key all-checked clears, it
+  // doesn't preserve); undefined-preserve is reserved for a patch that omits intents.
+  const intents = argsIntentsSection.style.display === 'none' ? null : collectIntentChecklist(argsIntentsList);
   const name = argsEditingName;
   // Capture the peer source before closeArgsDialog() clears it (the save runs
   // after the dialog closes).
@@ -2957,9 +2973,9 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
   const res = source
     ? await source.save({
         extraArgs: parsed, restart, proxy, systemPrompt: undefined, agents, denyBuiltins,
-        disabledTools, disabledSkills: undefined, injectSkills: undefined, systemPromptFile, appendPromptFiles,
+        disabledTools, disabledSkills: undefined, injectSkills: undefined, systemPromptFile, appendPromptFiles, intents,
       })
-    : await window.api.setSessionArgs(name, parsed, restart, proxy, undefined, agents, denyBuiltins, disabledTools, undefined, undefined, systemPromptFile, appendPromptFiles);
+    : await window.api.setSessionArgs(name, parsed, restart, proxy, undefined, agents, denyBuiltins, disabledTools, undefined, undefined, systemPromptFile, appendPromptFiles, intents);
   if (!res || !res.ok) {
     alert(`Failed: ${res && res.error ? res.error : 'unknown error'}`);
     return;

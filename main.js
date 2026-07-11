@@ -1366,6 +1366,7 @@ async function applySessionArgs(name, patch = {}, wsId = DEFAULT_WORKSPACE_ID) {
     agents: nextAgents, denyBuiltins: nextDeny, disabledTools: nextTools,
     disabledSkills: nextSkills, injectSkills: nextInject,
     systemPrompt: nextInline, systemPromptFile: nextSysFile, appendPromptFiles: nextAppend,
+    intents: nextIntents,
   } = resolveSessionArgsPatch(patch, beforeKill);
   persistence.setExtraArgs(name, extraArgs);
   persistence.setProxy(name, proxy ?? null);
@@ -1375,6 +1376,10 @@ async function applySessionArgs(name, patch = {}, wsId = DEFAULT_WORKSPACE_ID) {
   persistence.setDisabledTools(name, nextTools);
   persistence.setDisabledSkills(name, nextSkills);
   persistence.setInjectSkills(name, nextInject);
+  // The dialog OWNS the intents gate — persist the resolved value so a no-restart
+  // save still takes effect on next spawn. setIntents drops the key on null (the
+  // all-enabled default) and stores the array otherwise (incl [] = everything gated).
+  persistence.setIntents(name, nextIntents);
   if (!restart) return { ok: true, restarted: false };
   if (!beforeKill) return { ok: false, error: 'Session not found in persistence' };
   try {
@@ -1382,11 +1387,12 @@ async function applySessionArgs(name, patch = {}, wsId = DEFAULT_WORKSPACE_ID) {
       await manager.kill(name);
       if (!await waitForSessionExit(name)) throw new Error('old process did not exit in time');
     }
-    // Neither exec grants nor intents are editable in the args-edit dialog (no
-    // checklist there), so they're not in the patch — thread the persisted values
-    // through so an args edit doesn't silently drop a seat's exec grant or reset a
-    // gated seat to all-enabled.
-    await manager.create(name, beforeKill.type, beforeKill.cwd, extraArgs, beforeKill.sessionId || null, wsId, nextInline, false, proxy ?? null, nextAgents, nextDeny, nextTools, nextSkills, nextInject, nextSysFile, nextAppend, Array.isArray(beforeKill.execCommands) ? beforeKill.execCommands : [], Array.isArray(beforeKill.intents) ? beforeKill.intents : null);
+    // Exec grants aren't editable in the args-edit dialog (no checklist there —
+    // grants stay template/create-time), so thread the persisted value through
+    // unchanged. Intents ARE owned by this dialog now: nextIntents came from the
+    // patch (null = all-enabled/cleared, or the enabled subset incl [] = everything
+    // gated), so thread it — not beforeKill's — so the edit's gate wins.
+    await manager.create(name, beforeKill.type, beforeKill.cwd, extraArgs, beforeKill.sessionId || null, wsId, nextInline, false, proxy ?? null, nextAgents, nextDeny, nextTools, nextSkills, nextInject, nextSysFile, nextAppend, Array.isArray(beforeKill.execCommands) ? beforeKill.execCommands : [], nextIntents);
     // kill() dropped the entry's stripLevel; re-assert the session's own level
     // (see session:restart) so editing args doesn't reset stripping.
     const argsLvl = stripLevelOf(beforeKill);
@@ -1397,7 +1403,10 @@ async function applySessionArgs(name, patch = {}, wsId = DEFAULT_WORKSPACE_ID) {
     // kill() dropped the persistence entry and create() failed before
     // re-adding it. Put it back (with the edited settings) so the session
     // survives as a restorable entry instead of vanishing.
-    persistence.upsert({ ...beforeKill, extraArgs, proxy: proxy ?? null, systemPrompt: nextInline, systemPromptFile: nextSysFile, appendPromptFiles: nextAppend, agents: nextAgents, denyBuiltins: nextDeny, disabledTools: nextTools, disabledSkills: nextSkills, injectSkills: nextInject });
+    // Carry the edited intents gate too (array = gate, undefined = all-enabled;
+    // JSON.stringify drops the undefined key) so recovery reflects the edit, not the
+    // stale beforeKill gate the spread would otherwise restore.
+    persistence.upsert({ ...beforeKill, extraArgs, proxy: proxy ?? null, systemPrompt: nextInline, systemPromptFile: nextSysFile, appendPromptFiles: nextAppend, agents: nextAgents, denyBuiltins: nextDeny, disabledTools: nextTools, disabledSkills: nextSkills, injectSkills: nextInject, intents: Array.isArray(nextIntents) ? nextIntents : undefined });
     return { ok: false, error: `${err.message} — session kept; it will respawn on next workspace open.` };
   }
 }

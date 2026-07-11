@@ -564,10 +564,10 @@ function registerIpcHandlers(deps) {
   // shared with the peer session-args POST endpoint. This handler maps the
   // positional IPC args to the patch object and supplies the sender's workspace
   // as the respawn target (the peer path passes the entry's own workspaceId).
-  ipcMain.handle('session:setArgs', async (e, name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills, systemPromptFile, appendPromptFiles) =>
+  ipcMain.handle('session:setArgs', async (e, name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills, systemPromptFile, appendPromptFiles, intents) =>
     applySessionArgs(name, {
       extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins,
-      disabledTools, disabledSkills, injectSkills, systemPromptFile, appendPromptFiles,
+      disabledTools, disabledSkills, injectSkills, systemPromptFile, appendPromptFiles, intents,
     }, workspaceOfSender(e)));
 
   // Restart in place: kill the PTY and respawn with the persisted settings,
