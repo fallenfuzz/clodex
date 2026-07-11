@@ -66,8 +66,11 @@ Conventions the refactor established:
   stores (sessions/workspaces/templates/prompts/agent+skill libraries/
   defaults/ui-settings). Paths derive inside the factory, post-whenReady by
   construction.
-- **ipc-prompt.js** — `IPC_PROMPT`, the sole source of truth for the
-  agent-facing IPC protocol text.
+- **ipc-prompt.js** — `IPC_PROMPT`, the canonical all-enabled literal that is
+  the sole source of truth for the agent-facing IPC protocol text, plus
+  `buildIpcPrompt(intentsList)` which assembles the per-seat variant (gating
+  grammar lines + the MEMORY section to a session's allowed intents via
+  intent-catalog's `intentEnabled`; double byte-pinned back to the literal).
 - **agent-transport.js** — per-agent registry (`run/<name>/agent.json`) +
   Unix-socket (`run/<name>/agent.sock`) transport; discovery iterates
   `run/*/agent.json`.

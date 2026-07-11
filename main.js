@@ -513,8 +513,9 @@ const { isAlive, registry, Transport } = createAgentTransport({ REGISTRY_DIR, MA
 // ---------------------------------------------------------------------------
 
 // IPC protocol prompt + default compact-continuation live in ipc-prompt.js
-// (moved out in M3 — the sole protocol source of truth). Pure strings.
-const { IPC_PROMPT, DEFAULT_COMPACT_CONTINUATION } = require('./ipc-prompt');
+// (moved out in M3 — the sole protocol source of truth). buildIpcPrompt assembles
+// the per-seat variant that gates a session's grammar lines to its allowed intents.
+const { buildIpcPrompt, DEFAULT_COMPACT_CONTINUATION } = require('./ipc-prompt');
 
 // Re-render statusline scripts for all running Claude sessions. Called when
 // the user updates preferences — Claude re-reads the script on each status
@@ -981,7 +982,6 @@ const SessionManager = createSessionManager({
     INJECT_HOLD_TIMEOUT,
     INJECT_QUIET_MAXWAIT,
     INJECT_QUIET_MS,
-    IPC_PROMPT,
     InjectQueue,
     JsonlWatcher,
     LONG_TEXT_DELAY,
@@ -999,6 +999,7 @@ const SessionManager = createSessionManager({
     WIRE_INTENTS_LIVE,
     WIRE_SHADOW,
     buildAgentsArg,
+    buildIpcPrompt,
     childProcess: require('child_process'),
     claimParkedById,
     classifyNotification,

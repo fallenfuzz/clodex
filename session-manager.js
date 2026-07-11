@@ -53,7 +53,6 @@ function createSessionManager(deps) {
     INJECT_HOLD_TIMEOUT,
     INJECT_QUIET_MAXWAIT,
     INJECT_QUIET_MS,
-    IPC_PROMPT,
     InjectQueue,
     JsonlWatcher,
     LONG_TEXT_DELAY,
@@ -71,6 +70,7 @@ function createSessionManager(deps) {
     WIRE_INTENTS_LIVE,
     WIRE_SHADOW,
     buildAgentsArg,
+    buildIpcPrompt,
     childProcess,
     claimParkedById,
     classifyNotification,
@@ -593,7 +593,7 @@ function createSessionManager(deps) {
           // ordered library appends + any legacy inline body form the append blob.
           const sysFile = resolveSystemPromptFile(systemPromptFile);
           const appendBodies = readAppendBodies(appendPromptFiles);
-          const { cleaned, append } = mergeClaudeSystemPrompt(extraArgs, IPC_PROMPT, {
+          const { cleaned, append } = mergeClaudeSystemPrompt(extraArgs, buildIpcPrompt(intents), {
             appendBodies, inlineBody: systemPromptBody || null, hasSystemFile: !!sysFile,
           });
           args = cleaned;
@@ -711,7 +711,7 @@ function createSessionManager(deps) {
           // appends + legacy inline body into it alongside the IPC protocol.
           const codexSystemBody = systemPromptFile ? getPromptLibrary().raw('system', systemPromptFile) : null;
           const codexAppendBodies = readAppendBodies(appendPromptFiles);
-          const { cleaned, merged } = mergeCodexInstructions(extraArgs, IPC_PROMPT, {
+          const { cleaned, merged } = mergeCodexInstructions(extraArgs, buildIpcPrompt(intents), {
             systemBody: codexSystemBody, appendBodies: codexAppendBodies, inlineBody: systemPromptBody || null,
           });
           // Build top-level flags first, then the optional `resume <uuid>`
@@ -2273,10 +2273,11 @@ function createSessionManager(deps) {
     // inherited. With `template:Y`, the template supplies type + the full
     // config subset (proxy / agents / tool+skill gating / strip / autocompact)
     // — the automation Bogdan asked for: spawn-matching-a-template by name.
-    // The IPC protocol does NOT need an append ref — IPC_PROMPT is prepended
-    // unconditionally for every agent session (see mergeClaudeSystemPrompt /
-    // mergeCodexSystemPrompt), so a child spawned with appendPromptFiles=[]
-    // still speaks dm/who/context (templates carry no prompt refs — F6). Replies
+    // The IPC protocol does NOT need an append ref — the IPC prompt (buildIpcPrompt,
+    // per-seat but all-enabled by default) is prepended unconditionally for every
+    // agent session (see mergeClaudeSystemPrompt / mergeCodexSystemPrompt), so a
+    // child spawned with appendPromptFiles=[] still speaks dm/who/context (templates
+    // carry no prompt refs — F6). Replies
     // (ok + every error) inject straight back into the spawner's input.
     _handleSpawnIntent(spawner, intent) {
       const reply = (msg) => this._injectText(spawner, `[agent:spawn] ${msg}`, { parkable: true });

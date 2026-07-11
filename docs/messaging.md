@@ -193,13 +193,18 @@ ledger-gated).
 
 ## 6. Protocol text (ipc-prompt.js)
 
-`IPC_PROMPT` is the sole source of truth for the agent-facing protocol and
-is deliberately a single static string — no per-session interpolation, so
-every agent shares a byte-identical provider prefix cache. It reaches the
-CLI via `--append-system-prompt-file` (Claude) / `model_instructions_file`
-(Codex); the agent's NAME arrives separately via SessionStart
-`additionalContext`. SETTLED: the transcript symlink is the hook's job; the
-prompt rides the append file.
+`IPC_PROMPT` is the sole source of truth for the agent-facing protocol — the
+canonical, all-enabled literal. `buildIpcPrompt(intentsList)` assembles the
+per-seat variant from its pieces (PREAMBLE + prompt-ordered `GRAMMAR_LINES` +
+gated MEMORY + TRAILER), dropping the grammar lines (and the MEMORY section) for
+intents a seat may not emit; which intents those are comes from intent-catalog's
+`intentEnabled`. Both create() arms call `buildIpcPrompt(intents)` off the
+session's persisted allowlist. Double byte-pin (`buildIpcPrompt(null)` AND
+`buildIpcPrompt(<all gateable>)` both `=== IPC_PROMPT`) keeps the pieces from
+drifting from the literal. It reaches the CLI via `--append-system-prompt-file`
+(Claude) / `model_instructions_file` (Codex); the agent's NAME arrives separately
+via SessionStart `additionalContext`. SETTLED: the transcript symlink is the
+hook's job; the prompt rides the append file.
 
 ## 7. Hook drains (cli-hooks.js, per Claude session)
 
@@ -230,5 +235,9 @@ names (clodex-paths grammar); the parked-DM DATA stays in the shared
 - Parked mail survives everything except explicit user-kill.
 - `_sendToSession` before `_cleanup` in the exit path (window resolution
   depends on the session still being in the map).
-- IPC_PROMPT stays static — per-session interpolation would fork the prefix
-  cache for every agent.
+- IPC_PROMPT prefix-cache posture (REVISED — was "stays static"): an UNGATED
+  seat's blob is byte-identical across agents, so they share the provider prefix
+  cache. A GATED seat's `buildIpcPrompt(intents)` deliberately forks its own
+  prefix — the accepted cost of documenting only the intents it may emit. The
+  gate must be a session-config divergence, never per-turn interpolation (that
+  would fork every agent's cache and buy nothing).

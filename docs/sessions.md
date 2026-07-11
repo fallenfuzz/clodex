@@ -23,7 +23,8 @@ arg** (which is why restart paths must re-assert it; kill drops the entry).
 `create()` builds argv per type:
 
 - **claude** — `mergeClaudeSystemPrompt` (argv-merge.js) merges the append
-  channel in order: `IPC_PROMPT` → library append bodies → legacy inline →
+  channel in order: the per-seat IPC prompt (`buildIpcPrompt(intents)`) →
+  library append bodies → legacy inline →
   any user-passed append flags; the blob is written to
   `{name}-append-prompt.md` and rides `--append-system-prompt-file`
   (SETTLED: the IPC protocol always travels this channel). A library system
@@ -37,7 +38,8 @@ arg** (which is why restart paths must re-assert it; kill drops the entry).
   library items assigned to this session (`scope-util.unionEnabled`) —
   assignment is intent, computed each spawn and NEVER written back to the
   persisted record.
-- **codex** — `mergeCodexInstructions` merges system + IPC_PROMPT + appends
+- **codex** — `mergeCodexInstructions` merges system + the per-seat IPC prompt
+  (`buildIpcPrompt(intents)`) + appends
   into `{name}-instructions.md` (`model_instructions_file`); shared
   `codex-session-hook.sh` routed by `WB_WRAP_NAME`; resume/fork is a
   *subcommand* placed after top-level flags (clap). Proxy rides
