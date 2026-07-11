@@ -407,6 +407,10 @@
           <div id="input-exec-list" class="agent-checklist"></div>
           <span class="hint-text">Grant this seat the registered commands it may run via <code>[agent:exec &lt;name&gt;]</code>. Checked = granted. Commands are authored in File ▸ Exec Commands…; a grant only lets the seat run a fixed command with a schema-validated payload — it never lets the agent register or change one.</span>
         </label>
+        <label id="intents-row">Intents
+          <div id="input-intent-list" class="agent-checklist"></div>
+          <span class="hint-text">Which <code>[agent:…]</code> intents this seat may <em>send</em>. Checked = allowed (all checked by default). Unchecking one makes that verb bounce when the seat emits it — send-side only, so a seat with <code>dm</code> off still <em>receives</em> DMs. <code>name</code> can't be gated. Applies immediately (no restart).</span>
+        </label>
         <label id="strip-row">Wire stripping
           <select id="input-strip-level">
             <option value="0">Off</option>

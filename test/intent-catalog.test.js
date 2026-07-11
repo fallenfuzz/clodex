@@ -3,7 +3,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const { GATEABLE_INTENTS, GATEABLE_TYPES, intentEnabled } = require('../intent-catalog');
+const { GATEABLE_INTENTS, GATEABLE_TYPES, intentEnabled, intentsAllowlistFromChecked } = require('../intent-catalog');
+
+const ALL_TYPES = GATEABLE_INTENTS.map((i) => i.type);
 
 test('catalog: the 10 gateable types in grammar order, name excluded', () => {
   assert.deepStrictEqual(
@@ -52,4 +54,38 @@ test('intentEnabled: name + non-gateable verbs are always enabled, list or not',
   // even when a restrictive list is present — ungateable by omission.
   assert.strictEqual(intentEnabled('escape', ['dm']), true);
   assert.strictEqual(intentEnabled('peers', []), true);
+});
+
+test('intentsAllowlistFromChecked: every gateable box checked → null (omit the field)', () => {
+  // The all-enabled state persists as ABSENCE, never a frozen array — so a future
+  // intent lights up in this seat by default. Order of the input doesn't matter.
+  assert.strictEqual(intentsAllowlistFromChecked(ALL_TYPES), null);
+  assert.strictEqual(intentsAllowlistFromChecked(ALL_TYPES.slice().reverse()), null);
+});
+
+test('intentsAllowlistFromChecked: a subset → the enabled list in CATALOG order', () => {
+  // A trader seat, checked out of order in the DOM — normalized to catalog order.
+  assert.deepStrictEqual(
+    intentsAllowlistFromChecked(['remind', 'exec', 'dm']),
+    ['dm', 'exec', 'remind'],
+  );
+});
+
+test('intentsAllowlistFromChecked: nothing checked → [] (a real "everything gated" value)', () => {
+  const r = intentsAllowlistFromChecked([]);
+  assert.ok(Array.isArray(r));
+  assert.strictEqual(r.length, 0);
+});
+
+test('intentsAllowlistFromChecked: stray/non-gateable values are dropped, not counted', () => {
+  // A stray `name` (never a checklist row) or an unknown token can't inflate the
+  // count to "all" nor leak into the stored list — only catalog types survive.
+  assert.deepStrictEqual(
+    intentsAllowlistFromChecked([...ALL_TYPES, 'name', 'bogus']),
+    null, // the 10 real ones are all present → still all-enabled
+  );
+  assert.deepStrictEqual(
+    intentsAllowlistFromChecked(['dm', 'name', 'bogus']),
+    ['dm'], // strays dropped
+  );
 });

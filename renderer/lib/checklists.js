@@ -18,6 +18,11 @@
 // so no unit tests per the R1 rule — move-only fidelity is the guarantee.
 
 const { esc } = require('./format');
+// Static gateable-intent catalog + the pure collect decision. Root leaf, like
+// scope-util/skills-util in checklist-popovers.js — the rows are a compile-time
+// constant (no IPC/cache, unlike the exec registry), so this checklist needs no
+// setter/refresh: it renders straight off the catalog.
+const { GATEABLE_INTENTS, intentEnabled, intentsAllowlistFromChecked } = require('../../intent-catalog');
 
 // ---- Owned cache state (the sanctioned seam) ----
 // Prompt library: `system` prompts fill a <select> (one replaces the CLI
@@ -131,6 +136,39 @@ function renderExecChecklist(container, enabledSet) {
 }
 function collectExecChecklist(container) {
   return Array.from(container.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+}
+
+// Per-session intent gate — which `[agent:…]` verbs this seat may EMIT (send-side;
+// a gated seat still RECEIVES). Polarity is INVERTED from exec's opt-in: checked =
+// enabled, and the default is ALL checked, because `intents` is an opt-OUT field
+// (absent = everything on, the living all-enabled default). So the row's checked
+// state comes from `intentEnabled(type, intentsList)` — the exact catalog semantics
+// the fire-time gate reads — where `intentsList` is the raw persisted value
+// (array, or null/undefined = all-enabled), NOT a Set. `name` is never a row
+// (ungateable identity). Rendered off the static catalog; no cache/refresh.
+function renderIntentChecklist(container, intentsList) {
+  container.innerHTML = '';
+  for (const it of GATEABLE_INTENTS) {
+    const row = document.createElement('label');
+    row.className = 'agent-check';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = it.type;
+    cb.checked = intentEnabled(it.type, intentsList);
+    const txt = document.createElement('span');
+    txt.innerHTML = `<strong>${esc(it.label)}</strong>`;
+    row.appendChild(cb);
+    row.appendChild(txt);
+    container.appendChild(row);
+  }
+}
+// Thin DOM gatherer → the pure decision lives in intent-catalog: all boxes checked
+// yields NULL (omit the field so the seat stays the all-enabled default), else the
+// enabled subset in catalog order. `[]` (nothing checked) is a real "everything
+// gated" value.
+function collectIntentChecklist(container) {
+  const checked = Array.from(container.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+  return intentsAllowlistFromChecked(checked);
 }
 
 // The built-in subagents the CLI injects into the roster (each costs its
@@ -303,6 +341,7 @@ module.exports = {
   renderAppendChecklist, collectAppendChecklist,
   renderAgentChecklist, collectAgentChecklist,
   renderExecChecklist, collectExecChecklist,
+  renderIntentChecklist, collectIntentChecklist,
   renderBuiltinChecklist, collectBuiltinChecklist,
   renderInjectChecklist, collectInjectChecklist,
   renderToolChecklist, collectToolChecklist,

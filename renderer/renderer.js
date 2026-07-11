@@ -7,7 +7,7 @@ const { STRIP_LEVELS, SEV_LINE, CTX_CAT_LABELS, COST_SPINE, COST_CONTENT, BUST_F
 const { esc, shortPath, fmtTokens, fmtCountdown, fmtAgo, fmtUsd, fmtDur, shortTs, fmtBustTokens, fmtBytes } = require('./lib/format');
 const { renderDiffHtml, costStackBlock, svgCostChart, bustRow } = require('./lib/render-html');
 const { splitModelArg, withModelArg } = require('./lib/args-model');
-const { renderAppendChecklist, collectAppendChecklist, renderAgentChecklist, collectAgentChecklist, renderExecChecklist, collectExecChecklist, renderBuiltinChecklist, collectBuiltinChecklist, renderInjectChecklist, collectInjectChecklist, renderToolChecklist, collectToolChecklist, renderSkillChecklist, collectSkillChecklist, setChecklistAll, wireBulkToggles, setPromptLibCache, setAgentLibCache, setSkillLibCache, setExecLibCache, setClaudeToolsCache, setDefaultToolDenyCache, getPromptLibCache, getSkillLibCache, getDefaultToolDenyCache } = require('./lib/checklists');
+const { renderAppendChecklist, collectAppendChecklist, renderAgentChecklist, collectAgentChecklist, renderExecChecklist, collectExecChecklist, renderIntentChecklist, collectIntentChecklist, renderBuiltinChecklist, collectBuiltinChecklist, renderInjectChecklist, collectInjectChecklist, renderToolChecklist, collectToolChecklist, renderSkillChecklist, collectSkillChecklist, setChecklistAll, wireBulkToggles, setPromptLibCache, setAgentLibCache, setSkillLibCache, setExecLibCache, setClaudeToolsCache, setDefaultToolDenyCache, getPromptLibCache, getSkillLibCache, getDefaultToolDenyCache } = require('./lib/checklists');
 const { autoEnabledFor, reconcilePartialSelection } = require('../scope-util');
 const { createIpcLog } = require('./ipc-log');
 const { createInboxDrawer } = require('./inbox-drawer');
@@ -709,7 +709,7 @@ function applyTypeDefaults({ skipAsyncRefresh = false } = {}) {
   for (const sec of [toolsSection, skillsSection, otherSection]) {
     if (sec) sec.style.display = claudeOnly ? '' : 'none';
   }
-  if (claudeOnly && !skipAsyncRefresh) { refreshNewSessionSkills(); refreshNewSessionInjectSkills(); refreshNewSessionExecCommands(); refreshNewSessionTools(); }
+  if (claudeOnly && !skipAsyncRefresh) { refreshNewSessionSkills(); refreshNewSessionInjectSkills(); refreshNewSessionExecCommands(); refreshNewSessionIntents(); refreshNewSessionTools(); }
   const agentType = type === 'claude' || type === 'codex';
   // Resume/fork is runtime-only — hidden while authoring a template.
   resumeRow.style.display = (agentType && !authoring) ? '' : 'none';
@@ -775,6 +775,9 @@ const inputBuiltinsList = document.getElementById('input-builtins-list');
 // seat may run. Shares the new-session/edit dialogs; the registry lives in the
 // Exec Commands drawer.
 const inputExecList = document.getElementById('input-exec-list');
+// Per-session intent gate checklist (Claude only) — which `[agent:…]` verbs this
+// seat may EMIT. Lives beside exec in the New/template dialog's Other section.
+const inputIntentList = document.getElementById('input-intent-list');
 
 // --- Per-session tool gating (Claude only). The catalog is a curated static
 // list supplied by main via getSettings().claudeTools. Checkboxes default to
@@ -812,6 +815,15 @@ async function refreshNewSessionExecCommands(enabledSet = new Set()) {
   if (inputType.value !== 'claude') return;
   setExecLibCache((await window.api.listExecCommands()) || []);
   renderExecChecklist(inputExecList, enabledSet);
+}
+
+// Intent-gate checklist for the currently-entered config (Claude only). Static
+// catalog — no cache/IPC — so this is synchronous, unlike the exec refresh. The
+// arg is the raw persisted `intents` value (array, or undefined = the all-enabled
+// default → every box checked); renderIntentChecklist reads it via intentEnabled.
+function refreshNewSessionIntents(intentsList) {
+  if (inputType.value !== 'claude') return;
+  renderIntentChecklist(inputIntentList, intentsList);
 }
 
 // Populate the new-session Skills checklist for the currently-entered cwd. The
@@ -866,6 +878,7 @@ async function openDialog() {
   setAgentLibCache(agentLib || []);
   renderAgentChecklist(inputAgentsList, new Set());
   refreshNewSessionExecCommands();
+  refreshNewSessionIntents();
   renderBuiltinChecklist(inputBuiltinsList, new Set());
   setClaudeToolsCache(settings?.claudeTools || []);
   setDefaultToolDenyCache(settings?.defaultToolDeny || []);
@@ -914,6 +927,7 @@ inputTemplate.addEventListener('change', async () => {
   if (t.type === 'claude') {
     renderAgentChecklist(inputAgentsList, new Set(t.agents || []));
     await refreshNewSessionExecCommands(new Set(t.execCommands || []));
+    refreshNewSessionIntents(t.intents);
     renderBuiltinChecklist(inputBuiltinsList, new Set(t.denyBuiltins || []));
     await refreshNewSessionTools(new Set(t.disabledTools || []));
     await refreshNewSessionSkills(new Set(t.disabledSkills || []));
@@ -980,6 +994,11 @@ function expandPath(p) {
 function collectFormConfig() {
   const type = inputType.value;
   const agentType = type === 'claude' || type === 'codex';
+  // Intent allowlist: null when every box is checked (the all-enabled default) —
+  // spread conditionally so an all-enabled config carries NO `intents` key, exactly
+  // like exportFromSession's opt-out omission (never freeze `[]` = "everything
+  // gated" onto a seat that meant "all on"). Present only when ≥1 intent is off.
+  const intents = type === 'claude' ? collectIntentChecklist(inputIntentList) : null;
   return {
     type,
     cwd: expandPath(inputCwd.value.trim()) || homeDir,
@@ -987,6 +1006,7 @@ function collectFormConfig() {
     proxy: agentType ? proxyValueFromControls(inputProxyMode, inputProxyUrl) : null,
     agents: type === 'claude' ? collectAgentChecklist(inputAgentsList) : [],
     execCommands: type === 'claude' ? collectExecChecklist(inputExecList) : [],
+    ...(Array.isArray(intents) ? { intents } : {}),
     denyBuiltins: type === 'claude' ? collectBuiltinChecklist(inputBuiltinsList) : [],
     disabledTools: type === 'claude' ? collectToolChecklist(inputToolsList) : [],
     disabledSkills: type === 'claude' ? collectSkillChecklist(inputSkillsList) : [],
@@ -1006,7 +1026,7 @@ async function doCreate() {
   const cfg = collectFormConfig();
   const { type, cwd, extraArgs, proxy, agents, execCommands, denyBuiltins,
           disabledTools, disabledSkills, injectSkills, stripLevel,
-          systemPromptFile, appendPromptFiles } = cfg;
+          systemPromptFile, appendPromptFiles, intents } = cfg;
 
   // Prompts are referenced by library file now (system replaces, appends
   // compose), sourced through cfg (single capture path). The legacy inline body
@@ -1026,7 +1046,7 @@ async function doCreate() {
   closeDialog();
 
   if (typeof proxy === 'string') window.api.setSettings({ proxyUrl: proxy }); // remember last used
-  const result = await window.api.createSession(name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills, stripLevel, systemPromptFile, appendPromptFiles, execCommands);
+  const result = await window.api.createSession(name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills, stripLevel, systemPromptFile, appendPromptFiles, execCommands, intents);
   if (!result.ok) {
     console.error('Failed to create session:', result.error);
     alert(`Failed to create session: ${result.error || 'unknown error'}`);
@@ -1114,6 +1134,7 @@ async function openTemplateEditor(tpl = null) {
   if (inputType.value === 'claude') {
     renderAgentChecklist(inputAgentsList, new Set((tpl && tpl.agents) || []));
     await refreshNewSessionExecCommands(new Set((tpl && tpl.execCommands) || []));
+    refreshNewSessionIntents(tpl && tpl.intents);
     renderBuiltinChecklist(inputBuiltinsList, new Set((tpl && tpl.denyBuiltins) || []));
     await refreshNewSessionTools(new Set((tpl && tpl.disabledTools) || []));
     await refreshNewSessionSkills(new Set((tpl && tpl.disabledSkills) || []));

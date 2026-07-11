@@ -53,4 +53,18 @@ function intentEnabled(type, intentsList) {
   return intentsList.includes(type);
 }
 
-module.exports = { GATEABLE_INTENTS, GATEABLE_TYPES, intentEnabled };
+// Turn the CHECKED gateable types from the UI checklist into the value to persist
+// as a session's `intents` allowlist — the send-side companion of `intentEnabled`.
+// Every gateable box checked → NULL (omit the field): the all-enabled state is
+// stored as ABSENCE, never a frozen array, so a future intent lights up in this
+// seat by default (see the "living default" note above). Otherwise → the enabled
+// subset in CATALOG ORDER (deterministic, and stray/unknown values are dropped
+// since only catalog types are counted). An empty result ([]) is a real value —
+// "everything gated" — distinct from the null all-enabled case.
+function intentsAllowlistFromChecked(checkedTypes) {
+  const checked = new Set(checkedTypes);
+  const enabled = GATEABLE_INTENTS.filter((i) => checked.has(i.type)).map((i) => i.type);
+  return enabled.length === GATEABLE_INTENTS.length ? null : enabled;
+}
+
+module.exports = { GATEABLE_INTENTS, GATEABLE_TYPES, intentEnabled, intentsAllowlistFromChecked };
