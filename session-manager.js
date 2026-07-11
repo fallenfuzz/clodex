@@ -1539,9 +1539,12 @@ function createSessionManager(deps) {
         // boundary, so it stays part of the body.
         // dm and `memory remember` carry a free-text body that may span lines;
         // `context compact` (and, later, reload) carry an optional continuation
-        // body with the same multi-line capture semantics.
+        // body with the same multi-line capture semantics. `remind` carries the
+        // reminder TEXT as its body (free text, greedy capture like dm) — the
+        // exec JSON-terminator above does NOT apply to it.
         if (intent.type === 'dm'
           || intent.type === 'exec'
+          || intent.type === 'remind'
           || (intent.type === 'memory' && intent.sub === 'remember')
           || (intent.type === 'context' && (intent.sub === 'compact' || intent.sub === 'reload'))) {
           const body = [];

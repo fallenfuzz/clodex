@@ -880,3 +880,16 @@ test('exec terminator: dm / memory multi-line capture is left untouched (greedy)
   const mem = m._extractIntents('[agent:memory remember] fact one\nfact two')[0];
   assert.strictEqual(mem.body, 'fact one\nfact two');
 });
+
+test('remind: multi-line reminder text is captured greedily (allow-set), stops at next intent', () => {
+  const m = mkExtract();
+  // Free-text body spans lines (greedy like dm — NOT the exec JSON terminator).
+  const r = m._extractIntents('[agent:remind every 30m] check the build\nand the deploy')[0];
+  assert.strictEqual(r.type, 'remind');
+  assert.strictEqual(r.spec, 'every 30m');
+  assert.strictEqual(r.body, 'check the build\nand the deploy');
+  // A following col-1 intent ends the reminder body and fires as its own intent.
+  const both = m._extractIntents('[agent:remind on compact] reassess\n[agent:who]');
+  assert.deepStrictEqual(both.map((x) => x.type), ['remind', 'who']);
+  assert.strictEqual(both[0].body, 'reassess');
+});

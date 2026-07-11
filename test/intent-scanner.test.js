@@ -128,6 +128,44 @@ test('shadowIntentKey: exec keys on cmd + body', () => {
   assert.strictEqual(shadowIntentKey('t2', a), shadowIntentKey('t2', a2));
 });
 
+test('parseIntent: remind captures a spaced spec + body', () => {
+  // The spec spans a space (unlike every other intent) — captured whole up to
+  // the closing bracket, trimmed; the reminder text is the body.
+  assert.deepStrictEqual(parseIntent('[agent:remind every 30m] check the build'),
+    { type: 'remind', spec: 'every 30m', body: 'check the build' });
+  assert.deepStrictEqual(parseIntent('[agent:remind on compact] reassess the plan'),
+    { type: 'remind', spec: 'on compact', body: 'reassess the plan' });
+  assert.deepStrictEqual(parseIntent('[agent:remind at 09:00] standup'),
+    { type: 'remind', spec: 'at 09:00', body: 'standup' });
+});
+
+test('parseIntent: remind management forms (list / cancel) parse with empty body', () => {
+  assert.deepStrictEqual(parseIntent('[agent:remind list]'),
+    { type: 'remind', spec: 'list', body: '' });
+  assert.deepStrictEqual(parseIntent('[agent:remind cancel ab12]'),
+    { type: 'remind', spec: 'cancel ab12', body: '' });
+});
+
+test('parseIntent: remind body spans multiple lines and keeps ] after the spec bracket', () => {
+  // [^\]]+ stops the spec at the FIRST ], so a ] in the reminder text stays in
+  // the body; the s flag keeps multi-line text (the manager also captures to the
+  // next col-1 intent).
+  const r = parseIntent('[agent:remind in 1h] ship it [done]\nand tell the team');
+  assert.strictEqual(r.type, 'remind');
+  assert.strictEqual(r.spec, 'in 1h');
+  assert.strictEqual(r.body, 'ship it [done]\nand tell the team');
+});
+
+test('shadowIntentKey: remind keys on spec + body', () => {
+  const a = parseIntent('[agent:remind every 30m] check the build');
+  assert.strictEqual(shadowIntentKey('t2', a), 't2|remind|every 30m|check the build');
+  // Different spec or body → different key; identical → identical (differ stability).
+  const b = parseIntent('[agent:remind every 2h] check the build');
+  assert.notStrictEqual(shadowIntentKey('t2', a), shadowIntentKey('t2', b));
+  const a2 = parseIntent('[agent:remind every 30m] check the build');
+  assert.strictEqual(shadowIntentKey('t2', a), shadowIntentKey('t2', a2));
+});
+
 test('parseIntent: non-intent / blank lines return null', () => {
   assert.strictEqual(parseIntent(''), null);
   assert.strictEqual(parseIntent('just some prose'), null);

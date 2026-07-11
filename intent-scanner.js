@@ -93,6 +93,17 @@ function parseIntent(rawLine) {
   const execMatch = cleaned.match(/^\[agent:exec\s+(\S+)\]\s*(.*)/s);
   if (execMatch) return { type: 'exec', cmd: execMatch[1], body: execMatch[2] };
 
+  // `remind` = schedule a SELF-reminder (see remind-schedule.js for the spec
+  // grammar: every|in|at|cron|on compact|list|cancel). Unlike every other
+  // intent the SPEC spans a space (`every 30m`, `on compact`, `at 09:00`), so
+  // it's captured as everything up to the closing bracket ([^\]]+, not \S+);
+  // the reminder text is the body, captured to the next col-1 intent exactly
+  // like dm (multi-line — remind MUST join _extractIntents' allow-set or the
+  // text truncates at the first newline). Parse/validation of the spec lives in
+  // remind-schedule.parseRemindSpec, invoked by the handler, not here.
+  const remindMatch = cleaned.match(/^\[agent:remind\s+([^\]]+)\]\s*(.*)/s);
+  if (remindMatch) return { type: 'remind', spec: remindMatch[1].trim(), body: remindMatch[2] };
+
   const spawnMatch = cleaned.match(/^\[agent:spawn\s+(.+)\]\s*$/);
   if (spawnMatch) {
     const argstr = spawnMatch[1];
@@ -120,7 +131,7 @@ function parseIntent(rawLine) {
 function shadowIntentKey(agent, intent) {
   // urgent is part of the identity: a held dm RESENT with the flag inside the
   // dedupe TTL must dispatch, not be swallowed as a duplicate of the bounce.
-  const head = (intent.sub || intent.target || intent.name || intent.id || intent.cmd || '') + (intent.urgent ? '+urgent' : '');
+  const head = (intent.sub || intent.target || intent.name || intent.id || intent.cmd || intent.spec || '') + (intent.urgent ? '+urgent' : '');
   const body = (intent.body || intent.path || '').trim().slice(0, 200);
   return `${agent}|${intent.type}|${head}|${body}`;
 }
