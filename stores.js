@@ -1,9 +1,9 @@
 // stores.js — the persistence layer as a single factory. initStores() builds
-// the eight on-disk stores and returns them; main.js calls it once in
+// the nine on-disk stores and returns them; main.js calls it once in
 // app.whenReady() and destructures the result.
 //
 // DI seam: initStores(userDataPath, { log, registryDir }).
-//   - userDataPath  — app.getPath('userData'); the six JSON stores live here.
+//   - userDataPath  — app.getPath('userData'); the seven JSON stores live here.
 //   - registryDir   — ~/.clodex; the prompt/agent/skill libraries live under it
 //                     (passed in to keep a single REGISTRY_DIR source of truth
 //                     in main.js rather than re-deriving os.homedir() here).
@@ -192,6 +192,7 @@ function initStores(userDataPath, { log, registryDir } = {}) {
   const PROMPTS_FILE = path.join(userDataPath, 'prompts.json'); // legacy — migration only
   const AGENT_DEFAULTS_FILE = path.join(userDataPath, 'agent-defaults.json');
   const UI_SETTINGS_FILE = path.join(userDataPath, 'ui-settings.json');
+  const REMINDERS_FILE = path.join(userDataPath, 'reminders.json');
   const PROMPTS_DIR = path.join(registryDir, 'library', 'prompts');
   const AGENTS_DIR = path.join(registryDir, 'agents');
   const SKILLS_LIB_DIR = path.join(registryDir, 'skills');
@@ -890,6 +891,86 @@ function initStores(userDataPath, { log, registryDir } = {}) {
   };
 
   // ---------------------------------------------------------------------------
+  // Reminders — durable self-schedules for the `[agent:remind …]` scheduler
+  // (remind-scheduler.js owns the timers/clock; this is persistence ONLY, no
+  // timing logic). A flat JSON array under userData, same _load/_save idiom as
+  // persistence/workspaces. One record per schedule:
+  //   { id, agent, kind, spec, body, nextFireAt, createdAt, lastFiredAt }
+  // `spec` is the ORIGINAL spec string (re-parsed at load by the scheduler and
+  // shown verbatim by `remind list`); `kind` is its parsed head; `nextFireAt`
+  // is the epoch-ms the scheduler last computed (null for oncompact — event-
+  // driven, no timer). The store trusts its sole caller (the scheduler) and does
+  // no timing — it only assigns an id + createdAt and round-trips the fields.
+  //
+  // Ids are pure lowercase base36 (no separators) so a `[agent:remind cancel
+  // <id>]` token satisfies remind-schedule's ID_RE ([a-z0-9]+); minted with a
+  // collision retry against the live set.
+  // ---------------------------------------------------------------------------
+  const reminders = {
+    _load() {
+      try {
+        const all = JSON.parse(fs.readFileSync(REMINDERS_FILE, 'utf-8'));
+        return Array.isArray(all) ? all : [];
+      } catch { return []; }
+    },
+    _save(entries) {
+      try {
+        atomicWriteFileSync(REMINDERS_FILE, JSON.stringify(entries, null, 2));
+      } catch (e) { console.error('reminders save failed:', e); }
+    },
+    _mintId(all) {
+      for (let i = 0; i < 50; i++) {
+        const id = Math.random().toString(36).slice(2, 8);
+        if (id && !all.some((r) => r.id === id)) return id;
+      }
+      // Astronomically unlikely fallback — timestamp tail keeps it unique + base36.
+      return Date.now().toString(36).slice(-6);
+    },
+    list() { return this._load(); },
+    listForAgent(agent) {
+      return this._load().filter((r) => r.agent === agent);
+    },
+    // Persist a new schedule. Caller supplies agent/kind/spec/body/nextFireAt;
+    // the store owns id + createdAt and initializes lastFiredAt. Returns the
+    // stored record (with its minted id) so the caller can arm a timer for it.
+    add({ agent, kind, spec, body = '', nextFireAt = null }) {
+      const all = this._load();
+      const id = this._mintId(all);
+      const rec = {
+        id, agent, kind, spec, body,
+        nextFireAt: (typeof nextFireAt === 'number' ? nextFireAt : null),
+        createdAt: Date.now(),
+        lastFiredAt: null,
+      };
+      all.push(rec);
+      this._save(all);
+      return rec;
+    },
+    // Drop one schedule by id. Returns true if it existed (so `cancel` can be
+    // silent on success and bounce a truly-unknown id).
+    remove(id) {
+      const all = this._load();
+      const next = all.filter((r) => r.id !== id);
+      if (next.length === all.length) return false;
+      this._save(next);
+      return true;
+    },
+    // Record a fire: stamp lastFiredAt and store the recomputed nextFireAt (null
+    // for a spent one-shot the caller will remove separately, or an event kind).
+    // No-op if the id is gone (cancelled between fire and mark).
+    markFired(id, firedAtMs, nextFireAt) {
+      const all = this._load();
+      const rec = all.find((r) => r.id === id);
+      if (!rec) return false;
+      rec.lastFiredAt = firedAtMs;
+      rec.nextFireAt = (typeof nextFireAt === 'number' ? nextFireAt : null);
+      this._save(all);
+      return true;
+    },
+    get(id) { return this._load().find((r) => r.id === id) || null; },
+  };
+
+  // ---------------------------------------------------------------------------
   // UI preferences — statusline components per CLI, global
   // ---------------------------------------------------------------------------
   const uiSettings = {
@@ -992,7 +1073,7 @@ function initStores(userDataPath, { log, registryDir } = {}) {
 
   return {
     persistence, templates, workspaces, promptLibrary,
-    agentDefaults, agentLibrary, skillLibrary, execLibrary, uiSettings,
+    agentDefaults, agentLibrary, skillLibrary, execLibrary, reminders, uiSettings,
     renameWorkspaceScope,
   };
 }

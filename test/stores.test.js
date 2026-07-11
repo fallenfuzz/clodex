@@ -555,3 +555,90 @@ test('execLibrary: is exported as a store from initStores', () => {
     assert.strictEqual(typeof stores.execLibrary.list, 'function');
   } finally { cleanup(); }
 });
+
+// --- reminders (ninth store) -----------------------------------------------
+
+test('reminders: missing file -> [], add mints an id + createdAt, list round-trips', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    assert.deepStrictEqual(stores.reminders.list(), []);
+    assert.deepStrictEqual(stores.reminders.listForAgent('t1'), []);
+    const rec = stores.reminders.add({ agent: 't1', kind: 'every', spec: 'every 30m', body: 'check build', nextFireAt: 1000 });
+    assert.match(rec.id, /^[a-z0-9]+$/); // pure base36 so `cancel <id>` satisfies ID_RE
+    assert.strictEqual(rec.agent, 't1');
+    assert.strictEqual(rec.kind, 'every');
+    assert.strictEqual(rec.spec, 'every 30m');
+    assert.strictEqual(rec.body, 'check build');
+    assert.strictEqual(rec.nextFireAt, 1000);
+    assert.strictEqual(typeof rec.createdAt, 'number');
+    assert.strictEqual(rec.lastFiredAt, null);
+    // Persisted to disk: _load re-reads the file on every list(), so this
+    // reflects the saved bytes, not in-memory state.
+    assert.deepStrictEqual(stores.reminders.list().map(r => r.id), [rec.id]);
+  } finally { cleanup(); }
+});
+
+test('reminders: listForAgent filters by agent', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    stores.reminders.add({ agent: 't1', kind: 'in', spec: 'in 1h', body: 'a' });
+    stores.reminders.add({ agent: 't2', kind: 'in', spec: 'in 2h', body: 'b' });
+    stores.reminders.add({ agent: 't1', kind: 'oncompact', spec: 'on compact', body: 'c' });
+    assert.deepStrictEqual(stores.reminders.listForAgent('t1').map(r => r.body).sort(), ['a', 'c']);
+    assert.deepStrictEqual(stores.reminders.listForAgent('t2').map(r => r.body), ['b']);
+    assert.deepStrictEqual(stores.reminders.listForAgent('nobody'), []);
+  } finally { cleanup(); }
+});
+
+test('reminders: add defaults body="" and nextFireAt=null (oncompact/event kinds)', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    const rec = stores.reminders.add({ agent: 't1', kind: 'oncompact', spec: 'on compact' });
+    assert.strictEqual(rec.body, '');
+    assert.strictEqual(rec.nextFireAt, null);
+  } finally { cleanup(); }
+});
+
+test('reminders: remove returns true when present, false for an unknown id', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    const rec = stores.reminders.add({ agent: 't1', kind: 'in', spec: 'in 1h', body: 'x' });
+    assert.strictEqual(stores.reminders.remove('nope'), false); // unknown -> loud bounce upstream
+    assert.strictEqual(stores.reminders.remove(rec.id), true);  // known -> silent success upstream
+    assert.deepStrictEqual(stores.reminders.list(), []);
+  } finally { cleanup(); }
+});
+
+test('reminders: markFired stamps lastFiredAt + recomputed nextFireAt; no-op on a gone id', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    const rec = stores.reminders.add({ agent: 't1', kind: 'every', spec: 'every 30m', body: 'x', nextFireAt: 1000 });
+    assert.strictEqual(stores.reminders.markFired(rec.id, 5000, 6800), true);
+    const after = stores.reminders.get(rec.id);
+    assert.strictEqual(after.lastFiredAt, 5000);
+    assert.strictEqual(after.nextFireAt, 6800);
+    // A spent one-shot: nextFireAt cleared to null.
+    stores.reminders.markFired(rec.id, 9000, null);
+    assert.strictEqual(stores.reminders.get(rec.id).nextFireAt, null);
+    // Gone id -> false, no throw.
+    assert.strictEqual(stores.reminders.markFired('gone', 1, 2), false);
+  } finally { cleanup(); }
+});
+
+test('reminders: ids are unique across many adds', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    const ids = new Set();
+    for (let i = 0; i < 200; i++) ids.add(stores.reminders.add({ agent: 't1', kind: 'in', spec: 'in 1h', body: String(i) }).id);
+    assert.strictEqual(ids.size, 200);
+  } finally { cleanup(); }
+});
+
+test('reminders: is exported as a store from initStores', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    assert.strictEqual(typeof stores.reminders, 'object');
+    assert.strictEqual(typeof stores.reminders.add, 'function');
+    assert.strictEqual(typeof stores.reminders.markFired, 'function');
+  } finally { cleanup(); }
+});
