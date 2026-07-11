@@ -43,6 +43,8 @@ const SCANNED_MODULES = [
   'statusline.js',
   'intent-scanner.js',
   'exec-schema.js',
+  'remind-schedule.js',
+  'remind-scheduler.js',
   'argv-merge.js',
   'transcript.js',
   'fs-util.js',
