@@ -273,6 +273,44 @@ test('identity binding: main line owns it; subagents and side-calls cannot rebin
   up.server.close();
 });
 
+test('warmth head: a subagent turn stamps the ledger but never repoints the session head', async () => {
+  const { WarmthStore } = require('../wire/warmth');
+  const up = await startFakeUpstream();
+  const warmth = new WarmthStore({});
+  const proxy = new WireProxy({ upstreams: { anthropic: `http://127.0.0.1:${up.port}` }, warmth });
+  await proxy.listen();
+  const events = collect(proxy, ['turn.completed']);
+
+  // Main turn, then a subagent under the SAME session id (the real shape:
+  // subagents share metadata.user_id.session_id with their parent).
+  await request(proxy.port, '/agent/tester/v1/messages', REQUEST_BODY);
+  const subBody = makeBody({
+    system: [
+      { type: 'text', text: 'x-anthropic-billing-header: cc_surface=cli cc_is_subagent=true cc_version=ffff99.1' },
+      { type: 'text', text: 'You are an agent for Claude Code.' },
+    ],
+    messages: [{ role: 'user', content: 'subagent task' }],
+  });
+  await request(proxy.port, '/agent/tester/v1/messages', subBody);
+  await new Promise((r) => setTimeout(r, 60));
+
+  const [mainT, subT] = events['turn.completed'];
+  assert.equal(mainT.role, 'parent');
+  assert.equal(subT.role, 'general-purpose');
+  // Both lines stamped the content ledger (receipts.py parity)…
+  assert.ok(mainT.warmth && subT.warmth);
+  assert.notEqual(subT.warmth.hash, mainT.warmth.hash);
+  assert.equal(warmth.state(subT.warmth.hash), 'warm');
+  // …but the session head stayed on the main line's prefix, and the
+  // subagent turn read as neither a head advance nor a cold resume.
+  assert.equal(warmth.query({ session: SESSION_ID }).hash, mainT.warmth.hash);
+  assert.equal(warmth.coldResumes(SESSION_ID), 0);
+
+  await proxy.close();
+  up.server.close();
+  warmth.close();
+});
+
 test('registerAgent pre-binds a resumed session id', async () => {
   const up = await startFakeUpstream();
   const proxy = new WireProxy({ upstreams: { anthropic: `http://127.0.0.1:${up.port}` } });

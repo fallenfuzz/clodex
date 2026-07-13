@@ -159,6 +159,34 @@ test('cold-resume counter: lapsed head + real turn increments; first turn never 
   w.close();
 });
 
+test('null-session record (subagent line): ledger stamps, head and cold_resumes untouched', () => {
+  let now = 1000000;
+  const w = new WarmthStore({ now: () => now });
+  // Main line owns the head with a 1h prefix.
+  const main = makeBody({ nMessages: 4, ttl: '1h' });
+  const mainRec = w.record(main, CACHED, 'sess-1');
+  // Subagent turn: shares the session upstream, but the proxy passes a null
+  // session — the ledger stamp is unconditional, the head advance is not.
+  const sub = makeBody({ nMessages: 2 });
+  const subRec = w.record(sub, CACHED, null);
+  assert.ok(subRec);
+  assert.equal(w.state(subRec.hash), 'warm'); // subagent prefix is a real cache
+  assert.notEqual(subRec.hash, mainRec.hash);
+  assert.equal(subRec.cold_resume, false);
+  const q = w.query({ session: 'sess-1' });
+  assert.equal(q.hash, mainRec.hash); // head still the main prefix
+  assert.equal(q.ttl_s, 3600);
+  // Subagent's 5m prefix lapses while the 1h head lives on — the badge
+  // stays warm and the next main turn is NOT a cold resume.
+  now += 400;
+  assert.equal(w.state(subRec.hash), 'cold');
+  assert.equal(w.query({ session: 'sess-1' }).warm, true);
+  const rec2 = w.record(makeBody({ nMessages: 6, ttl: '1h' }), READ, 'sess-1');
+  assert.equal(rec2.cold_resume, false);
+  assert.equal(w.coldResumes('sess-1'), 0);
+  w.close();
+});
+
 test('ping: hashes up to (not incl.) the sentinel tail; refreshes shared prefix, never the head', () => {
   let now = 1000000;
   const w = new WarmthStore({ now: () => now, sentinel: '[keep-warm]' });

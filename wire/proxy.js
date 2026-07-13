@@ -634,14 +634,19 @@ class WireProxy extends EventEmitter {
               // merged record could flip a 0→nonzero across iterations.
               // All anthropic turns stamp, side-calls and subagents too
               // (content-addressed; matches receipts.py, which never role-
-              // gates the ledger).
+              // gates the ledger). The session HEAD, though, advances on
+              // main-line turns only: a subagent shares the session_id, and
+              // letting its 5m-TTL prefix repoint the head makes the badge's
+              // per-session warmth flip-flop and lapses read as spurious
+              // cold-resumes. record() skips head + cold-resume when the
+              // session is null, so the gate rides the sessionId argument.
               let warmthRec = null;
               if (this.warmth && provider === 'anthropic' && bodyObj) {
                 const us = usage.usageStart || {};
                 warmthRec = this.warmth.record(bodyObj, {
                   cache_creation_input_tokens: us.cache_creation_input_tokens,
                   cache_read_input_tokens: us.cache_read_input_tokens,
-                }, sessionId);
+                }, (!sideCall && !isSubagentRole(role)) ? sessionId : null);
               }
               this.emit('turn.completed', {
                 agent, provider, reqId, sessionId, role, sideCall, text,

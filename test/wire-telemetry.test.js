@@ -54,6 +54,31 @@ test('subagent/side-call turns update totals but never identity or tokens', () =
   assert.strictEqual(p.context.inputTokens, 40600);
 });
 
+test('payload warmth is stable across subagent turns (head is main-line-only)', () => {
+  // Real WarmthStore end-to-end: the badge reads payload().warmth, which
+  // queries the session head. A subagent turn (proxy passes null session)
+  // must not flip the badge from the main line's 1h prefix to its own 5m one.
+  const { WarmthStore } = require('../wire/warmth');
+  let now = 1000000;
+  const w = new WarmthStore({ now: () => now });
+  const body = (text, ttl) => ({
+    model: 'm', system: [], tools: [],
+    messages: [{ role: 'user', content: [{ type: 'text', text, cache_control: ttl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' } }] }],
+  });
+  const wt = new WireTelemetry({ warmth: w });
+  wt.noteTurn(mainTurn());
+  w.record(body('main turn', '1h'), { cache_creation_input_tokens: 500 }, 'sid-1');
+  const before = wt.payload('alice').warmth;
+  assert.deepStrictEqual([before.state, before.ttl_s], ['warm', 3600]);
+  // subagent stamp: ledger only, no session
+  w.record(body('subagent turn', '5m'), { cache_creation_input_tokens: 200 }, null);
+  now += 30;
+  const after = wt.payload('alice').warmth;
+  assert.strictEqual(after.state, 'warm');
+  assert.strictEqual(after.ttl_s, 3600); // still the main prefix, not the subagent's 300
+  w.close();
+});
+
 test('error receipt (all-null usage) keeps the last real inputTokens', () => {
   const wt = new WireTelemetry({});
   wt.noteTurn(mainTurn());
