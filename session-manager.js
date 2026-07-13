@@ -574,7 +574,7 @@ function createSessionManager(deps) {
       if (this.sessions.has(name)) {
         throw new Error(`Session "${name}" already exists`);
       }
-      const proxyBase = resolveProxyBase(proxy, getUiSettings());
+      let proxyBase = resolveProxyBase(proxy, getUiSettings());
 
       let cmd, args;
       const shell = process.env.SHELL || '/bin/bash';
@@ -593,6 +593,16 @@ function createSessionManager(deps) {
       // they must take intents from the JsonlWatcher) and the sidebar chip glyph
       // (B/V in place of A), surfaced via the session record + list().
       const backend = agentType === 'claude' ? teeBlindBackend(readEffectiveClaudeEnv(cwd)) : null;
+      // A tee-blind backend (Bedrock/Vertex) routes to AWS/GCP and IGNORES the
+      // ANTHROPIC_BASE_URL a proxy needs, so wirescope can never link — it would
+      // just show a permanent "Proxy: no live session" and futile poll traffic.
+      // Force the proxy off at spawn (the stored preference is untouched — this
+      // is cwd-derived, so removing the backend env re-honors it on respawn); the
+      // status bar then falls to the CLI side-channel line (model/ctx/cost).
+      if (backend && proxyBase) {
+        this._shadowLog({ type: 'proxy-off-tee-blind', agent: name, backend });
+        proxyBase = null;
+      }
 
       // Stable per-session proxy identity (clodex-<name>-<nonce>). Reuse the
       // persisted one across resume/restart/restore/clear; mint fresh on a new
