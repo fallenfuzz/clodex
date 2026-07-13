@@ -1662,7 +1662,7 @@ app.whenReady().then(() => {
     agentDefaults, agentLibrary, skillLibrary, execLibrary, reminders, notifications, uiSettings, renameWorkspaceScope } =
     initStores(app.getPath('userData'), { log, registryDir: REGISTRY_DIR }));
   proxyPoller.start();
-  SessionManager.startPendingPoll();
+  manager.startPendingPoll();
 
   // Durable self-reminder scheduler: real clock + timers, the reminders store,
   // and a deliver seam onto the existing DM pipeline. The reminder arrives as a
