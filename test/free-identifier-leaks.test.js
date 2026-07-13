@@ -72,6 +72,7 @@ const RENDERER_SCANNED_MODULES = [
   'renderer/themes.js',
   'renderer/library-drawers.js',
   'renderer/subagent-popover.js',
+  'renderer/session-hovercard.js',
   'renderer/popovers/report-panel.js',
   'renderer/popovers/cost-popover.js',
   'renderer/popovers/bust-popover.js',

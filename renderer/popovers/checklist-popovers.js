@@ -84,7 +84,7 @@ function initChecklistPopovers({ sessionList, createTerminal, addSessionToSideba
     if (!restart) return;
     // Same re-attach dance as the context-menu restart path.
     const item = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
-    const snapType = item ? item.querySelector('.session-type')?.textContent : null;
+    const snapType = item ? item.dataset.type || null : null;
     const snapCwd = item ? item.dataset.cwd : null;
     const rr = await window.api.restartSession(name);
     if (!rr || !rr.ok) { alert(`Restart failed: ${rr && rr.error ? rr.error : 'unknown error'}`); return; }
@@ -200,7 +200,7 @@ function initChecklistPopovers({ sessionList, createTerminal, addSessionToSideba
     if (source) { source.restartFresh(); return; }
     // Local: same re-attach dance as the tools popover restart path.
     const item = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
-    const snapType = item ? item.querySelector('.session-type')?.textContent : null;
+    const snapType = item ? item.dataset.type || null : null;
     const snapCwd = item ? item.dataset.cwd : null;
     const rr = await window.api.restartSession(name, { fresh: true });
     if (!rr || !rr.ok) { alert(`Restart failed: ${rr && rr.error ? rr.error : 'unknown error'}`); return; }
@@ -286,7 +286,7 @@ function initChecklistPopovers({ sessionList, createTerminal, addSessionToSideba
     if (!restart) return;
     // Fresh (non-resume) restart — same re-attach dance as the skills popover.
     const item = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
-    const snapType = item ? item.querySelector('.session-type')?.textContent : null;
+    const snapType = item ? item.dataset.type || null : null;
     const snapCwd = item ? item.dataset.cwd : null;
     const rr = await window.api.restartSession(name, { fresh: true });
     if (!rr || !rr.ok) { alert(`Restart failed: ${rr && rr.error ? rr.error : 'unknown error'}`); return; }
@@ -407,7 +407,7 @@ function initChecklistPopovers({ sessionList, createTerminal, addSessionToSideba
     if (!restart) return;
     // Same re-attach dance as the tools popover's restart path.
     const item = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
-    const snapType = item ? item.querySelector('.session-type')?.textContent : null;
+    const snapType = item ? item.dataset.type || null : null;
     const snapCwd = item ? item.dataset.cwd : null;
     const rr = await window.api.restartSession(name);
     if (!rr || !rr.ok) { alert(`Restart failed: ${rr && rr.error ? rr.error : 'unknown error'}`); return; }

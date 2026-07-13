@@ -34,5 +34,5 @@ test('shared identifiers: workspace id, name regex, theme keys', () => {
   assert.ok(AGENT_NAME_RE.test('my-agent_1.2'));
   assert.ok(!AGENT_NAME_RE.test('bad name'));
   assert.ok(!AGENT_NAME_RE.test(''));
-  assert.deepStrictEqual(THEME_KEYS, ['midnight', 'claude', 'light']);
+  assert.deepStrictEqual(THEME_KEYS, ['midnight', 'claude', 'paper', 'light']);
 });

@@ -1589,6 +1589,19 @@ function createWindow(workspaceId = DEFAULT_WORKSPACE_ID) {
     console.log(`[RENDERER ${String(e.level).toUpperCase()}]`, e.message);
   });
 
+  // Restore the workspace's persisted UI zoom (View-menu zoom items). Zoom is
+  // per-webContents and resets on load, so re-apply on every did-finish-load
+  // (covers Cmd+R too); the nudge refits xterm to the new CSS-pixel geometry.
+  // Read fresh from the store — the factor may have changed since `ws` was
+  // snapshotted at window-create time.
+  win.webContents.on('did-finish-load', () => {
+    const rec = workspaces.get(workspaceId);
+    if (rec && typeof rec.zoomFactor === 'number' && rec.zoomFactor !== 1) {
+      win.webContents.setZoomFactor(rec.zoomFactor);
+      win.webContents.send('zoom-nudge');
+    }
+  });
+
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   if (process.argv.includes('--devtools')) {
     win.webContents.openDevTools({ mode: 'bottom' });

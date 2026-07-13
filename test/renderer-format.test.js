@@ -66,6 +66,25 @@ test('shortTs: ISO -> "Mon D HH:MM", passthrough on junk', () => {
   assert.strictEqual(F.shortTs(''), '');
 });
 
+test('baseName: last segment for the sidebar second line, ~ for home', () => {
+  const home = os.homedir();
+  assert.strictEqual(F.baseName(''), '');
+  assert.strictEqual(F.baseName(home), '~');
+  assert.strictEqual(F.baseName('~'), '~');
+  assert.strictEqual(F.baseName(path.join(home, 'projects', 'clodex')), 'clodex');
+  assert.strictEqual(F.baseName('/var/log/app'), 'app');
+  assert.strictEqual(F.baseName('/'), '/');
+});
+
+test('fmtMinutes: whole minutes, never "0m"', () => {
+  assert.strictEqual(F.fmtMinutes(3590), '60m');
+  assert.strictEqual(F.fmtMinutes(3540), '59m');
+  assert.strictEqual(F.fmtMinutes(299), '5m');
+  assert.strictEqual(F.fmtMinutes(61), '2m');
+  assert.strictEqual(F.fmtMinutes(30), '1m');
+  assert.strictEqual(F.fmtMinutes(1), '1m');
+});
+
 test('shortPath: ~-collapses home and elides to last 2 segments', () => {
   const home = os.homedir();
   assert.strictEqual(F.shortPath(''), '');

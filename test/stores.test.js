@@ -368,6 +368,24 @@ test('workspaces: setOpen round-trips true, clears to an ABSENT key', () => {
   } finally { cleanup(); }
 });
 
+test('workspaces: setZoomFactor persists non-1 factors, 1.0 clears to an ABSENT key', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    stores.workspaces.list(); // seed default
+    stores.workspaces.setZoomFactor('default', 1.2);
+    assert.strictEqual(stores.workspaces.get('default').zoomFactor, 1.2);
+    // Reset (factor 1) removes the key — untouched workspaces stay clean.
+    stores.workspaces.setZoomFactor('default', 1);
+    assert.ok(!('zoomFactor' in stores.workspaces.get('default')));
+    // Non-numeric input clears rather than persisting junk.
+    stores.workspaces.setZoomFactor('default', 1.5);
+    stores.workspaces.setZoomFactor('default', 'junk');
+    assert.ok(!('zoomFactor' in stores.workspaces.get('default')));
+    // Unknown id is a no-op, not a throw.
+    stores.workspaces.setZoomFactor('ghost', 2);
+  } finally { cleanup(); }
+});
+
 test('promptLibrary: save/list/raw/remove under the registry dir', () => {
   const { registryDir, stores, cleanup } = freshStores();
   try {

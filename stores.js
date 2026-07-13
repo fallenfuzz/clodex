@@ -598,6 +598,17 @@ function initStores(userDataPath, { log, registryDir } = {}) {
       const w = all.find(x => x.id === id);
       if (w) { w.bounds = bounds; this._save(all); }
     },
+    // Per-window UI zoom (View-menu zoom items), restored on window create.
+    // 1.0 clears the key so untouched workspaces stay clean.
+    setZoomFactor(id, factor) {
+      const all = this._load();
+      const w = all.find(x => x.id === id);
+      if (w) {
+        if (typeof factor === 'number' && factor !== 1) w.zoomFactor = factor;
+        else delete w.zoomFactor;
+        this._save(all);
+      }
+    },
     touch(id) {
       const all = this._load();
       const w = all.find(x => x.id === id);

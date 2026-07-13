@@ -37,6 +37,21 @@ const THEMES = {
       brightCyan: '#8ec9cd', brightWhite: '#fffefb',
     },
   },
+  paper: {
+    label: 'Paper (dim light)',
+    // A toned light theme between Midnight and Light: warm sepia ground, ink
+    // (not black) text. Palette derives from Light's, darkened a step so the
+    // ANSI colors keep their contrast on the dimmer ground.
+    xterm: {
+      background: '#ece8dc', foreground: '#33302a', cursor: '#c15f3c',
+      selectionBackground: '#d9d2bf',
+      black: '#33302a', red: '#b03f2b', green: '#4a7136', yellow: '#8f6419',
+      blue: '#28629c', magenta: '#7f4a92', cyan: '#2a7f84', white: '#5c5852',
+      brightBlack: '#5c5852', brightRed: '#9c331d', brightGreen: '#3b5f2d',
+      brightYellow: '#7c5413', brightBlue: '#20548c', brightMagenta: '#6e3b7f',
+      brightCyan: '#226c71', brightWhite: '#33302a',
+    },
+  },
   light: {
     label: 'Light',
     xterm: {

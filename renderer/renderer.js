@@ -4,7 +4,7 @@ const { SearchAddon } = require('@xterm/addon-search');
 const { PendingInput } = require('../peer-input-queue');
 const { versionSeverity, updateApplies, releaseAgeInfo } = require('../proxy-util');
 const { STRIP_LEVELS, SEV_LINE, CTX_CAT_LABELS, COST_SPINE, COST_CONTENT, BUST_FAULT, REP_BUCKET_COLOR, REP_BUCKET_LABEL, REP_CAT_COLOR } = require('./lib/constants');
-const { esc, shortPath, fmtTokens, fmtCountdown, fmtAgo, fmtUsd, fmtDur, shortTs, fmtBustTokens, fmtBytes } = require('./lib/format');
+const { esc, shortPath, baseName, fmtTokens, fmtCountdown, fmtMinutes, fmtAgo, fmtUsd, fmtDur, shortTs, fmtBustTokens, fmtBytes } = require('./lib/format');
 const { renderDiffHtml, costStackBlock, svgCostChart, bustRow } = require('./lib/render-html');
 const { splitModelArg, withModelArg } = require('./lib/args-model');
 const { renderAppendChecklist, collectAppendChecklist, renderAgentChecklist, collectAgentChecklist, renderExecChecklist, collectExecChecklist, renderIntentChecklist, collectIntentChecklist, renderBuiltinChecklist, collectBuiltinChecklist, renderInjectChecklist, collectInjectChecklist, renderToolChecklist, collectToolChecklist, renderSkillChecklist, collectSkillChecklist, setChecklistAll, wireBulkToggles, setPromptLibCache, setAgentLibCache, setSkillLibCache, setExecLibCache, setClaudeToolsCache, setDefaultToolDenyCache, getPromptLibCache, getSkillLibCache, getDefaultToolDenyCache } = require('./lib/checklists');
@@ -16,6 +16,7 @@ const { initBanners } = require('./banners');
 const { initThemes } = require('./themes');
 const { initLibraryDrawers } = require('./library-drawers');
 const { initSubagentPopover } = require('./subagent-popover');
+const { initSessionHovercard } = require('./session-hovercard');
 const { initReportPanel } = require('./popovers/report-panel');
 const { initCostPopover } = require('./popovers/cost-popover');
 const { initBustPopover } = require('./popovers/bust-popover');
@@ -232,6 +233,13 @@ window.api.onRequestRenameWorkspace(() => startWorkspaceRename());
 // Session UI
 // ---------------------------------------------------------------------------
 
+// Type chip glyph — the tinted square at the row's left edge ([data-type]
+// picks the tint in CSS; unknown types fall back to the bash grey).
+function typeGlyph(type) {
+  return { claude: 'A', codex: 'C', bash: '›_', remote: '@' }[type]
+    || (type ? type[0].toUpperCase() : '?');
+}
+
 // Local session rows stay contiguous ABOVE the peer block: renderPeers removes
 // and re-appends every [data-peer-ui] header/row at the END of sessionList, so
 // a new local row appended naively lands BELOW the peers (the interleaving bug).
@@ -250,16 +258,18 @@ function addFailedSessionToSidebar(entry) {
   item.className = 'session-item failed';
   item.dataset.name = entry.name;
   item.dataset.cwd = entry.cwd || '';
+  item.dataset.type = entry.type;
   item.dataset.failed = '1';
+  // The hover card (session-hovercard.js) shows the restore error + type/cwd —
+  // no title attributes on the row; the small close control keeps its own.
+  if (entry.error) item.dataset.error = entry.error;
   const displayName = entry.label || entry.name;
-  const cwdLabel = entry.cwd ? esc(shortPath(entry.cwd)) : '';
   item.innerHTML = `
-    <span class="session-dot"></span>
+    <span class="session-chip" data-type="${esc(entry.type)}">${typeGlyph(entry.type)}</span>
     <div class="session-info">
-      <div class="session-name" title="Restore failed: ${esc(entry.error || 'unknown error')}">${esc(displayName)}</div>
+      <div class="session-name">${esc(displayName)}</div>
       <div class="session-meta">
-        <span class="session-type">${esc(entry.type)} — failed</span>
-        ${cwdLabel ? `<span class="session-cwd" title="${esc(entry.cwd || '')}">${cwdLabel}</span>` : ''}
+        <span class="session-failed-label">failed — click to retry</span>
       </div>
     </div>
     <button class="session-close" title="Forget session">&times;</button>
@@ -296,19 +306,23 @@ function addSessionToSidebar(name, type, cwd, label) {
   item.className = 'session-item';
   item.dataset.name = name;
   item.dataset.cwd = cwd || '';
+  item.dataset.type = type;
   const displayName = label || name;
-  const cwdLabel = cwd ? esc(shortPath(cwd)) : '';
+  // Second line shows the cwd basename only; type + full path (and the live
+  // stats) live in the hover card (session-hovercard.js), so the row carries
+  // no title attributes — only the small click controls (✉ flush, × kill)
+  // keep native tooltips.
+  const cwdLabel = cwd ? esc(baseName(cwd)) : '';
   item.innerHTML = `
-    <span class="session-dot"></span>
+    <span class="session-chip" data-type="${esc(type)}">${typeGlyph(type)}</span>
     <div class="session-info">
-      <div class="session-name" title="Double-click to rename. Internal name: ${esc(name)}">${esc(displayName)}</div>
+      <div class="session-name">${esc(displayName)}</div>
       <div class="session-meta">
-        <span class="session-type">${esc(type)}</span>
-        ${cwdLabel ? `<span class="session-cwd" title="${esc(cwd)}">${cwdLabel}</span>` : ''}
+        ${cwdLabel ? `<span class="session-cwd">${cwdLabel}</span>` : ''}
         <span class="session-badges">
-          <span class="session-warm" title="Prompt-cache warmth (time to expiry)"></span>
-          <span class="session-ctx" title="Context used"></span>
           ${type === 'claude' ? '<span class="session-pending" title="Parked messages waiting — click to deliver now"></span>' : ''}
+          <span class="session-warm"></span>
+          <span class="session-ctx"></span>
         </span>
       </div>
     </div>
@@ -363,7 +377,7 @@ function addSessionToSidebar(name, type, cwd, label) {
 // dance as the Edit Session save path).
 function restartSessionWithReattach(name) {
   const item = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
-  const snapType = item ? item.querySelector('.session-type')?.textContent : null;
+  const snapType = item ? item.dataset.type || null : null;
   const snapCwd = item ? item.dataset.cwd : null;
   return window.api.restartSession(name).then((res) => {
     if (!res || !res.ok) {
@@ -462,7 +476,6 @@ function startRename(item, nameEl, sessionName) {
     const newLabel = input.value.trim();
     const newNameEl = document.createElement('div');
     newNameEl.className = 'session-name';
-    newNameEl.title = `Double-click to rename. Internal name: ${sessionName}`;
     if (commit && newLabel && newLabel !== sessionName) {
       newNameEl.textContent = newLabel;
       window.api.setSessionLabel(sessionName, newLabel);
@@ -1234,10 +1247,11 @@ window.api.onSessionAttention((name, attn) => {
   if (!el) return;
   if (attn) {
     el.dataset.attention = attn.kind;
-    el.title = attn.message || 'Needs your attention';
+    // Message rides the dataset for the hover card (no native title on rows).
+    el.dataset.attentionMsg = attn.message || '';
   } else {
     delete el.dataset.attention;
-    el.removeAttribute('title');
+    delete el.dataset.attentionMsg;
   }
 });
 
@@ -1330,7 +1344,7 @@ const filesUnseen = new Set();
 // Type of a session, read from its sidebar tab (the renderer's source for it).
 function sessionTypeOf(name) {
   const item = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
-  return item ? (item.querySelector('.session-type')?.textContent || null) : null;
+  return item ? (item.dataset.type || null) : null;
 }
 function activeIsAgent() {
   const t = activeSession ? sessionTypeOf(activeSession) : null;
@@ -1655,14 +1669,15 @@ function applyWarmBadge(name) {
       badge.dataset.state = '';
     } else {
       const ageMs = Date.now() - st.at;
+      const remaining = p.warmth.remaining_s != null ? p.warmth.remaining_s - ageMs / 1000 : null;
       if (ageMs > PROXY_POLL_MS * 4) {
-        badge.textContent = '🔥?'; badge.dataset.state = 'stale';
-      } else if (p.warmth.state === 'warm' && p.warmth.remaining_s != null
-                 && p.warmth.remaining_s - ageMs / 1000 > 0) {
-        badge.textContent = '🔥' + fmtCountdown(p.warmth.remaining_s - ageMs / 1000);
-        badge.dataset.state = 'warm';
+        badge.textContent = '?'; badge.dataset.state = 'stale';
+      } else if (p.warmth.state === 'warm' && remaining != null && remaining > 0) {
+        badge.textContent = fmtMinutes(remaining);
+        // Under 5 minutes the pill turns red — cache expiry is imminent.
+        badge.dataset.state = remaining < 300 ? 'low' : 'warm';
       } else {
-        badge.textContent = '❄️'; badge.dataset.state = 'cold';
+        badge.textContent = 'cold'; badge.dataset.state = 'cold';
       }
     }
   }
@@ -1768,6 +1783,16 @@ const {
   openSubagentPopover, closeSubagentPopover,
   isSubagentPopoverForParent, isSubagentPopoverOpen, subagentPopoverKeyForParent,
 } = initSubagentPopover();
+
+// --- Session-row hover card ----------------------------------------------------
+// Self-contained island (session-hovercard.js): replaces the sidebar rows'
+// native title tooltips with a styled card fed by the rows' datasets plus the
+// same live maps the badges paint from. Nothing comes back — it owns its DOM
+// node and listeners entirely.
+initSessionHovercard({
+  sessionList, proxyState, ctxPct, ctxTokens,
+  proxyPollMs: PROXY_POLL_MS, typeGlyph,
+});
 
 // --- Toast bubbles -----------------------------------------------------------
 // Transient bottom-right notifications. Returns nothing; auto-dismisses unless
@@ -2083,7 +2108,7 @@ const { openSearch, closeSearch, isSearchOpen, setSearchInfo } =
 // Resize handling
 // ---------------------------------------------------------------------------
 
-const resizeObserver = new ResizeObserver(() => {
+function refitActiveTerminal() {
   if (!activeSession) return;
   const s = sessions.get(activeSession);
   if (!s) return;
@@ -2097,9 +2122,14 @@ const resizeObserver = new ResizeObserver(() => {
   }
   s.fitAddon.fit();
   window.api.resizeSession(activeSession, s.terminal.cols, s.terminal.rows);
-});
+}
 
+const resizeObserver = new ResizeObserver(refitActiveTerminal);
 resizeObserver.observe(terminalContainer);
+
+// View-menu zoom changed this window's zoom factor: the container's CSS-pixel
+// geometry moved under xterm, so refit through the same path resize uses.
+window.api.onZoomNudge(refitActiveTerminal);
 
 // ---------------------------------------------------------------------------
 // Keyboard shortcuts — Cmd+T (new), Cmd+W (close), Cmd+1..9 (switch)
@@ -3017,7 +3047,7 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
   // after the kill+respawn wipes it via session-exit. (Local path only — a peer
   // restart reattaches through its own source.onRestarted.)
   const existing = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
-  const snapType = existing ? existing.querySelector('.session-type')?.textContent : null;
+  const snapType = existing ? existing.dataset.type || null : null;
   const snapCwd = existing ? existing.dataset.cwd : null;
   closeArgsDialog();
   // systemPrompt (legacy inline) passes undefined so a pre-library inline body
@@ -3086,7 +3116,7 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
       if (entry.activity) item.dataset.activity = entry.activity;
       if (entry.attention) {
         item.dataset.attention = entry.attention.kind;
-        item.title = entry.attention.message || 'Needs your attention';
+        item.dataset.attentionMsg = entry.attention.message || '';
       }
     }
     if (entry.replay) terminal.write(entry.replay);

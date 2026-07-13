@@ -17,7 +17,7 @@
   --active-bg: #0f3460;
   --accent: #e94560;
   --text: #eee;
-  --text-dim: #8892a4;
+  --text-dim: #949eb1; /* 5.9:1 on --sidebar-bg — small dim text stays legible */
   --border: #253253;
   --warn: #e5c07b;
   --error: #e06c75;
@@ -32,11 +32,28 @@
   --active-bg: #3a3733;
   --accent: #d97757;
   --text: #f5f4ef;
-  --text-dim: #9b9690;
+  --text-dim: #a29d96; /* 6.2:1 on --sidebar-bg — small dim text stays legible */
   --border: #3a3733;
   --warn: #d9a55b;
   --error: #e0816b;
   --ok: #a3b18a;
+}
+
+/* Paper — dim light: warm sepia ground, ink (not black) text. Sits between
+   the dark themes and Light for tired eyes; --text-dim is deliberately dark
+   (≥7:1 on the ground) so small text stays readable on the dimmer paper. */
+[data-theme="paper"] {
+  --bg: #ece8dc;
+  --sidebar-bg: #e3ddcd;
+  --sidebar-hover: #dbd4c1;
+  --active-bg: #d2c9b2;
+  --accent: #c15f3c;
+  --text: #33302a;
+  --text-dim: #4c4842;
+  --border: #d0c9b6;
+  --warn: #855a14;
+  --error: #b03a26;
+  --ok: #46702f;
 }
 
 /* Light — Claude Code light: off-white, darkened accents for contrast */
@@ -219,23 +236,51 @@ html, body {
 
 .session-item.active {
   background: var(--active-bg);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
-.session-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-dim);
+/* Session-type chip: tinted square with a letter/glyph, one fixed hue per
+   type mixed over transparent so every theme tints it without per-theme
+   rules. The glyph pulls 25% toward --text for contrast on light themes. */
+.session-chip {
+  --chip-color: #8892a4;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
   flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 800;
+  position: relative;
+  background: color-mix(in srgb, var(--chip-color) 20%, transparent);
+  color: color-mix(in srgb, var(--chip-color) 75%, var(--text));
+}
+.session-chip[data-type="claude"] { --chip-color: #d97757; }
+.session-chip[data-type="codex"]  { --chip-color: #56b6c2; }
+.session-chip[data-type="remote"] { --chip-color: #b18cd9; }
+
+/* Activity dot rides the chip's corner (was a standalone left-column dot).
+   The ring matches the sidebar bg so the dot reads as punched through. */
+.session-chip::after {
+  content: '';
+  position: absolute;
+  right: -3px;
+  top: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: transparent;
+  border: 2px solid var(--sidebar-bg);
   transition: background 0.2s;
 }
 
-.session-item.active .session-dot {
+.session-item.active .session-chip::after {
   background: #4ade80;
 }
 
 /* Thinking: pulsing amber dot */
-.session-item[data-activity="thinking"] .session-dot {
+.session-item[data-activity="thinking"] .session-chip::after {
   background: #fbbf24;
   animation: pulse 1.2s ease-in-out infinite;
 }
@@ -243,7 +288,7 @@ html, body {
 /* Needs attention (permission dialog / notification): red-orange pulsing dot,
    outranks the thinking state — the CLI is blocked on the human, not working.
    Cleared by main on keystroke or turn resume. */
-.session-item[data-attention] .session-dot {
+.session-item[data-attention] .session-chip::after {
   background: #f97316;
   animation: pulse 0.6s ease-in-out infinite;
 }
@@ -256,8 +301,8 @@ html, body {
   font-size: 13px;
 }
 
-/* Failed restore: red dot, muted name, click to retry */
-.session-item.failed .session-dot {
+/* Failed restore: red corner dot, muted name, click to retry */
+.session-item.failed .session-chip::after {
   background: var(--accent);
 }
 
@@ -267,8 +312,12 @@ html, body {
   text-decoration-thickness: 1px;
 }
 
-.session-item.failed .session-type {
+.session-item.failed .session-failed-label {
+  font-size: 10.5px;
   color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-item.failed:hover .session-name {
@@ -323,37 +372,31 @@ html, body {
 
 .session-meta {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
+  gap: 5px;
   min-width: 0;
+  margin-top: 2px;
 }
 
-.session-type {
-  font-size: 11px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  flex-shrink: 0;
-}
-
+/* cwd basename only, dim — the full path + type live in the tooltip. */
 .session-cwd {
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-dim);
-  opacity: 0.65;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: 'SF Mono', 'Menlo', monospace;
   flex: 1 1 auto;
   min-width: 0;
 }
 
 /* Warmth + context badges live on the meta (second) line, pushed to the right,
-   so the session name keeps the full first line and isn't truncated by them. */
+   so the session name keeps the full first line and isn't truncated by them.
+   Rendered as quiet tinted pills: colored text over a low-alpha tint of the
+   same hue (color-mix over theme vars, so all themes work untouched). */
 .session-badges {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
+  gap: 4px;
   margin-left: auto;
   flex-shrink: 0;
 }
@@ -362,10 +405,10 @@ html, body {
   font-size: 10px;
   font-weight: 600;
   padding: 1px 6px;
-  border-radius: 8px;
-  line-height: 1.4;
+  border-radius: 9px;
+  line-height: 14px;
   white-space: nowrap;
-  color: #fff;
+  font-variant-numeric: tabular-nums;
 }
 .session-ctx:empty { display: none; }
 
@@ -377,45 +420,144 @@ html, body {
 .session-item.mention-pulse {
   animation: mentionPulse 1.6s ease-out;
 }
-.session-ctx[data-level="low"]  { background: #2ea043; }
-.session-ctx[data-level="mid"]  { background: #d47b16; }
-.session-ctx[data-level="high"] { background: #cf222e; }
+.session-ctx[data-level="low"]  { color: var(--ok);    background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.session-ctx[data-level="mid"]  { color: var(--warn);  background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.session-ctx[data-level="high"] { color: var(--error); background: color-mix(in srgb, var(--error) 16%, transparent); }
 
-/* Per-tab cache-warmth countdown (live for all open sessions). */
+/* Per-tab cache-warmth pill: minutes remaining, amber; red when expiry is
+   imminent (<5m); "cold"/"?" grey. */
 .session-warm {
   font-size: 10px;
   font-weight: 600;
-  line-height: 1.4;
+  padding: 1px 6px;
+  border-radius: 9px;
+  line-height: 14px;
   white-space: nowrap;
   flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
   color: var(--text-dim);
 }
 .session-warm:empty { display: none; }
-.session-warm[data-state="warm"]  { color: #e0a030; }
-.session-warm[data-state="cold"]  { color: #6b7689; }
-.session-warm[data-state="stale"] { color: #6b7689; opacity: 0.7; }
+.session-warm[data-state="warm"]  { color: var(--warn);     background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.session-warm[data-state="low"]   { color: var(--error);    background: color-mix(in srgb, var(--error) 12%, transparent); }
+.session-warm[data-state="cold"]  { color: var(--text-dim); background: color-mix(in srgb, var(--text-dim) 12%, transparent); }
+.session-warm[data-state="stale"] { color: var(--text-dim); background: color-mix(in srgb, var(--text-dim) 12%, transparent); opacity: 0.7; }
 
-/* Parked-DM badge (✉N) — click to flush the queue now. Amber to read as a
-   pending/attention chip, distinct from the ctx/warm badges. */
+/* Parked-DM pill (✉N) — click to flush the queue now. Accent-tinted so it
+   reads as pending/attention, distinct from the ctx/warm pills. */
 .session-pending {
   font-size: 10px;
   font-weight: 600;
   padding: 1px 6px;
-  border-radius: 8px;
-  line-height: 1.4;
+  border-radius: 9px;
+  line-height: 14px;
   white-space: nowrap;
   flex-shrink: 0;
-  color: #1c1200;
-  background: #e0a030;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   cursor: pointer;
 }
 .session-pending:empty { display: none; }
-.session-pending:hover { background: #f0b545; }
+.session-pending:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 
-/* Refusal marker on the tab (wire-only signal the CLI hides). */
-.session-item[data-refusal="1"] .session-type::after {
-  content: " ⚠";
+/* Session-row hover card (session-hovercard.js) — replaces the rows' native
+   title tooltips. pointer-events:none is load-bearing: the card may briefly
+   overlap the row it describes and must never eat a click. z-index sits UNDER
+   the popovers/dialogs (50+) so it can't paint over one; the island also kills
+   it on any mousedown/scroll/keydown. */
+#session-hovercard {
+  position: fixed;
+  z-index: 49;
+  pointer-events: none;
+  min-width: 220px;
+  max-width: 320px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sidebar-bg) 92%, var(--text));
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text);
+}
+#session-hovercard[hidden] { display: none; }
+
+.hovercard-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+/* The head reuses .session-chip for the type tint; the corner activity dot is
+   row state, not card content — suppress it here. */
+#session-hovercard .session-chip::after { display: none; }
+.hovercard-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  word-break: break-all;
+}
+.hovercard-sub {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+}
+
+.hovercard-where {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.hovercard-type { flex-shrink: 0; }
+.hovercard-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  word-break: break-all;
+}
+
+.hovercard-stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  row-gap: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.hovercard-stats .hc-row { display: contents; }
+.hovercard-stats .hc-k { color: var(--text-dim); }
+.hovercard-stats .hc-v {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.hovercard-stats .hc-v[data-state="warm"] { color: var(--warn); }
+.hovercard-stats .hc-v[data-state="low"]  { color: var(--error); }
+.hovercard-stats .hc-v[data-state="cold"],
+.hovercard-stats .hc-v[data-state="stale"] { color: var(--text-dim); }
+
+.hovercard-note {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.hovercard-note.hc-error { color: var(--error); }
+.hovercard-note.hc-attn  { color: var(--warn); }
+
+.hovercard-hint {
+  margin-top: 6px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-style: italic;
+}
+
+/* Refusal marker on the tab (wire-only signal the CLI hides). Rides the
+   badges container (its own ::after left .session-type with the redesign;
+   .session-name::after is taken by the [remote] control marker). */
+.session-item[data-refusal="1"] .session-badges::before {
+  content: "⚠";
   color: var(--accent);
+  font-size: 10px;
 }
 
 /* Subagent child rows — Task/background subs nested under their parent tab.

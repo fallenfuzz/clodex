@@ -36,7 +36,7 @@ const { PendingInput } = require('../peer-input-queue');
 const { versionSeverity, updateApplies, releaseAgeInfo } = require('../proxy-util');
 const { parseDeployLine } = require('../peer-deploy');
 const { SEV_LINE } = require('./lib/constants');
-const { esc } = require('./lib/format');
+const { esc, baseName } = require('./lib/format');
 const { wireBulkToggles } = require('./lib/checklists');
 
 function initPeersUi({
@@ -182,17 +182,19 @@ function initPeersUi({
         item.dataset.name = key;
         item.dataset.activity = s.activity || 'idle';
         if (sessions.has(key)) item.classList.add('attached');
-        const shortCwd = s.cwd ? s.cwd.replace(/^\/Users\/[^/]+/, '~') : '';
+        item.dataset.type = 'remote';
+        // Full path feeds the hover card (the row shows only the basename).
+        item.dataset.cwd = s.cwd || '';
+        const cwdLabel = s.cwd ? esc(baseName(s.cwd)) : '';
         item.innerHTML = `
-        <span class="session-dot"></span>
+        <span class="session-chip" data-type="remote">@</span>
         <div class="session-info">
-          <div class="session-name" title="${esc(s.name)} on ${esc(peerDisplayHost(st))}">${esc(s.name)}<span class="peer-suffix">@${esc(peerDisplayHost(st))}</span></div>
+          <div class="session-name">${esc(s.name)}<span class="peer-suffix">@${esc(peerDisplayHost(st))}</span></div>
           <div class="session-meta">
-            <span class="session-type">remote</span>
-            ${shortCwd ? `<span class="session-cwd" title="${esc(s.cwd)}">${esc(shortCwd)}</span>` : ''}
+            ${cwdLabel ? `<span class="session-cwd">${cwdLabel}</span>` : ''}
             <span class="session-badges">
-              <span class="session-warm" title="Prompt-cache warmth (time to expiry)"></span>
-              <span class="session-ctx" title="Context used"></span>
+              <span class="session-warm"></span>
+              <span class="session-ctx"></span>
             </span>
           </div>
         </div>` +
@@ -955,13 +957,10 @@ function initPeersUi({
   window.api.onSessionPeerControl((name, holder) => {
     const el = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
     if (!el) return;
-    if (holder) {
-      el.dataset.remoteControl = holder;
-      el.title = `Remote control: ${holder}`;
-    } else {
-      delete el.dataset.remoteControl;
-      el.removeAttribute('title');
-    }
+    // The holder name surfaces in the hover card (via dataset) and the
+    // [remote] name marker (CSS on data-remote-control) — no native title.
+    if (holder) el.dataset.remoteControl = holder;
+    else delete el.dataset.remoteControl;
   });
 
   // Seed peer list on startup (peer-state events keep it fresh afterwards).

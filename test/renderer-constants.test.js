@@ -7,8 +7,8 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const C = require('../renderer/lib/constants');
 
-test('THEMES: three themes, each with a label + full xterm palette', () => {
-  assert.deepStrictEqual(Object.keys(C.THEMES), ['midnight', 'claude', 'light']);
+test('THEMES: four themes, each with a label + full xterm palette', () => {
+  assert.deepStrictEqual(Object.keys(C.THEMES), ['midnight', 'claude', 'paper', 'light']);
   for (const [key, t] of Object.entries(C.THEMES)) {
     assert.strictEqual(typeof t.label, 'string', `${key} label`);
     assert.ok(t.xterm && typeof t.xterm === 'object', `${key} xterm`);

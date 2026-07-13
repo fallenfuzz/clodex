@@ -30,6 +30,20 @@ function shortPath(p) {
   return s;
 }
 
+// Last path segment for the sidebar's second line ("~" for home itself);
+// the full path stays in the tooltip.
+function baseName(p) {
+  if (!p) return '';
+  if (p === homeDir || p === '~') return '~';
+  const parts = p.split('/').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : p;
+}
+
+// Warmth pill text: whole minutes remaining ("59m"), never "0m" while warm.
+function fmtMinutes(remaining_s) {
+  return `${Math.max(1, Math.ceil(remaining_s / 60))}m`;
+}
+
 // Compact token count: 201234 -> "201k", 1000000 -> "1M".
 function fmtTokens(n) {
   if (n >= 1e6) { const m = n / 1e6; return (Number.isInteger(m) ? m : m.toFixed(1)) + 'M'; }
@@ -84,7 +98,7 @@ function fmtBytes(n) {
 }
 
 module.exports = {
-  esc, shortPath, fmtTokens, fmtCountdown, fmtAgo,
+  esc, shortPath, baseName, fmtTokens, fmtCountdown, fmtMinutes, fmtAgo,
   fmtUsd, fmtDur, shortTs, fmtBustTokens, fmtBytes,
 };
 

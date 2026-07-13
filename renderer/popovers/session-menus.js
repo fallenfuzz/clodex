@@ -228,7 +228,7 @@ function initSessionMenus({ getActiveSession, proxyState, sessionList, createTer
       closeHistoryMenu();
       if (!confirm(`Switch "${name}" to this past conversation?\n\nThe session restarts with --resume on ${sid.slice(0, 8)}…. The current conversation is kept and stays re-selectable here.`)) return;
       const el = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
-      const snapType = el ? el.querySelector('.session-type')?.textContent : null;
+      const snapType = el ? el.dataset.type || null : null;
       const snapCwd = el ? el.dataset.cwd : null;
       const rr = await window.api.restartSession(name, { resumeId: sid });
       if (!rr || !rr.ok) { alert(`Resume failed: ${rr && rr.error ? rr.error : 'unknown error'}`); return; }
@@ -267,7 +267,7 @@ function initSessionMenus({ getActiveSession, proxyState, sessionList, createTer
       `The current conversation isn't lost — it stays available under 🕘 history.`
     )) return;
     const el = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
-    const snapType = el ? el.querySelector('.session-type')?.textContent : null;
+    const snapType = el ? el.dataset.type || null : null;
     const snapCwd = el ? el.dataset.cwd : null;
     const rr = await window.api.restartSession(name, { fresh: true });
     if (!rr || !rr.ok) { alert(`Hard restart failed: ${rr && rr.error ? rr.error : 'unknown error'}`); return; }

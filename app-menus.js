@@ -325,6 +325,28 @@ function createAppMenus(deps) {
     }
   }
 
+  // View-menu zoom. Custom items rather than the zoomIn/zoomOut roles: a role
+  // adjusts the webContents zoom with no hook to refit xterm or persist the
+  // factor ('zoom-changed' only fires for gestures, not menu roles). Steps
+  // mirror the roles' 0.5 zoomLevel increments (factor = 1.2^level), clamped
+  // to ±3 (≈0.58×–1.73×). The nudge tells the renderer to refit the active
+  // terminal to the new CSS-pixel geometry; the factor persists on the
+  // workspace record (riding the same flow as bounds) and is re-applied on
+  // window create. A focused non-workspace window (wirescope) still zooms but
+  // persists nothing.
+  function adjustZoom(deltaLevel) {
+    const win = BrowserWindow.getFocusedWindow();
+    if (!win || win.isDestroyed()) return;
+    const wc = win.webContents;
+    const level = deltaLevel == null
+      ? 0
+      : Math.max(-3, Math.min(3, wc.getZoomLevel() + deltaLevel));
+    wc.setZoomLevel(level);
+    const wsId = getManager().workspaceForWindow(win);
+    if (wsId) getWorkspaces().setZoomFactor(wsId, wc.getZoomFactor());
+    wc.send('zoom-nudge');
+  }
+
   function buildAppMenu() {
     const isMac = process.platform === 'darwin';
     const template = [
@@ -456,6 +478,7 @@ function createAppMenus(deps) {
             submenu: [
               { key: 'midnight', label: 'Midnight' },
               { key: 'claude', label: 'Claude' },
+              { key: 'paper', label: 'Paper (dim light)' },
               { key: 'light', label: 'Light' },
             ].map((t) => ({
               label: t.label,
@@ -464,6 +487,10 @@ function createAppMenus(deps) {
               click: () => setUiTheme(t.key),
             })),
           },
+          { type: 'separator' },
+          { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => adjustZoom(0.5) },
+          { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => adjustZoom(-0.5) },
+          { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: () => adjustZoom(null) },
           { type: 'separator' },
           { role: 'togglefullscreen' },
         ],
