@@ -55,7 +55,7 @@ function renderClaudeStatusScript(name, headless, uiSettings, registryDir) {
     : '';
   return `#!/bin/bash
 INPUT="$(cat)"
-IFS=$'\\t' read -r MODEL CTX_NUM CTX_PCT COST CWD CTX_TOK CTX_SIZE MODEL_ID <<<"$(echo "$INPUT" | jq -r '[
+IFS=$'\\t' read -r MODEL CTX_NUM CTX_PCT COST CWD CTX_TOK CTX_SIZE MODEL_ID COST_USD <<<"$(echo "$INPUT" | jq -r '[
   (.model.display_name // "?"),
   ((.context_window.used_percentage // 0) | floor | tostring),
   (((.context_window.used_percentage // 0) | floor | tostring) + "%"),
@@ -63,16 +63,20 @@ IFS=$'\\t' read -r MODEL CTX_NUM CTX_PCT COST CWD CTX_TOK CTX_SIZE MODEL_ID <<<"
   (.workspace.current_dir // .cwd // ""),
   ((.context_window.total_input_tokens // 0) | floor | tostring),
   ((.context_window.context_window_size // 0) | floor | tostring),
-  (.model.id // "")
+  (.model.id // ""),
+  ((.cost.total_cost_usd // 0) | tostring)
 ] | @tsv' 2>/dev/null)"
 SHORT_CWD="\${CWD##*/}"
 ${branchSh}
-# Side-channel for Clodex: "<pct>\\t<used_tokens>\\t<window_size>\\t<model_id>".
-# pct stays the first field so legacy parseInt readers (sidebar badge) are
-# unaffected; the token counts feed the proxy bar's absolute "used/size"
-# display; model_id lets the app correct the window size the CLI under-reports
-# for 1M models (MODEL_WINDOWS in argv-merge.js).
-printf '%s\\t%s\\t%s\\t%s' "\${CTX_NUM}" "\${CTX_TOK}" "\${CTX_SIZE}" "\${MODEL_ID}" > "${pathFor(registryDir, name, 'ctx')}" 2>/dev/null || true
+# Side-channel for Clodex: "<pct>\\t<used_tokens>\\t<window_size>\\t<model_id>
+# \\t<cost_usd>\\t<model_name>". pct stays the first field so legacy parseInt
+# readers (sidebar badge) are unaffected; the token counts feed the proxy bar's
+# absolute "used/size" display; model_id lets the app correct the window size the
+# CLI under-reports for 1M models (MODEL_WINDOWS in argv-merge.js). cost_usd is
+# the CLI's own running total (raw float) and model_name its display name — the
+# ONLY cost/model source for a wire-off session (Bedrock/Vertex or no proxy),
+# where the wirescope telemetry bar is dark.
+printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s' "\${CTX_NUM}" "\${CTX_TOK}" "\${CTX_SIZE}" "\${MODEL_ID}" "\${COST_USD}" "\${MODEL}" > "${pathFor(registryDir, name, 'ctx')}" 2>/dev/null || true
 ${customCmd ? `export CLODEX_AGENT_NAME="${name}"
 OUT="$(printf '%s' "$INPUT" | ( ${customCmd} ) 2>/dev/null)"
 if [ -n "$OUT" ]; then

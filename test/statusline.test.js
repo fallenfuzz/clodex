@@ -19,8 +19,13 @@ test('renderClaudeStatusScript: writes the ctx side-channel to the injected dir'
   // enabled components appear in the printf line
   assert.ok(script.includes('$MODEL'));
   assert.ok(script.includes('$CTX_PCT'));
-  // a disabled component does not
+  // a disabled visible cost component does not appear (the side-channel var
+  // ${COST_USD} does not contain the literal $COST, so this still holds)
   assert.ok(!script.includes('$COST'));
+  // the raw cost ALWAYS rides the side-channel (independent of the visible
+  // cost component) so a wire-off session can surface it in the statusbar
+  assert.ok(script.includes('COST_USD'), 'raw cost captured for the side-channel');
+  assert.ok(/printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s'/.test(script), 'side-channel carries six tab-separated fields incl. cost + model');
 });
 
 test('renderClaudeStatusScript: headless suppresses the visible component line but keeps the side-channel', () => {

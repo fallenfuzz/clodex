@@ -1301,8 +1301,8 @@ function registerIpcHandlers(deps) {
   const readCtxFor = (name) => {
     try {
       const c = parseCtxFile(fs.readFileSync(pathFor(REGISTRY_DIR, name, 'ctx'), 'utf-8'));
-      return { ctx: c.pct, ctxTok: c.tok, ctxSize: c.size };
-    } catch { return { ctx: null, ctxTok: null, ctxSize: null }; }
+      return { ctx: c.pct, ctxTok: c.tok, ctxSize: c.size, ctxCost: c.cost, ctxModel: c.modelName };
+    } catch { return { ctx: null, ctxTok: null, ctxSize: null, ctxCost: null, ctxModel: null }; }
   };
 
   ipcMain.handle('app:restore-sessions', async (e) => {

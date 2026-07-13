@@ -93,24 +93,30 @@ function effectiveWindowSize(modelId, reported) {
 }
 
 // Parse the statusline ctx side-channel "<pct>\t<used_tokens>\t<window_size>
-// \t<model_id>". pct is the first whitespace-delimited field, so callers that
-// still parseInt the whole file keep working; tok/size/model are null on legacy
-// shorter files. Applies the MODEL_WINDOWS denominator override here — the one
-// choke point both the live fs.watch path and restore's readCtxFor go through —
-// and recomputes pct against the corrected size (the CLI's used_percentage is
-// computed off the same wrong denominator).
+// \t<model_id>\t<cost_usd>\t<model_name>". pct is the first whitespace-delimited
+// field, so callers that still parseInt the whole file keep working;
+// tok/size/model/cost/modelName are null on legacy shorter files. Applies the
+// MODEL_WINDOWS denominator override here — the one choke point both the live
+// fs.watch path and restore's readCtxFor go through — and recomputes pct against
+// the corrected size (the CLI's used_percentage is computed off the same wrong
+// denominator). cost is the CLI's running total_cost_usd (raw float) and
+// modelName its display name, surfaced for wire-off sessions where the wirescope
+// telemetry (model + cost) is absent.
 function parseCtxFile(raw) {
   const parts = String(raw).trim().split('\t');
   const num = (s) => { const n = parseInt(s, 10); return isNaN(n) ? null : n; };
+  const flt = (s) => { const n = parseFloat(s); return isNaN(n) ? null : n; };
   let pct = num(parts[0]);
   const tok = num(parts[1]);
   const reported = num(parts[2]);
   const model = (parts[3] || '').trim() || null;
+  const cost = flt(parts[4]);
+  const modelName = (parts[5] || '').trim() || null;
   const size = effectiveWindowSize(model, reported);
   if (size !== reported && tok != null && size > 0) {
     pct = Math.round((tok / size) * 100);
   }
-  return { pct, tok, size };
+  return { pct, tok, size, cost, modelName };
 }
 
 module.exports = {

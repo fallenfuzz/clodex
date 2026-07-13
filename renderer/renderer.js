@@ -1287,7 +1287,7 @@ window.api.getVersion().then((v) => { ourAppVersion = v || null; }).catch(() => 
 // real figures — the proxy only reports message/turn counts, not % or absolute
 // tokens of the window). Cached so the proxy bar can show them too.
 const ctxPct = new Map();
-const ctxTokens = new Map(); // name -> { used, size }
+const ctxTokens = new Map(); // name -> { used, size, cost, model }
 
 // Context heaviness thresholds (absolute tokens), mirroring status-line.sh's
 // WARN_TOKENS / HEAVY_TOKENS so the bar and the statusline agree on color.
@@ -1304,10 +1304,10 @@ function applyCtxBadge(name, pct) {
   badge.dataset.level = pct >= 80 ? 'high' : pct >= 60 ? 'mid' : 'low';
 }
 
-window.api.onSessionCtx((name, pct, tok, size) => {
+window.api.onSessionCtx((name, pct, tok, size, cost, modelName) => {
   ctxPct.set(name, pct);
   if (typeof tok === 'number' && typeof size === 'number' && size > 0) {
-    ctxTokens.set(name, { used: tok, size });
+    ctxTokens.set(name, { used: tok, size, cost: typeof cost === 'number' ? cost : null, model: modelName || null });
   }
   applyCtxBadge(name, pct);
   if (name === activeSession) renderProxyBar();
@@ -1361,6 +1361,35 @@ function sessionTypeOf(name) {
 function activeIsAgent() {
   const t = activeSession ? sessionTypeOf(activeSession) : null;
   return t === 'claude' || t === 'codex';
+}
+// Minimal telemetry line built purely from the CLI statusline side-channel
+// (ctxPct/ctxTokens), for a session with NO wirescope payload — a Bedrock/Vertex
+// session or any un-proxied one. Without this the proxy-bar's no-payload branch
+// blanks the whole line even though the sidebar ctx badge (same side-channel)
+// shows data. No clickable popovers (those need the wire), just ctx + cost text.
+function sideChannelSegs(name) {
+  const segs = [];
+  const pct = ctxPct.get(name);
+  const sc = ctxTokens.get(name); // { used, size, cost, model }
+  if (sc && sc.model) segs.push(`<span class="px-seg">${esc(sc.model)}</span>`);
+  const usedTok = sc && sc.used > 0 ? sc.used : null;
+  const sizeTok = sc && sc.size > 0 ? sc.size : null;
+  if (usedTok != null) {
+    const heavy = usedTok >= CTX_HEAVY_TOKENS ? ' px-ctx-heavy' : usedTok >= CTX_WARN_TOKENS ? ' px-ctx-warn' : '';
+    if (sizeTok) {
+      const p2 = Math.round((usedTok / sizeTok) * 100);
+      segs.push(`<span class="px-seg${heavy}" title="Context: tokens used / window size">🧠 ${fmtTokens(usedTok)}/${fmtTokens(sizeTok)} (${p2}%)</span>`);
+    } else {
+      segs.push(`<span class="px-seg${heavy}" title="Context tokens used">🧠 ${fmtTokens(usedTok)}</span>`);
+    }
+  } else if (typeof pct === 'number' && pct > 0) {
+    segs.push(`<span class="px-seg" title="Context window used">🧠 ${pct}%</span>`);
+  }
+  if (sc && typeof sc.cost === 'number' && sc.cost > 0) {
+    const costTxt = sc.cost >= 1 ? sc.cost.toFixed(2) : sc.cost.toFixed(4);
+    segs.push(`<span class="px-seg px-cost" title="Cost so far, reported by the CLI (no wirescope — no live breakdown)">~$${costTxt}</span>`);
+  }
+  return segs;
 }
 // Attached peer tab whose owner serves the popover query endpoint — such a
 // tab gets the status bar (for the files button) even with no telemetry.
@@ -1433,7 +1462,10 @@ function renderProxyBar() {
       bar.style.display = '';
       if (main) main.classList.add('has-proxy-bar');
       tele.className = '';
-      tele.innerHTML = '';
+      // No wirescope payload (Bedrock/Vertex or un-proxied): fall back to the
+      // CLI statusline side-channel so the line shows ctx + cost instead of
+      // going blank. Empty for a non-claude/no-data tab.
+      tele.innerHTML = activeIsAgent() ? sideChannelSegs(activeSession).join('<span class="px-sep">·</span>') : '';
     } else {
       bar.style.display = 'none';
       if (main) main.classList.remove('has-proxy-bar');
@@ -1535,6 +1567,12 @@ function renderProxyBar() {
     } else {
       segs.push(`<span class="px-seg px-cost" title="wirescope cost estimate">~$${costTxt}</span>`);
     }
+  } else if (sc && typeof sc.cost === 'number' && sc.cost > 0) {
+    // Wire-off fallback (Bedrock/Vertex or no proxy): the wirescope cost
+    // telemetry above is dark, so show the CLI's own running total from the ctx
+    // side-channel. No time-series, so it's plain text — no breakdown popover.
+    const costTxt = sc.cost >= 1 ? sc.cost.toFixed(2) : sc.cost.toFixed(4);
+    segs.push(`<span class="px-seg px-cost" title="Cost so far, reported by the CLI (no wirescope — no live breakdown)">~$${costTxt}</span>`);
   }
   if (p.refusals > 0) segs.push(`<span class="px-seg px-refusal">⚠ ${p.refusals}</span>`);
   // Cache-bust chip: report GENUINE busts only. Two classes of noise are
@@ -3135,7 +3173,7 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
     if (entry.replay) terminal.write(entry.replay);
     if (typeof entry.ctx === 'number') { ctxPct.set(entry.name, entry.ctx); applyCtxBadge(entry.name, entry.ctx); }
     if (typeof entry.ctxTok === 'number' && typeof entry.ctxSize === 'number' && entry.ctxSize > 0) {
-      ctxTokens.set(entry.name, { used: entry.ctxTok, size: entry.ctxSize });
+      ctxTokens.set(entry.name, { used: entry.ctxTok, size: entry.ctxSize, cost: typeof entry.ctxCost === 'number' ? entry.ctxCost : null, model: entry.ctxModel || null });
     }
     if (entry.proxy) { proxyState.set(entry.name, { payload: entry.proxy, at: Date.now() }); applyWarmBadge(entry.name); }
     if (typeof entry.pendingCount === 'number') applyPendingBadge(entry.name, entry.pendingCount);

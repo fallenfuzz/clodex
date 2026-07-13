@@ -996,10 +996,10 @@ function createSessionManager(deps) {
             lastRaw = raw;
             const c = parseCtxFile(raw);
             if (c.pct != null) {
-              this._sendToSession(name, 'session-ctx', name, c.pct, c.tok, c.size);
+              this._sendToSession(name, 'session-ctx', name, c.pct, c.tok, c.size, c.cost, c.modelName);
               // Kept for peer attach seeding (getAttachInfo) + live-mirrored to
               // attached peers, so the viewer's ctx chip tracks the owner's.
-              session.ctxInfo = { pct: c.pct, tok: c.tok, size: c.size };
+              session.ctxInfo = { pct: c.pct, tok: c.tok, size: c.size, cost: c.cost, modelName: c.modelName };
               if (getRemoteServer()) {
                 try { getRemoteServer().pushTelemetry(name, { ctx: session.ctxInfo }); } catch {}
               }
