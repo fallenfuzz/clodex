@@ -66,6 +66,14 @@ test('registerWindow / windowForWorkspace: live handle resolves, destroyed/missi
   assert.strictEqual(m.windowForWorkspace('ws1'), null);
 });
 
+test('workspaceForWindow: reverse lookup by handle, null for unknown windows', () => {
+  const m = mk();
+  const win = fakeWin();
+  m.registerWindow('ws1', win);
+  assert.strictEqual(m.workspaceForWindow(win), 'ws1');
+  assert.strictEqual(m.workspaceForWindow(fakeWin()), null);
+});
+
 test('_sendToSession: routes to the owning workspace window, buffers pty-data when detached', () => {
   const m = mk();
   m.sessions.set('a', { name: 'a', workspaceId: 'ws1' });
@@ -843,6 +851,58 @@ test('_handleExecIntent: payload NEVER contributes to argv (injection is structu
   assert.strictEqual(fsReal.existsSync(canary), false, 'no shell splice — canary untouched');
   // The metacharacter string arrived intact via stdin, as DATA.
   assert.strictEqual(JSON.parse(fsReal.readFileSync(outPath, 'utf8')).note, `; touch ${canary}; echo `);
+});
+
+test('_handleExecIntent: replyStderr:true → clean exit + stderr injects the tail back', async () => {
+  const entry = {
+    argv: ['/bin/sh', '-c', 'cat >/dev/null; echo "ignored line" 1>&2; echo "811/811 green" 1>&2'],
+    replyStderr: true, schema: { type: 'object' },
+  };
+  const { m, session, replies, ipc } = mkExec({ grants: ['bridge-reply'], entry });
+  m._handleExecIntent(session, 'bridge-reply', '{}');
+  await waitFor(() => replies.length > 0);
+  // Failure-path tail discipline: LAST stderr line, prefixed with the cmd.
+  assert.strictEqual(replies.at(-1), '[agent:exec] bridge-reply: 811/811 green');
+  // The broadcast reflects that a reply was sent (not the bare silent 'ok').
+  assert.strictEqual(ipc.at(-1).body, 'ok: 811/811 green');
+});
+
+test('_handleExecIntent: replyStderr:true + EMPTY stderr → still silent success', async () => {
+  const entry = { argv: ['/bin/sh', '-c', 'cat >/dev/null'], replyStderr: true, schema: { type: 'object' } };
+  const { m, session, replies, ipc } = mkExec({ grants: ['bridge-reply'], entry });
+  m._handleExecIntent(session, 'bridge-reply', '{}');
+  await waitFor(() => ipc.some((x) => x.body === 'ok'));
+  assert.deepStrictEqual(replies, [], 'nothing to say — no re-bill');
+});
+
+test('_handleExecIntent: UNGATED entry with stderr stays byte-identically silent on success', async () => {
+  // The bridge-reply commands rely on silent success; only replyStderr: true
+  // (strict boolean) flips a command chatty — absence or a truthy non-boolean
+  // must not.
+  for (const extra of [{}, { replyStderr: 'true' }, { replyStderr: 1 }]) {
+    const entry = {
+      argv: ['/bin/sh', '-c', 'cat >/dev/null; echo noise 1>&2'],
+      schema: { type: 'object' }, ...extra,
+    };
+    const { m, session, replies, ipc } = mkExec({ grants: ['bridge-reply'], entry });
+    m._handleExecIntent(session, 'bridge-reply', '{}');
+    await waitFor(() => ipc.some((x) => x.body === 'ok'));
+    assert.deepStrictEqual(replies, [], `silent success (extra=${JSON.stringify(extra)})`);
+    assert.strictEqual(ipc.at(-1).body, 'ok');
+  }
+});
+
+test('_handleExecIntent: replyStderr:true leaves the FAILURE path unchanged', async () => {
+  const entry = {
+    argv: ['/bin/sh', '-c', 'cat >/dev/null; echo boom 1>&2; exit 3'],
+    replyStderr: true, schema: { type: 'object' },
+  };
+  const { m, session, replies, ipc } = mkExec({ grants: ['bridge-reply'], entry });
+  m._handleExecIntent(session, 'bridge-reply', '{}');
+  await waitFor(() => replies.length > 0);
+  assert.match(replies.at(-1), /exit 3/);
+  assert.match(replies.at(-1), /boom/);
+  assert.strictEqual(ipc.at(-1).body.startsWith('err'), true);
 });
 
 test('_handleExecIntent: nonzero exit bounces loudly with the stderr tail', async () => {

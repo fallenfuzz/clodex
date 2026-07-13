@@ -510,6 +510,15 @@ function createSessionManager(deps) {
       return w && !w.isDestroyed() ? w : null;
     }
 
+    // Reverse lookup for callers holding only a BrowserWindow (the View-menu
+    // zoom persists per workspace). null for non-workspace windows (wirescope).
+    workspaceForWindow(win) {
+      for (const [wsId, w] of this.windows) {
+        if (w === win) return wsId;
+      }
+      return null;
+    }
+
     windowForSession(name) {
       const s = this.sessions.get(name);
       if (!s) return null;
@@ -2111,9 +2120,23 @@ function createSessionManager(deps) {
         child.on('error', (e) => finish(() => fail(`run failed (${e.message})`)));
         child.on('exit', (code, signal) => finish(() => {
           if (code === 0) {
-            // Silent success — no re-bill. Audit only.
-            log.info('intent', `exec ${cmd} by ${who}: ok`);
-            this._broadcast('ipc-message', { type: 'exec', from: who, to: cmd, body: 'ok' });
+            // Success is silent (no re-bill) UNLESS the registry entry opts in
+            // with replyStderr: true — then a non-empty stderr injects back
+            // with the same tail discipline as the failure path (last line,
+            // 200-char slice). The gate keeps ungated entries byte-identical
+            // (the bridge-reply commands rely on silent success). stdout stays
+            // dropped: it's data, not a channel — a long-running job wanting a
+            // richer return is the documented growth path (ephemeral DM
+            // channel), deliberately NOT built here.
+            const tail = entry.replyStderr === true ? (stderr.trim().split('\n').pop() || '') : '';
+            if (tail) {
+              reply(`${cmd}: ${tail.slice(0, 200)}`);
+              log.info('intent', `exec ${cmd} by ${who}: ok (stderr replied)`);
+              this._broadcast('ipc-message', { type: 'exec', from: who, to: cmd, body: `ok: ${tail.slice(0, 200)}` });
+            } else {
+              log.info('intent', `exec ${cmd} by ${who}: ok`);
+              this._broadcast('ipc-message', { type: 'exec', from: who, to: cmd, body: 'ok' });
+            }
             return;
           }
           const how = signal ? `killed (${signal})` : `exit ${code}`;

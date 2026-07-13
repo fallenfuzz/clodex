@@ -57,6 +57,17 @@ test('validateExecDef: rejects bad optional field types', () => {
   assert.strictEqual(validateExecDef(badMax, 'c').ok, false);
 });
 
+test('validateExecDef: replyStderr must be boolean if present (truthy strings rejected)', () => {
+  const on = goodDef(); on.replyStderr = true;
+  assert.deepStrictEqual(validateExecDef(on, 'c'), { ok: true });
+  const off = goodDef(); off.replyStderr = false;
+  assert.deepStrictEqual(validateExecDef(off, 'c'), { ok: true });
+  const str = goodDef(); str.replyStderr = 'true';
+  assert.strictEqual(validateExecDef(str, 'c').ok, false);
+  const num = goodDef(); num.replyStderr = 1;
+  assert.strictEqual(validateExecDef(num, 'c').ok, false);
+});
+
 test('validateExecDef: requires an object schema (type: object)', () => {
   const noSchema = goodDef(); delete noSchema.schema;
   assert.strictEqual(validateExecDef(noSchema, 'c').ok, false);

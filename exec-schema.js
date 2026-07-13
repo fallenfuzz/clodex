@@ -147,6 +147,12 @@ function validateExecDef(entry, name) {
   if ('maxBytes' in entry && !(typeof entry.maxBytes === 'number' && entry.maxBytes > 0)) {
     return { ok: false, error: 'maxBytes: must be a positive number' };
   }
+  // Optional stderr-return opt-in: on exit 0 + non-empty stderr the dispatcher
+  // injects the stderr tail back to the invoking seat (failure-path discipline).
+  // Strictly boolean so a truthy string can't silently flip a command chatty.
+  if ('replyStderr' in entry && typeof entry.replyStderr !== 'boolean') {
+    return { ok: false, error: 'replyStderr: must be a boolean' };
+  }
   // A command with no schema bounces every payload ("command has no schema") at
   // run time, so require one here. The top node must be an object schema because
   // the payload is always a JSON object handed to validateAgainstSchema.

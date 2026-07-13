@@ -500,6 +500,7 @@ function initLibraryDrawers({ getActiveSession, setAgentLibCache, setSkillLibCac
         cwd: '',
         timeoutMs: 10000,
         maxBytes: 65536,
+        replyStderr: false,
         schema: { type: 'object', additionalProperties: false, required: [], properties: {} },
       }, null, 2);
       execDelete.style.display = 'none';
