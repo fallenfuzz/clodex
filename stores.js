@@ -380,6 +380,21 @@ function initStores(userDataPath, { log, registryDir } = {}) {
         this._save(all);
       }
     },
+    // Per-session exec-command GRANT allowlist (the capability the fire-time exec
+    // dispatcher checks fresh on every [agent:exec], session-manager _handleExecIntent).
+    // Divergence-only like setIntents: a non-empty ARRAY persists; an empty grant
+    // REMOVES the key so "no grants" is stored as ABSENCE — matching create(), which
+    // only writes execCommands when non-empty. Written by the Edit dialog; agents can
+    // never reach it (no exec-write intent verb — grants ride operator templates).
+    setExecCommands(name, execCommands) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (entry) {
+        if (Array.isArray(execCommands) && execCommands.length) entry.execCommands = execCommands.map(String);
+        else delete entry.execCommands;
+        this._save(all);
+      }
+    },
     // Per-session wirescope strip-aggressiveness LEVEL (a cumulative ladder, not
     // independent toggles): 0 = off, 1 = strip prior thinking, 2 = + strip
     // superseded tool results. Each level is a superset of the one below. clodex

@@ -2829,6 +2829,8 @@ const argsToolsSection = document.getElementById('args-tools-section');
 const argsOtherSection = document.getElementById('args-other-section');
 const argsIntentsList = document.getElementById('args-intents-list');
 const argsIntentsSection = document.getElementById('args-intents-section');
+const argsExecList = document.getElementById('args-exec-list');
+const argsExecSection = document.getElementById('args-exec-section');
 wireBulkToggles(argsToolsRow, argsToolsList);
 let argsEditingName = null;
 // Non-null when the open dialog targets a PEER session: a { fetch, save,
@@ -2920,7 +2922,19 @@ async function openArgsDialog(name, argsSource = null) {
   // widget. Editing here OWNS intents (the save patch carries the result).
   argsIntentsSection.style.display = isClaude ? '' : 'none';
   renderIntentChecklist(argsIntentsList, res.intents);
-  for (const sec of [argsAppendSection, argsToolsSection, argsOtherSection, argsIntentsSection]) sec.open = false;
+  // Exec grants — Claude-only AND LOCAL-only. A peer edit can neither read the box's
+  // grants (readSessionArgs strips them at the wire) nor set them (the save omits the
+  // key), so hide the whole section on a peer row: never rendered, collected, or sent.
+  // Locally, fill the grant checklist from the exec registry, prechecking this seat's
+  // persisted grants. res.execCommands is [] on a peer row (stripped) but the section
+  // is hidden there regardless.
+  const isExecEditable = isClaude && !argsSource;
+  argsExecSection.style.display = isExecEditable ? '' : 'none';
+  if (isExecEditable) {
+    setExecLibCache((await window.api.listExecCommands()) || []);
+    renderExecChecklist(argsExecList, new Set(res.execCommands || []));
+  }
+  for (const sec of [argsAppendSection, argsToolsSection, argsOtherSection, argsExecSection, argsIntentsSection]) sec.open = false;
   argsRestart.checked = false;
   argsOverlay.classList.remove('hidden');
   setTimeout(() => argsInput.focus(), 50);
@@ -2957,6 +2971,12 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
   // values that OVERWRITE (the U9 lesson live: an owned key all-checked clears, it
   // doesn't preserve); undefined-preserve is reserved for a patch that omits intents.
   const intents = argsIntentsSection.style.display === 'none' ? null : collectIntentChecklist(argsIntentsList);
+  // Exec grants: LOCAL-only. The section is shown ONLY for a local Claude edit, so a
+  // hidden section means either a peer row or a non-Claude/non-owning edit — in every
+  // such case the grants must be left UNTOUCHED, which the positional local call and
+  // the peer patch express differently: the local path passes the collected array (or,
+  // when hidden, omits it below); the peer path never carries the key at all.
+  const execCommandsGrant = argsExecSection.style.display === 'none' ? undefined : collectExecChecklist(argsExecList);
   const name = argsEditingName;
   // Capture the peer source before closeArgsDialog() clears it (the save runs
   // after the dialog closes).
@@ -2972,10 +2992,13 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
   // survives; disabledSkills/injectSkills likewise (handler preserves on undefined).
   const res = source
     ? await source.save({
+        // Peer save NEVER carries execCommands — exec grants are local-only, so the
+        // key is omitted entirely (not even []) so a peer edit can't clear the box's
+        // grants. remote-wiring strips it belt-and-suspenders regardless.
         extraArgs: parsed, restart, proxy, systemPrompt: undefined, agents, denyBuiltins,
         disabledTools, disabledSkills: undefined, injectSkills: undefined, systemPromptFile, appendPromptFiles, intents,
       })
-    : await window.api.setSessionArgs(name, parsed, restart, proxy, undefined, agents, denyBuiltins, disabledTools, undefined, undefined, systemPromptFile, appendPromptFiles, intents);
+    : await window.api.setSessionArgs(name, parsed, restart, proxy, undefined, agents, denyBuiltins, disabledTools, undefined, undefined, systemPromptFile, appendPromptFiles, intents, execCommandsGrant);
   if (!res || !res.ok) {
     alert(`Failed: ${res && res.error ? res.error : 'unknown error'}`);
     return;

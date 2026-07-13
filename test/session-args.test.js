@@ -10,7 +10,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 
-const { resolveSessionArgsPatch } = require('../session-args');
+const { resolveSessionArgsPatch, withoutExecGrants } = require('../session-args');
 const { RemoteServer } = require('../remote');
 
 // ---- 1. pure resolver ------------------------------------------------------
@@ -19,6 +19,7 @@ const PREV = {
   agents: ['a1'], denyBuiltins: ['Bash'], disabledTools: ['Read'],
   disabledSkills: ['s1'], injectSkills: ['s2'],
   systemPrompt: 'inline body', systemPromptFile: 'sys.md', appendPromptFiles: ['p.md'],
+  execCommands: ['deploy'],
 };
 
 test('resolver: undefined fields keep the persisted value (untouched)', () => {
@@ -80,6 +81,57 @@ test('resolver: intents undefined in patch preserves the persisted gate', () => 
     'omitted intents keep the persisted subset');
   assert.equal(resolveSessionArgsPatch({}, { intents: null }).intents, null,
     'omitted intents keep a null (all-enabled) gate');
+});
+
+// Exec-grant allowlist — array-shaped like agents/disabledTools: undefined = untouched
+// (keep persisted grants), an explicit value (incl [] = revoke all) overwrites. The
+// Edit dialog OWNS it locally; a peer patch NEVER carries it (stripped at the wire),
+// so over the wire it always resolves to undefined = the box's grants preserved.
+test('resolver: execCommands undefined preserves the persisted grants (peer/wire-stripped path)', () => {
+  assert.deepEqual(resolveSessionArgsPatch({}, PREV).execCommands, ['deploy'],
+    'omitted execCommands keeps the persisted grant list');
+  assert.deepEqual(resolveSessionArgsPatch({ agents: ['x'] }, PREV).execCommands, ['deploy'],
+    'a patch touching other fields but omitting execCommands leaves grants untouched');
+});
+
+test('resolver: execCommands explicit array overwrites (local dialog owns it)', () => {
+  assert.deepEqual(resolveSessionArgsPatch({ execCommands: ['a', 'b'] }, PREV).execCommands, ['a', 'b']);
+});
+
+test('resolver: execCommands [] revokes all grants (a real clear, not untouched)', () => {
+  assert.deepEqual(resolveSessionArgsPatch({ execCommands: [] }, PREV).execCommands, [],
+    'empty array is an explicit revoke, distinct from omitting the field');
+});
+
+test('resolver: no prev entry → execCommands defaults to empty', () => {
+  assert.deepEqual(resolveSessionArgsPatch({}, null).execCommands, []);
+});
+
+// withoutExecGrants — the LOCAL-ONLY wire strip, applied by remote-wiring in BOTH
+// directions (readSessionArgs result outbound, peer patch inbound). Exec grants must
+// never cross the peer wire, so this drops the key entirely.
+test('withoutExecGrants strips the key from a readSessionArgs-shaped result (outbound)', () => {
+  const base = { ok: true, type: 'claude', execCommands: ['deploy'], disabledTools: ['Read'] };
+  const out = withoutExecGrants(base);
+  assert.ok(!('execCommands' in out), 'execCommands removed');
+  assert.equal(out.type, 'claude', 'other fields survive');
+  assert.deepEqual(out.disabledTools, ['Read']);
+  assert.ok('execCommands' in base, 'input is not mutated (shallow clone)');
+});
+
+test('withoutExecGrants strips the key off an inbound peer patch (inbound)', () => {
+  // A malicious/legacy peer that DID send execCommands must not reach the resolver
+  // with it — after the strip, the resolver sees undefined = the box grants preserved.
+  const patch = { extraArgs: ['--x'], restart: false, execCommands: ['deploy'] };
+  const stripped = withoutExecGrants(patch);
+  assert.ok(!('execCommands' in stripped));
+  assert.deepEqual(resolveSessionArgsPatch(stripped, { execCommands: ['keep'] }).execCommands, ['keep'],
+    'a wire-stripped patch leaves the box grants untouched');
+});
+
+test('withoutExecGrants passes a nullish input through unchanged', () => {
+  assert.equal(withoutExecGrants(null), null);
+  assert.equal(withoutExecGrants(undefined), undefined);
 });
 
 // ---- 2. remote endpoints (cap gating + 501) --------------------------------

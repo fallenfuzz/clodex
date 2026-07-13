@@ -564,10 +564,15 @@ function registerIpcHandlers(deps) {
   // shared with the peer session-args POST endpoint. This handler maps the
   // positional IPC args to the patch object and supplies the sender's workspace
   // as the respawn target (the peer path passes the entry's own workspaceId).
-  ipcMain.handle('session:setArgs', async (e, name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills, systemPromptFile, appendPromptFiles, intents) =>
+  // execCommands rides POSITIONALLY as the last param — the exec-grant allowlist the
+  // Edit dialog now owns (Claude-only). It's LOCAL-ONLY by construction: the peer
+  // POST endpoint routes through source.save({...}) which never carries the key, and
+  // remote-wiring strips it in both directions belt-and-suspenders. So this positional
+  // slot is only ever reached by a local edit.
+  ipcMain.handle('session:setArgs', async (e, name, extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills, systemPromptFile, appendPromptFiles, intents, execCommands) =>
     applySessionArgs(name, {
       extraArgs, restart, proxy, systemPrompt, agents, denyBuiltins,
-      disabledTools, disabledSkills, injectSkills, systemPromptFile, appendPromptFiles, intents,
+      disabledTools, disabledSkills, injectSkills, systemPromptFile, appendPromptFiles, intents, execCommands,
     }, workspaceOfSender(e)));
 
   // Restart in place: kill the PTY and respawn with the persisted settings,

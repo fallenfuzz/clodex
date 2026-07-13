@@ -1345,6 +1345,7 @@ function readSessionArgs(name) {
     disabledSkills: entry.disabledSkills || [],
     injectSkills: entry.injectSkills || [],
     intents: Array.isArray(entry.intents) ? entry.intents : null, // gate allowlist (null = all-enabled)
+    execCommands: Array.isArray(entry.execCommands) ? entry.execCommands : [], // exec GRANT allowlist (local-only; stripped at the peer wire)
     agentCatalog: agentLibrary.listFor(sessionScopeCtx(name)), // scope-filtered offer list
     stripLevel: stripLevelOf(entry),
   } : { ok: false };
@@ -1366,7 +1367,7 @@ async function applySessionArgs(name, patch = {}, wsId = DEFAULT_WORKSPACE_ID) {
     agents: nextAgents, denyBuiltins: nextDeny, disabledTools: nextTools,
     disabledSkills: nextSkills, injectSkills: nextInject,
     systemPrompt: nextInline, systemPromptFile: nextSysFile, appendPromptFiles: nextAppend,
-    intents: nextIntents,
+    intents: nextIntents, execCommands: nextExec,
   } = resolveSessionArgsPatch(patch, beforeKill);
   persistence.setExtraArgs(name, extraArgs);
   persistence.setProxy(name, proxy ?? null);
@@ -1380,6 +1381,11 @@ async function applySessionArgs(name, patch = {}, wsId = DEFAULT_WORKSPACE_ID) {
   // save still takes effect on next spawn. setIntents drops the key on null (the
   // all-enabled default) and stores the array otherwise (incl [] = everything gated).
   persistence.setIntents(name, nextIntents);
+  // The dialog also OWNS the exec-grant allowlist now (a peer patch never carries
+  // it — stripped at the wire). setExecCommands drops the key on empty (no grants).
+  // The fire-time exec gate reads this fresh, so a no-restart save applies to the
+  // NEXT [agent:exec] immediately — a restart only refreshes the seat's prompt.
+  persistence.setExecCommands(name, nextExec);
   if (!restart) return { ok: true, restarted: false };
   if (!beforeKill) return { ok: false, error: 'Session not found in persistence' };
   try {

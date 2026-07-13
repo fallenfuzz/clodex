@@ -27,6 +27,7 @@ const {
 } = require('../lib/checklists');
 const { autoEnabledFor, reconcilePartialSelection } = require('../../scope-util');
 const { parseSkillFrontmatter } = require('../../skills-util');
+const { esc } = require('../lib/format');
 
 // Names auto-INCLUDED for `session` by `sessions:` scope, for a scoped checklist.
 // Agents carry parsed `meta`; skills carry only raw `content` (re-parse it, same
@@ -319,6 +320,55 @@ function initChecklistPopovers({ sessionList, createTerminal, addSessionToSideba
   const intentsPopoverName = document.getElementById('intents-popover-name');
   const popoverIntentsList = document.getElementById('popover-intents-list');
   const intentsPopoverRestart = document.getElementById('intents-popover-restart');
+  // Read-only exec-grant readout: which registered commands THIS local seat may run,
+  // and — crucially — whether they're LIVE or inert. Exec is a two-gate capability:
+  // the coarse `exec` INTENT (edited right here) must be on AND the fine per-command
+  // GRANT must list the command. So a seat can hold grants that are inert because the
+  // intent is gated off; this readout makes that otherwise-invisible state explicit,
+  // dimming the block + warning when the exec box is unchecked. Grants are edited in
+  // the ⚙ Edit-session dialog (local-only), so here they're display-only.
+  const intentsExecReadout = document.getElementById('intents-popover-exec');
+  const intentsExecListEl = document.getElementById('intents-popover-exec-list');
+  const intentsExecNote = document.getElementById('intents-popover-exec-note');
+  // The current seat's grants, captured on open so the live inert-state refresh
+  // (driven by toggling the exec checkbox) doesn't need to re-fetch.
+  let intentsExecGrants = [];
+
+  // Recompute the inert dimming + note from the LIVE exec-checkbox state (not the
+  // persisted value) so unchecking `exec` in this popover immediately shows the
+  // grants going inert, before Apply.
+  function refreshExecReadoutInertState() {
+    const execCb = popoverIntentsList.querySelector('input[type="checkbox"][value="exec"]');
+    const execOn = execCb ? execCb.checked : true;
+    const hasGrants = intentsExecGrants.length > 0;
+    intentsExecReadout.classList.toggle('inert', hasGrants && !execOn);
+    if (!hasGrants) {
+      intentsExecNote.textContent = '';
+      intentsExecNote.classList.remove('warn');
+    } else if (execOn) {
+      intentsExecNote.textContent = 'These grants can run while the exec intent is enabled.';
+      intentsExecNote.classList.remove('warn');
+    } else {
+      intentsExecNote.textContent = 'The exec intent is gated off — these grants are inert until you re-enable it.';
+      intentsExecNote.classList.add('warn');
+    }
+  }
+
+  function renderExecGrantReadout(grants) {
+    intentsExecGrants = Array.isArray(grants) ? grants : [];
+    intentsExecListEl.innerHTML = '';
+    if (!intentsExecGrants.length) {
+      intentsExecListEl.innerHTML = '<span class="hint-text">No exec commands granted to this seat.</span>';
+    } else {
+      for (const cmd of intentsExecGrants) {
+        const row = document.createElement('div');
+        row.className = 'agent-check';
+        row.innerHTML = `<span class="exec-grant-name">${esc(cmd)}</span>`;
+        intentsExecListEl.appendChild(row);
+      }
+    }
+    refreshExecReadoutInertState();
+  }
 
   function closeIntentsPopover() {
     intentsPopover.classList.add('hidden');
@@ -331,6 +381,9 @@ function initChecklistPopovers({ sessionList, createTerminal, addSessionToSideba
     // res.intents is the raw persisted allowlist (array, or null = all-enabled);
     // renderIntentChecklist reads it through intentEnabled, same as the dialog.
     renderIntentChecklist(popoverIntentsList, res.intents);
+    // res.execCommands is the seat's persisted grant list (local session, never
+    // stripped — the wire strip is peer-only). Readout dims live off the exec box.
+    renderExecGrantReadout(res.execCommands || []);
     intentsPopoverRestart.checked = false;
     intentsPopoverName.textContent = name;
     intentsPopover.dataset.name = name;
@@ -373,12 +426,23 @@ function initChecklistPopovers({ sessionList, createTerminal, addSessionToSideba
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !intentsPopover.classList.contains('hidden')) closeIntentsPopover();
   });
+  // Live-refresh the exec-grant readout when the exec box is toggled directly. The
+  // bulk Check-all/Uncheck-all buttons set .checked programmatically (no change
+  // event), so those are hooked separately below, after wireBulkToggles.
+  popoverIntentsList.addEventListener('change', (e) => {
+    if (e.target && e.target.value === 'exec') refreshExecReadoutInertState();
+  });
 
   // Bulk "Check all / Uncheck all" controls for the checklist popovers.
   wireBulkToggles(toolsPopover, popoverToolsList);
   wireBulkToggles(skillsPopover, popoverSkillsList);
   wireBulkToggles(agentsPopover, popoverAgentsList);
   wireBulkToggles(intentsPopover, popoverIntentsList);
+  // Bulk toggles set .checked programmatically (no change event fires), so refresh
+  // the exec-grant readout's inert state after a bulk check/uncheck flips exec too.
+  intentsPopover.querySelectorAll('.popover-bulk [data-bulk]').forEach((btn) => {
+    btn.addEventListener('click', () => refreshExecReadoutInertState());
+  });
 
   // Always-reachable ✕ close buttons (tools/skills; agents'/intents' are wired
   // in-section above). A tall popover can push outside-click/Escape out of reach.

@@ -17,6 +17,9 @@
 
 const { app } = require('electron');
 const { pathFor } = require('./clodex-paths');
+// Exec grants are LOCAL-ONLY — this pure leaf sanitizes them off the wire in both
+// directions (require-const, like pathFor above; no injected-seam needed).
+const { withoutExecGrants } = require('./session-args');
 
 function createRemoteWiring(deps) {
   const {
@@ -197,8 +200,11 @@ function createRemoteWiring(deps) {
         getSessionArgs: (name) => {
           const base = readSessionArgs(name);
           if (!base || !base.ok) return base || { ok: false };
+          // Exec grants are a LOCAL-ONLY capability — never expose the box's grant
+          // list over the wire (a viewer can't read nor edit it; readSessionArgs
+          // always includes execCommands, so strip it here explicitly).
           return {
-            ...base,
+            ...withoutExecGrants(base),
             catalogs: {
               // Agents catalog is the SCOPE-FILTERED list readSessionArgs already
               // resolved for this box session (base.agentCatalog) — so a remote
@@ -222,7 +228,11 @@ function createRemoteWiring(deps) {
           name = String(name || '').trim();
           const entry = getPersistence().get(name);
           const wsId = (entry && entry.workspaceId) || DEFAULT_WORKSPACE_ID;
-          const out = await applySessionArgs(name, patch || {}, wsId);
+          // Strip any exec grants off the inbound patch — a peer can NEVER set the
+          // box's local exec allowlist (the renderer already omits it on a peer edit;
+          // this is the belt-and-suspenders backstop). withoutExecGrants drops the key
+          // entirely, so the resolver sees it as undefined = the box's grants untouched.
+          const out = await applySessionArgs(name, withoutExecGrants(patch || {}), wsId);
           if (out && out.ok && out.restarted && getRemoteServer()) { try { getRemoteServer().notifySessions(); } catch {} }
           log.info('session', `setArgs ${name} via peer${out && out.ok ? (out.restarted ? ' (respawned)' : '') : ` failed: ${out && out.error}`}`);
           return out;

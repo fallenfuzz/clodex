@@ -16,7 +16,7 @@
 function resolveSessionArgsPatch(patch = {}, prev = null) {
   const {
     agents, denyBuiltins, disabledTools, disabledSkills, injectSkills,
-    systemPrompt, systemPromptFile, appendPromptFiles, intents,
+    systemPrompt, systemPromptFile, appendPromptFiles, intents, execCommands,
   } = patch;
   return {
     agents: agents !== undefined ? (agents || []) : (prev?.agents || []),
@@ -24,6 +24,15 @@ function resolveSessionArgsPatch(patch = {}, prev = null) {
     disabledTools: disabledTools !== undefined ? (disabledTools || []) : (prev?.disabledTools || []),
     disabledSkills: disabledSkills !== undefined ? (disabledSkills || []) : (prev?.disabledSkills || []),
     injectSkills: injectSkills !== undefined ? (injectSkills || []) : (prev?.injectSkills || []),
+    // Exec-command GRANT allowlist — array-shaped like agents/disabledTools above
+    // (undefined = untouched keeps the persisted grants; an explicit value, incl []
+    // = revoke all, overwrites). The Edit dialog OWNS it as a Claude-only section
+    // and sends the checked grants; a peer patch NEVER carries it (exec is local-
+    // only — stripped at the wire in both directions, see withoutExecGrants), so
+    // over-the-wire this always resolves to undefined = the box's grants preserved.
+    execCommands: execCommands !== undefined
+      ? (Array.isArray(execCommands) ? execCommands.map(String) : [])
+      : (Array.isArray(prev?.execCommands) ? prev.execCommands : []),
     // undefined = "untouched": keep the persisted value. The edit dialog no longer
     // surfaces the legacy inline body, so it passes systemPrompt undefined and a
     // legacy inline prompt survives editing other settings.
@@ -41,4 +50,17 @@ function resolveSessionArgsPatch(patch = {}, prev = null) {
   };
 }
 
-module.exports = { resolveSessionArgsPatch };
+// Exec grants are a LOCAL-ONLY capability — they must never cross the peer wire
+// in either direction (a viewer editing a box session can't read the box's grants
+// nor set them; grants ride operator-authored spawn templates on the owning box).
+// This returns a shallow clone with `execCommands` removed, used to sanitize BOTH
+// the readSessionArgs result the box hands out AND the patch a peer POSTs back
+// (belt and suspenders — the renderer already hides the section on a peer row).
+// A nullish input passes through unchanged.
+function withoutExecGrants(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const { execCommands, ...rest } = obj;
+  return rest;
+}
+
+module.exports = { resolveSessionArgsPatch, withoutExecGrants };

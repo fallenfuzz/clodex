@@ -2169,6 +2169,19 @@ html, body {
   font-style: italic;
 }
 
+/* Read-only exec-grant readout in the Intents popover: shows which registered
+   commands this seat may run. When the `exec` intent is gated OFF the grants are
+   inert, so the `.inert` modifier dims the whole block and the note explains it. */
+.exec-grant-readout { margin-top: 8px; }
+.exec-grant-readout .agent-check {
+  opacity: 0.85;
+  cursor: default;
+}
+.exec-grant-readout.inert { opacity: 0.5; }
+.exec-grant-readout .exec-grant-name { font-weight: 600; }
+#intents-popover-exec-note { display: block; margin-top: 2px; }
+#intents-popover-exec-note.warn { color: var(--warn, #d08770); }
+
 .agent-deny {
   display: flex;
   align-items: flex-start;

@@ -231,6 +231,11 @@
       <div class="popover-bulk"><button type="button" data-bulk="all">Check all</button><button type="button" data-bulk="none">Uncheck all</button></div>
       <div id="popover-intents-list" class="agent-checklist"></div>
       <span class="hint-text">Unchecked intents are gated OFF for this session — it can't emit them (a gated seat still RECEIVES). <code>[agent:name]</code> is never gateable.</span>
+      <div id="intents-popover-exec" class="exec-grant-readout">
+        <div class="popover-subhead">Exec grants <span class="hint-text">(read-only — edit in the ⚙ Edit session dialog)</span></div>
+        <div id="intents-popover-exec-list" class="agent-checklist"></div>
+        <span class="hint-text" id="intents-popover-exec-note"></span>
+      </div>
       <label class="tools-popover-restart">
         <input type="checkbox" id="intents-popover-restart">
         <span class="hint-text">Gate applies immediately. Restart now to also refresh the seat's prompt (until then it still lists disabled intents, but the gate already bounces them).</span>
@@ -550,6 +555,13 @@
           <div class="popover-subhead">Built-in agents</div>
           <div id="args-builtins-list" class="agent-checklist"></div>
           <span class="hint-text">Unchecked built-ins are denied (<code>Agent(name)</code>): filtered out of the roster (reclaims their per-turn description tokens) and no longer delegatable — a trim <em>and</em> a capability removal. Not every session loads all of these; denying an absent one is a no-op. Applies on a fresh restart.</span>
+        </label>
+      </details>
+      <details id="args-exec-section" class="dialog-section">
+        <summary>Exec commands</summary>
+        <label id="args-exec-row">
+          <div id="args-exec-list" class="agent-checklist"></div>
+          <span class="hint-text">Grant this seat the registered commands it may run via <code>[agent:exec &lt;name&gt;]</code>. Checked = granted. The grant is checked fresh on every invocation, so a change applies to the <em>next</em> exec immediately — no restart needed (restarting only refreshes the seat's prompt). Grants only bite when the <code>exec</code> intent is also enabled (see Intents). Commands are authored in File ▸ Exec Commands…; a grant only lets the seat run a fixed command with a schema-validated payload — it never lets the agent register or change one. Local sessions only.</span>
         </label>
       </details>
       <details id="args-intents-section" class="dialog-section">
