@@ -342,3 +342,116 @@ exits 0 on SIGTERM and 64 on restart-request — so this phase is packaging
 - Real multi-user auth/TLS (structured-for, not built).
 - Peering changes; migrating existing spokes; k8s manifests (the image is
   the k8s enabler, manifests are operational).
+
+## Phase 5 — UI parity (Electron ↔ browser)
+
+New arc (Bogdan, 2026-07-15): close the UI gap between the Electron app and the
+browser frontend, "as much as it can be done". The engine's whole A/B/C event
+surface + all 165 `window.api` endpoints already flow to the browser over WS
+(P3), and the renderer is *shared code*, so most UI already works — the gaps are
+(i) things gated on Electron-native capabilities and (ii) accelerators/
+affordances the browser sandbox changes. Everything browser-only is gated on
+`window.__CLODEX_WEB__` so the Electron app is untouched.
+
+### Gap classification
+
+- **(a) verify-only** (shared renderer, should already match): all popovers +
+  drawers (WS invokes onto the same handler map); theme switching (themes.js does
+  localStorage + CSS `[data-theme]` + live xterm palette swap entirely
+  renderer-side — the only desktop-only piece is cross-*window* `set-theme` sync,
+  moot in one tab); `document.title`; in-page menus/dialogs (functional, cosmetic
+  gap only).
+- **(b) achievable in-browser**: the top menu bar (anchor, below); workspace
+  switcher; Alt keyboard shortcuts; browser OS-notifications; favicon/title
+  activity badge; dialog/menu theming.
+- **(c) approximable**: zoom (native browser zoom, not persisted per-workspace,
+  no `zoom-nudge` refit — leans on the resize-refit hook); native pickers
+  (already degraded in P3b: open→typed path, save→/exports + download link);
+  fileOpen "Open in editor" (hidden in browser, P4).
+- **(d) impossible / browser supplies natively**: tray (partly absorbed by the
+  bar's Window menu; no persistent OS tray); Edit/View **roles** (undo/redo/cut/
+  copy/paste/select-all, reload/devtools/full-screen, about/hide/quit — the
+  browser provides all natively, NOT gaps to build); dock bounce (approximated by
+  the title badge); multi-OS-window (approximated by tabs + `?workspace=`).
+
+### The top menu bar (anchor)
+
+Bogdan ruled the floating "☰" corner button OUT, replaced by a real horizontal
+menu bar resembling the Electron app's menus — NOT a macOS chrome simulation (no
+traffic lights, no fake window frame), and skipping the Edit/View roles the
+browser already supplies. It replaces `renderer/web/menubar.js`'s button.
+
+- **Browser-only**, injected by the shim, gated on `window.__CLODEX_WEB__` — the
+  Electron app's native menu bar must never get a second in-page bar.
+- **Layout**: the current layout is NOT a flex column — `#main` is
+  `position:fixed`, `#terminal-container` is `position:absolute` with a `bottom`
+  offset (32px collapsed → 220px expanded IPC log) + a 0.2s transition, and
+  `refitActiveTerminal()` reflows the fit addon against it. The menu bar is the
+  exact mirror: a web-gated class reserves a `top` offset on `#terminal-container`
+  (the bar renders in that strip) and mount calls `refitActiveTerminal()`. The
+  terminal genuinely shrinks by the bar height — this is the proper fix for the
+  xterm-fit concern that drove the corner button.
+- **Structure** — mirror the REAL Electron menu tree (app-menus.js), NOT an
+  invented grouping: File / Agents / Skills / View / Window. No "Session" menu
+  (session switching is the sidebar's job on both platforms; desktop has none
+  either). Edit omitted entirely (browser-native roles, (d)). Theme-styled with
+  `var(--bg/--border/--accent/--text)` from birth, dropdowns reuse the
+  context-menu look (pulls part of the dialog/menu theming forward).
+  - **File** (desktop order + two web relocations): New Workspace,
+    New Session… (Alt+T), Prompts…, Templates…, Exec Commands…, Inbox…,
+    Rename Workspace…, **Preferences…** (relocated here — desktop keeps it in the
+    macOS app menu the web bar deliberately lacks; File is its web home),
+    **Restart Clodex** (confirm dialog like desktop, wired to the existing
+    restartHost path = the container's exit-64 supervisor relaunch, which
+    genuinely works). OMIT: Check for Updates / Update-to (ruled out), Quit
+    (meaningless in a tab), Close (browser-native).
+  - **Agents** (top-level, mirrors desktop): the library agent list +
+    New Agent… + Manage Agent Types…, and Show IPC Traffic… (lives under Agents
+    on desktop). All → `request-open-agents-drawer` / `request-open-ipc-log`.
+  - **Skills** (top-level, mirrors desktop): the library skill list + New Skill… +
+    Manage Skill Library… → `request-open-skills-drawer`.
+  - **View**: Theme submenu with the same four entries + labels as desktop
+    (Midnight / Claude / Paper (dim light) / Light → the existing renderer-side
+    `applyTheme` — a menu home for what already works). OMIT Zoom (JS can't drive
+    browser zoom — approximated natively). Open Log File: omit unless a
+    token-gated GET of the log is added (implementer's call — flag if done).
+  - **Window**: workspace switcher submenu (Focus/Open → `location.assign(
+    '?workspace='+id)`, New/Rename/Delete where endpoints exist) + the Peers
+    section mirroring desktop (Manage Peered Clodexes…, per-peer session attach).
+
+### Rulings (2026-07-15)
+
+1. **Shortcut chord family = Alt**: Alt+T (new), Alt+W (close), Alt+1-9 (switch),
+   Alt+Shift+[ / ] (prev/next). Bound at document CAPTURE phase with
+   `preventDefault`+`stopPropagation` so xterm never sees them, gated on
+   `window.__CLODEX_WEB__`. Reserved Cmd+T/W/1-9 fail silently in a browser (chrome
+   owns them), which is why the web frontend needs its own family. **Shadowed-Meta
+   note**: Alt shortcuts shadow readline Meta bindings while the terminal is
+   focused (Meta-T transpose-word, Meta-<digit> argument) — accepted cost, fine
+   for agent CLIs. Shown as accelerator hints in the menu-bar labels, Electron-style.
+2. **Notifications = S scope**: raise `new Notification()` off the existing
+   broadcast `ipc-message` type:`attention`/`mention` events (already reach the
+   browser), after a one-time permission prompt. Agent-finished notify (the
+   `notifyOS` at the `_emitActivity` finished-turn site) has NO companion
+   broadcast, so it stays deferred — leave a one-line comment at the shim site
+   naming that missing broadcast as the trailhead for the M version.
+3. **Update-available = OUT**: stays the Phase-4 non-goal. In-container "update" =
+   rebuild the image, so the banner would have no action.
+4. **Drag-drop file onto session = excluded**: net-new functionality (no desktop
+   equivalent exists), parked in the backlog, not parity.
+
+### Build order (one review per chunk; usual protocol — no commits, tests green
+per chunk, stop for rulings on genuine tensions)
+
+- **Chunk 1** (M): the menu bar replacing the ☰ button, with the tree above +
+  the workspace switcher submenu, theme-styled, the web-gated layout `top`
+  offset, AND the resize→refit hook (a debounced `window resize →
+  refitActiveTerminal`, load-bearing for the bar row so it folds in here rather
+  than standing alone).
+- **Chunk 2** (S): Alt shortcuts (Alt+T/W/1-9, Alt+Shift+[ /]) + their
+  accelerator hints in the bar labels.
+- **Chunk 3** (S): notifications (S-scope) + title activity badge (favicon-canvas
+  variant only if the title badge alone feels weak — flag at implementation).
+- **Chunk 4** (M): remaining dialog / in-page-modal theming (the b6 residue not
+  pulled forward by the bar).
+- Fold the (a) verify passes into each chunk.
