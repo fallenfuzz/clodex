@@ -12,10 +12,12 @@
 // manager and proxyPoller are module-eval `const` defined before the call site, so
 // they value-inject with zero seams. Everything else (path/fs/os, the require-const
 // helpers, the hoisted fns restartClodex/restartSession/peerProxyView/fetch*) is
-// stable and value-injected byte-identical. `app` is the only electron name used
-// here (getVersion/isPackaged), required in-module.
+// stable and value-injected byte-identical. The two former electron reads cross as
+// seams — `appVersion` by value (package.json version; Electron's getVersion()
+// reads the same field, so it's host-agnostic) and `isPackaged()` as a getter fn
+// (same pattern wirescope-supervisor uses) — so this module holds NO electron
+// require and runs unchanged under a headless host.
 
-const { app } = require('electron');
 const { pathFor } = require('./clodex-paths');
 // Exec grants are LOCAL-ONLY — this pure leaf sanitizes them off the wire in both
 // directions (require-const, like pathFor above; no injected-seam needed).
@@ -44,6 +46,8 @@ function createRemoteWiring(deps) {
     getPersistence, getUiSettings, getWorkspaces,
     // mutable singletons (get+set, M4 pattern)
     getRemoteServer, setRemoteServer, setRemoteError,
+    // host seams (former electron reads): version by value, isPackaged as getter
+    appVersion, isPackaged,
   } = deps;
 
   function syncRemoteServer() {
@@ -299,12 +303,12 @@ function createRemoteWiring(deps) {
         },
         // ---- peer-attach surface (Clodex-to-Clodex) ----
         hostLabel: SELF_LABEL,
-        version: app.getVersion(),
+        version: appVersion,
         // Self-report our install dir (home-relative) so a consumer's Update pulls
         // THIS checkout, not a guessed default. Packaged builds report null — an
         // .app bundle isn't a git-pullable source and the ssh update path doesn't
         // apply. main.js sits at the repo root, so __dirname IS the checkout.
-        srcDir: app.isPackaged ? null : homeRelativize(__dirname, os.homedir()),
+        srcDir: isPackaged() ? null : homeRelativize(__dirname, os.homedir()),
         getAttachInfo: (name) => {
           const sess = manager.sessions.get(name);
           // Bash included: attach mirrors the raw PTY (scrollback + geometry),

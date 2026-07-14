@@ -588,7 +588,7 @@ const ProxyPoller = createProxyPoller({
   getContextCommands: () => SessionManager.CONTEXT_COMMANDS,
 });
 const { createWirescopeSupervisor } = require('./wirescope-supervisor');
-const { WirescopeSupervisor } = createWirescopeSupervisor({ log, ProxyClient, getUiSettings: () => uiSettings });
+const { WirescopeSupervisor } = createWirescopeSupervisor({ log, ProxyClient, getUiSettings: () => uiSettings, getUserDataPath: () => app.getPath('userData'), isPackaged: () => app.isPackaged });
 const wirescope = new WirescopeSupervisor();
 
 // Parse the current skill roster from a Claude session's transcript. The CLI
@@ -1495,6 +1495,8 @@ const { syncRemoteServer } = createRemoteWiring({
   getRemoteServer: () => remoteServer,
   setRemoteServer: (v) => { remoteServer = v; },
   setRemoteError: (v) => { remoteError = v; },
+  appVersion: app.getVersion(),
+  isPackaged: () => app.isPackaged,
 });
 
 // ---------------------------------------------------------------------------

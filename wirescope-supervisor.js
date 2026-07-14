@@ -4,11 +4,14 @@
 // managed venv under userData. Manages venv create/reinstall, survivor pickup
 // across app restarts (pidfile), and clean SIGTERM shutdown of only our child.
 //
-// FACTORY (M3 DI): reads three main.js globals — the logger and ProxyClient
-// (injected by value) and uiSettings (injected as a getUiSettings() getter,
-// since it is only assigned in app.whenReady(), after this module is required).
-// electron/app + crypto/fs/path/child_process are ordinary requires. Bodies are
-// byte-identical modulo the +2 factory indent and the 7 flagged seam lines.
+// FACTORY (M3 DI): reads main.js globals — the logger and ProxyClient (injected
+// by value) and uiSettings (injected as a getUiSettings() getter, since it is
+// only assigned in app.whenReady(), after this module is required). The two
+// electron seams — getUserDataPath() and isPackaged() — are injected as getter
+// fns (same whenReady-lazy pattern as session-manager), so this module holds NO
+// electron require and runs unchanged under a headless host. crypto/fs/path/
+// child_process are ordinary requires. Bodies are byte-identical modulo the +2
+// factory indent and the flagged seam lines.
 //
 // Spawns real processes + touches userData, so integration-only; no unit tests.
 
@@ -16,9 +19,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { app } = require('electron');
 
-function createWirescopeSupervisor({ log, ProxyClient, getUiSettings }) {
+function createWirescopeSupervisor({ log, ProxyClient, getUiSettings, getUserDataPath, isPackaged }) {
   // ---------------------------------------------------------------------------
   // WirescopeSupervisor (phase-1): run the vendored wirescope, zero setup
   // ---------------------------------------------------------------------------
@@ -55,7 +57,7 @@ function createWirescopeSupervisor({ log, ProxyClient, getUiSettings }) {
     baseUrl() { return this._base(getUiSettings().get().wirescopePort || 7800); }
 
     _dirs() {
-      const root = path.join(app.getPath('userData'), 'wirescope');
+      const root = path.join(getUserDataPath(), 'wirescope');
       return { logDir: path.join(root, 'logs'), warmthDb: path.join(root, 'warmth.sqlite') };
     }
 
@@ -68,7 +70,7 @@ function createWirescopeSupervisor({ log, ProxyClient, getUiSettings }) {
     // runs from Contents/Resources (extraResources — python can't execute from
     // inside the asar archive).
     _vendorDir() {
-      const dir = app.isPackaged
+      const dir = isPackaged()
         ? path.join(process.resourcesPath, 'wirescope')
         : path.join(__dirname, 'vendor', 'wirescope');
       return this._looksValid(dir) ? dir : null;
@@ -101,7 +103,7 @@ function createWirescopeSupervisor({ log, ProxyClient, getUiSettings }) {
       try { return fs.readFileSync(path.join(src.dir, 'RELEASE'), 'utf8').trim(); } catch { return null; }
     }
 
-    _venvDir() { return path.join(app.getPath('userData'), 'wirescope', 'venv'); }
+    _venvDir() { return path.join(getUserDataPath(), 'wirescope', 'venv'); }
     _venvPython() { return path.join(this._venvDir(), 'bin', 'python3'); }
 
     // GUI apps inherit launchd's minimal PATH. Startup merges the login shell's
@@ -273,7 +275,7 @@ function createWirescopeSupervisor({ log, ProxyClient, getUiSettings }) {
       return { ok: true, state: 'installing' };
     }
 
-    _pidFile() { return path.join(app.getPath('userData'), 'wirescope', 'wirescope.pid'); }
+    _pidFile() { return path.join(getUserDataPath(), 'wirescope', 'wirescope.pid'); }
     _logFile() { return path.join(this._dirs().logDir, 'uvicorn.log'); }
 
     // The pid of a still-running managed instance from a PREVIOUS app launch.
