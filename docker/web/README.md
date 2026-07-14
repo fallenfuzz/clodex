@@ -166,6 +166,12 @@ destination `http://127.0.0.1:7820` as a **direct-URL** peer. No SSH — the
 loopback publish is the boundary, exactly like the browser port. Once it's up
 the container's sessions appear under that peer.
 
+The compose file pins `hostname: sandbox` — that name is the peer's label on
+your desktop and the origin suffix on agent DMs (`agent@sandbox`). It must be
+stable: without the pin Docker assigns the random container id, which changes
+on every recreate and breaks DM reply routing. Rename it to taste, but keep it
+fixed once peers know it.
+
 (This is the reverse of the browser frontend: the browser is a *frontend for the
 container's engine*; peering makes the container a *peer of your desktop's
 engine*. Both can be used at once.)

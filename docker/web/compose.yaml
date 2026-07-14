@@ -7,6 +7,12 @@
 
 services:
   clodex:
+    # A stable hostname, because it is the engine's SELF_LABEL on the peer wire:
+    # the peer's display label on your desktop AND the origin suffix agent DMs
+    # carry (agent@host). Without it Docker assigns the random container id,
+    # which changes on every recreate — breaking DM reply routing, not just
+    # cosmetics. Rename to taste; keep it stable once peers know it.
+    hostname: sandbox
     build:
       context: ../..                     # the repo root
       dockerfile: docker/web/Dockerfile
