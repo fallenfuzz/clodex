@@ -30,13 +30,18 @@ const ATTACH_MAX_BUFFERED = 4 * 1024 * 1024;
 const RESIZE_DEBOUNCE_MS = 80;
 
 class RemoteServer {
-  constructor({ port, pagePath, getSessions, getTranscript, send, restartApp,
+  constructor({ port, host, pagePath, getSessions, getTranscript, send, restartApp,
                 hostLabel, version, srcDir, getAttachInfo, sendInput, resizePty, onControlChange,
                 query, createSession, killSession, restartSession,
                 getSessionArgs, setSessionArgs,
                 getSkillCatalog, setSessionSkills,
                 deliverDm, claimDms, listDmOrigins, receiveRoster }) {
     this._port = port;
+    // Bind host: loopback by default. The web-frontend container passes '0.0.0.0'
+    // (via CLODEX_REMOTE_HOST, threaded in remote-wiring) so the peer wire can be
+    // published on a loopback-mapped host port for desktop→container peering.
+    // Desktop passes nothing, so the bind stays 127.0.0.1 — unchanged.
+    this._host = host || '127.0.0.1';
     this._pagePath = pagePath;
     this._getSessions = getSessions;
     this._getTranscript = getTranscript;
@@ -123,7 +128,7 @@ class RemoteServer {
       server.on('error', (err) => {
         if (this._server !== server) reject(err);
       });
-      server.listen(this._port, '127.0.0.1', () => {
+      server.listen(this._port, this._host, () => {
         this._server = server;
         // Reflect the actual bound port (meaningful when constructed with 0,
         // as tests do; a fixed port reads back unchanged).

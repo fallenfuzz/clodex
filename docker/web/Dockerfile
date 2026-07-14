@@ -70,7 +70,15 @@ RUN mkdir -p /data /home/clodex/.clodex /home/clodex/.claude /home/clodex/work \
 ENV HOME=/home/clodex \
     SHELL=/bin/bash \
     CLODEX_DATA_DIR=/data \
-    CLODEX_WEB_PORT=8080
+    CLODEX_WEB_PORT=8080 \
+    # Widen the wirescope + peer-wire binds to 0.0.0.0 INSIDE the container so
+    # they can be published on loopback-mapped host ports (compose: 7811→7800
+    # wirescope dashboard, 7820→7900 peer wire). The desktop app never sets these
+    # and stays 127.0.0.1-bound. CLODEX_REMOTE_ENABLE brings the peer wire up at
+    # first boot with no GUI toggle to reach in the container.
+    CLODEX_WIRESCOPE_HOST=0.0.0.0 \
+    CLODEX_REMOTE_HOST=0.0.0.0 \
+    CLODEX_REMOTE_ENABLE=1
 
 USER clodex
 EXPOSE 8080

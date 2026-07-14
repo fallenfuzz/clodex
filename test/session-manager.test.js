@@ -10,7 +10,7 @@
 // left to integration + Bogdan's GUI smoke test.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { createSessionManager } = require('../session-manager');
+const { createSessionManager, isStaleRegistration } = require('../session-manager');
 const { canFireCompact } = require('../inject-queue');
 const { intentEnabled } = require('../intent-catalog');
 
@@ -133,6 +133,23 @@ test('create: rejects a nonexistent or non-directory cwd before any spawn', asyn
   const m = mk();
   await assert.rejects(() => m.create('ghost', 'claude', '/no/such/dir/anywhere'), /does not exist/);
   await assert.rejects(() => m.create('ghost', 'bash', __filename), /Not a directory/);
+});
+
+// The registry-conflict staleness rule (extracted pure so it needs no PTY spawn).
+// A blocking agent.json is force-cleaned when its pid is dead OR is our own pid —
+// the latter being the deterministic-pid Docker case where the engine is the same
+// pid every boot, so a leftover registration points at the new engine itself and a
+// bare isAlive() check would wedge the name forever.
+test('isStaleRegistration: dead pid OR our own pid is stale; a live OTHER pid is not', () => {
+  const own = process.pid;
+  const dead = () => false;
+  const alive = () => true;
+  // Dead pid → stale regardless of who it is.
+  assert.equal(isStaleRegistration(999999, own, dead), true, 'dead pid is stale');
+  // Our own pid, even when isAlive() says true (it always will — it's us) → stale.
+  assert.equal(isStaleRegistration(own, own, alive), true, 'our own pid is stale (Docker deterministic-pid case)');
+  // A different, genuinely-live pid → NOT stale (the two-Clodexes guard holds).
+  assert.equal(isStaleRegistration(own + 1, own, alive), false, 'a live other pid is running elsewhere');
 });
 
 // Stray-wire-session discrimination (the 7-digests-in-4-minutes incident): the

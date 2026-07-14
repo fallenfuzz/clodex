@@ -143,6 +143,33 @@ give it ~30s and a network connection once; the data volume persists it.
 Proxy charts and per-session wire telemetry then work exactly as on the
 desktop. To turn it off, disable the proxy in Preferences.
 
+The **full dashboard** links (the "Open full dashboard →" jump-outs in the
+cost/bust popovers) open wirescope's own web UI, which runs on the container's
+port 7800 — a *different* service from the browser frontend, not gated by
+`CLODEX_WEB_TOKEN`. The compose file publishes it loopback-only on host **7811**
+(`127.0.0.1:7811:7800`, same localhost-trust stance as 7810) and points the web
+client at it via `CLODEX_WIRESCOPE_PUBLIC_URL` (default `http://localhost:7811`),
+so those links resolve from your browser instead of the container's unreachable
+loopback address. If you remap 7811, change `CLODEX_WIRESCOPE_PUBLIC_URL` to
+match.
+
+## Peering the container with your desktop
+
+You can add this container to your desktop Clodex as a **peer** — see and drive
+its sessions from the desktop's peer tabs, exchange agent DMs. The container
+publishes the peer wire loopback-only on host **7820** (`127.0.0.1:7820:7900`,
+same trust stance as the rest) and brings it up automatically at first boot
+(`CLODEX_REMOTE_ENABLE=1` in the image — no in-app toggle to reach).
+
+In the desktop app: **Window ▸ Manage Peered Clodexes…**, add a peer with the
+destination `http://127.0.0.1:7820` as a **direct-URL** peer. No SSH — the
+loopback publish is the boundary, exactly like the browser port. Once it's up
+the container's sessions appear under that peer.
+
+(This is the reverse of the browser frontend: the browser is a *frontend for the
+container's engine*; peering makes the container a *peer of your desktop's
+engine*. Both can be used at once.)
+
 ## Operating notes
 
 - **Logs**: `docker compose -f docker/web/compose.yaml logs -f`.
@@ -153,3 +180,9 @@ desktop. To turn it off, disable the proxy in Preferences.
 - **Stop / wipe**: `down` keeps the volumes; add `-v` to delete them (this drops
   sessions, the agent login, AND the `clodex-work` volume — bind-mounted host
   folders are never touched).
+- **New workspaces don't auto-restore**: the container restores only the
+  workspaces listed in `CLODEX_WORKSPACES` (default `default`) at (re)launch. A
+  workspace you create in the browser (Window ▸ New Workspace) works for the
+  running session but is NOT added to that list, so its sessions won't come back
+  after a `restart`/relaunch unless you add its id to `CLODEX_WORKSPACES` in
+  `compose.yaml`. Its conversation transcripts on disk are preserved regardless.

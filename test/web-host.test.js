@@ -21,7 +21,7 @@ const silentLog = { info() {}, warn() {}, error() {} };
 
 // Fake engine: records registerWindow/unregisterWindow and serves listForWorkspace
 // so the scrollback replay + handle-timing paths run without a real SessionManager.
-function fakeEngine(sessions = {}) {
+function fakeEngine(sessions = {}, stores = {}) {
   const registered = [];   // { workspaceId, handle }
   const unregistered = []; // workspaceId
   const manager = {
@@ -29,11 +29,11 @@ function fakeEngine(sessions = {}) {
     unregisterWindow: (workspaceId) => unregistered.push(workspaceId),
     listForWorkspace: (workspaceId) => sessions[workspaceId] || [],
   };
-  return { engine: { manager, stores: {} }, registered, unregistered };
+  return { engine: { manager, stores }, registered, unregistered };
 }
 
-async function startHost({ registerHandlers, token, sessions } = {}) {
-  const { engine, registered, unregistered } = fakeEngine(sessions);
+async function startHost({ registerHandlers, token, sessions, stores } = {}) {
+  const { engine, registered, unregistered } = fakeEngine(sessions, stores);
   const host = createWebHost({
     engine, log: silentLog, port: 0, token: token || null,
     userDataPath: os.tmpdir(), registerHandlers: registerHandlers || (() => {}),
@@ -107,6 +107,43 @@ test('hello gate: pre-hello frames close the socket; a valid hello yields welcom
     assert.equal(typeof welcome.appVersion, 'string');
     ok.close();
   } finally { host.close(); }
+});
+
+test('welcome carries wirescope reachability: proxyBase from settings + published base from env', async () => {
+  const prevEnv = process.env.CLODEX_WIRESCOPE_PUBLIC_URL;
+  process.env.CLODEX_WIRESCOPE_PUBLIC_URL = 'http://localhost:7811/';
+  const stores = { uiSettings: { get: () => ({ proxyEnabled: true, proxyUrl: 'http://127.0.0.1:7800/' }) } };
+  const { host, port } = await startHost({ stores });
+  try {
+    const c = connect(port);
+    const welcome = await helloWelcome(c, { workspaceId: 'default' });
+    // proxyBase is the engine's loopback wirescope; publicBase is the browser-
+    // reachable published address — both trailing-slash-normalized. The shim
+    // rewrites open-external urls from the first origin to the second.
+    assert.equal(welcome.proxyBase, 'http://127.0.0.1:7800', 'proxyBase from uiSettings, normalized');
+    assert.equal(welcome.wirescopePublicBase, 'http://localhost:7811', 'published base from env, normalized');
+    c.close();
+  } finally {
+    host.close();
+    if (prevEnv === undefined) delete process.env.CLODEX_WIRESCOPE_PUBLIC_URL; else process.env.CLODEX_WIRESCOPE_PUBLIC_URL = prevEnv;
+  }
+});
+
+test('welcome reachability fields are empty when proxy is disabled and no published base is set', async () => {
+  const prevEnv = process.env.CLODEX_WIRESCOPE_PUBLIC_URL;
+  delete process.env.CLODEX_WIRESCOPE_PUBLIC_URL;
+  const stores = { uiSettings: { get: () => ({ proxyEnabled: false, proxyUrl: 'http://127.0.0.1:7800' }) } };
+  const { host, port } = await startHost({ stores });
+  try {
+    const c = connect(port);
+    const welcome = await helloWelcome(c, { workspaceId: 'default' });
+    assert.equal(welcome.proxyBase, '', 'no proxyBase when the proxy is off');
+    assert.equal(welcome.wirescopePublicBase, '', 'no published base when the env is unset');
+    c.close();
+  } finally {
+    host.close();
+    if (prevEnv !== undefined) process.env.CLODEX_WIRESCOPE_PUBLIC_URL = prevEnv;
+  }
 });
 
 test('/healthz is an unauthenticated 200 even when a token gates everything else', async () => {

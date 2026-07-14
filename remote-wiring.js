@@ -52,7 +52,15 @@ function createRemoteWiring(deps) {
 
   function syncRemoteServer() {
     const s = getUiSettings().get();
-    if (!s.remoteEnabled) {
+    // The web-frontend container has no GUI to toggle remote access in, so
+    // CLODEX_REMOTE_ENABLE=1 brings the peer wire up at first boot with no
+    // settings write and no exec-in. The desktop never sets it, so its behavior is
+    // driven purely by the Preferences toggle as before. CLODEX_REMOTE_HOST widens
+    // the bind (0.0.0.0 in the image) so a loopback-mapped host port can publish it.
+    const envEnabled = process.env.CLODEX_REMOTE_ENABLE === '1';
+    const enabled = s.remoteEnabled || envEnabled;
+    const bindHost = process.env.CLODEX_REMOTE_HOST || '127.0.0.1';
+    if (!enabled) {
       if (getRemoteServer()) { getRemoteServer().stop(); setRemoteServer(null); }
       setRemoteError(null);
       return;
@@ -65,6 +73,7 @@ function createRemoteWiring(deps) {
       const { RemoteServer } = require('./remote');
       setRemoteServer(new RemoteServer({
         port: s.remotePort,
+        host: bindHost,
         pagePath: path.join(__dirname, 'renderer', 'remote.html'),
         getSessions: () =>
           // Agents AND bash: bash sessions are IPC-private (no registry/socket/who)

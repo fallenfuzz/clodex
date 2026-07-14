@@ -172,6 +172,52 @@ test('emit() routes a channel into local on-subscribers (drives the in-page menu
   } finally { restore(); }
 });
 
+test('rewriteExternalUrl: origin-matches proxyBase → swap to publicBase (keep path/query); else pass through', () => {
+  const { shim, restore } = loadShim();
+  try {
+    const { rewriteExternalUrl } = shim;
+    const proxy = 'http://127.0.0.1:7800';
+    const pub = 'http://localhost:7811';
+    // A dashboard link on the loopback proxyBase → rewritten to the published base,
+    // path + query preserved verbatim.
+    assert.equal(
+      rewriteExternalUrl('http://127.0.0.1:7800/_timeline?session=abc', proxy, pub),
+      'http://localhost:7811/_timeline?session=abc',
+    );
+    // A trailing slash on publicBase is normalized (no double slash).
+    assert.equal(
+      rewriteExternalUrl('http://127.0.0.1:7800/_session', proxy, 'http://localhost:7811/'),
+      'http://localhost:7811/_session',
+    );
+    // A different origin (e.g. a GitHub release link) is untouched.
+    assert.equal(
+      rewriteExternalUrl('https://github.com/avirtual/clodex/releases', proxy, pub),
+      'https://github.com/avirtual/clodex/releases',
+    );
+    // Missing proxyBase or publicBase → no rewrite (desktop / unconfigured web).
+    assert.equal(rewriteExternalUrl('http://127.0.0.1:7800/x', '', pub), 'http://127.0.0.1:7800/x');
+    assert.equal(rewriteExternalUrl('http://127.0.0.1:7800/x', proxy, ''), 'http://127.0.0.1:7800/x');
+    // Unparseable url → returned as-is (never throws).
+    assert.equal(rewriteExternalUrl('not a url', proxy, pub), 'not a url');
+  } finally { restore(); }
+});
+
+test('open-external event rewrites a proxyBase dashboard url to the published base before window.open', async () => {
+  const { shim, restore } = loadShim();
+  try {
+    const opened = [];
+    global.window.open = (url) => { opened.push(url); };
+    shim.start();
+    const ws = FakeWS.last;
+    ws.onopen();
+    ws.onmessage({ data: JSON.stringify({ t: 'welcome', workspaceId: 'w1', home: '/h',
+      proxyBase: 'http://127.0.0.1:7800', wirescopePublicBase: 'http://localhost:7811' }) });
+    await tick();
+    ws.onmessage({ data: JSON.stringify({ t: 'event', channel: 'open-external', args: ['http://127.0.0.1:7800/_timeline?s=1'] }) });
+    assert.deepEqual(opened, ['http://localhost:7811/_timeline?s=1'], 'the loopback dashboard link is rewritten before opening');
+  } finally { restore(); }
+});
+
 test('a second welcome (reconnect) reloads to re-run the restore flow', async () => {
   const { ws, restore } = await connected();
   try {

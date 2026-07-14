@@ -20,6 +20,18 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 
+// Bind host for the managed uvicorn: loopback by default (the instance is
+// in-process — _base() and every probe stay 127.0.0.1). CLODEX_WIRESCOPE_HOST
+// overrides it; ONLY the web-frontend Docker image sets it to 0.0.0.0 so the
+// full-dashboard links can be published on a loopback-mapped host port. Pure +
+// exported so the arg construction is testable without spawning uvicorn.
+function wirescopeBindHost(env = process.env) {
+  return env.CLODEX_WIRESCOPE_HOST || '127.0.0.1';
+}
+function uvicornArgs(port, env = process.env) {
+  return ['-m', 'uvicorn', 'logproxy:app', '--host', wirescopeBindHost(env), '--port', String(port)];
+}
+
 function createWirescopeSupervisor({ log, ProxyClient, getUiSettings, getUserDataPath, isPackaged }) {
   // ---------------------------------------------------------------------------
   // WirescopeSupervisor (phase-1): run the vendored wirescope, zero setup
@@ -314,8 +326,7 @@ function createWirescopeSupervisor({ log, ProxyClient, getUiSettings, getUserDat
       let logFd = 'ignore';
       try { logFd = fs.openSync(this._logFile(), 'a'); } catch {}
 
-      const child = spawn(python,
-        ['-m', 'uvicorn', 'logproxy:app', '--host', '127.0.0.1', '--port', String(port)],
+      const child = spawn(python, uvicornArgs(port),
         {
           cwd: dir,
           env: {
@@ -416,4 +427,4 @@ function createWirescopeSupervisor({ log, ProxyClient, getUiSettings, getUserDat
   return { WirescopeSupervisor };
 }
 
-module.exports = { createWirescopeSupervisor };
+module.exports = { createWirescopeSupervisor, wirescopeBindHost, uvicornArgs };

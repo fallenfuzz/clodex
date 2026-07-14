@@ -249,6 +249,18 @@ function createWebHost({ engine, log, port, token, userDataPath, registerHandler
   // window.open / an in-page file view / a path toast.
   const toConn = (channel, ...args) => { const c = als.getStore(); if (c) c.pushEvent(channel, args); };
   const openExternal = (url) => toConn('open-external', url);
+
+  // Wirescope full-dashboard reachability for the browser. The dashboard links the
+  // renderer builds point at the engine's loopback proxyBase (127.0.0.1:<port>),
+  // which the browser can't reach; the container publishes wirescope on a separate
+  // loopback-mapped host port and advertises it via CLODEX_WIRESCOPE_PUBLIC_URL.
+  // The shim rewrites any url whose origin is proxyBase to wirescopePublicBase.
+  // Both empty when unset → the shim keeps current behavior (no rewrite).
+  const wirescopeReach = () => {
+    const s = (engine.stores && engine.stores.uiSettings) ? engine.stores.uiSettings.get() : {};
+    const proxyBase = s.proxyEnabled ? (s.proxyUrl || '').trim().replace(/\/+$/, '') : '';
+    return { proxyBase, wirescopePublicBase: (process.env.CLODEX_WIRESCOPE_PUBLIC_URL || '').trim().replace(/\/+$/, '') };
+  };
   const openPath = (p) => { toConn('open-path', p); return Promise.resolve(''); };
   const showItemInFolder = (p) => toConn('show-item-in-folder', p);
   const getAppVersion = () => APP_VERSION;
@@ -269,7 +281,13 @@ function createWebHost({ engine, log, port, token, userDataPath, registerHandler
     checkForUpdate: () => {},                 // update-available is designated desktop-only
     getUpdateInfo: () => null, getReleasesCache: () => null,
     createWindow: () => {},                   // browser tabs self-navigate; workspace:new persists the record before calling this
-    openWirescopeWindow: (url) => log.info('web', `openWirescopeWindow (no browser window): ${url}`),
+    // No in-app browser window here, so the plain-click "Open full dashboard"
+    // degrades to the SAME open-external fan the ⌘-click path uses. The url still
+    // points at the engine's loopback proxyBase (e.g. 127.0.0.1:7800), unreachable
+    // from the browser; the shim rewrites it to wirescopePublicBase (welcome) at
+    // its single window.open chokepoint, so both click paths land on the published
+    // dashboard address. Background color is meaningless without a window.
+    openWirescopeWindow: (url) => openExternal(url),
     refreshAppMenu: () => {}, refreshTrayMenu: () => {}, setUiTheme: () => {},
     workspaceOfSender: (e) => (e && e.sender && e.sender.conn && e.sender.conn.workspaceId) || DEFAULT_WORKSPACE_ID,
   };
@@ -292,7 +310,7 @@ function createWebHost({ engine, log, port, token, userDataPath, registerHandler
       conn.authed = true;
       conn.workspaceId = frame.workspaceId || DEFAULT_WORKSPACE_ID;
       attachConn(conn);
-      conn.send({ t: 'welcome', workspaceId: conn.workspaceId, appVersion: APP_VERSION, home: os.homedir() });
+      conn.send({ t: 'welcome', workspaceId: conn.workspaceId, appVersion: APP_VERSION, home: os.homedir(), ...wirescopeReach() });
       replayScrollback(conn);
       return;
     }

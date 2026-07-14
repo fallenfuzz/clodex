@@ -18,12 +18,27 @@ services:
     # peering on 7900); the container side stays 8080 (CLODEX_WEB_PORT).
     ports:
       - "127.0.0.1:7810:8080"
+      # Two neighbor publishes, loopback-only (SAME trust stance as 7810 — only
+      # this machine reaches them). The web TOKEN does NOT gate these: they are
+      # separate services (wirescope's own HTTP, the peer wire's own HTTP), not
+      # routed through web-host. Their boundary is the loopback publish alone.
+      #   7811 → wirescope's full-dashboard HTTP (the "Open full dashboard" jump-outs)
+      - "127.0.0.1:7811:7800"
+      #   7820 → the peer wire (RemoteServer) so a desktop Clodex can peer THIS
+      #          container as a direct-URL peer (http://127.0.0.1:7820) — see README.
+      - "127.0.0.1:7820:7900"
     environment:
       # Empty = localhost trust. Set a strong secret before widening the publish;
       # the browser then needs ?token=<secret> on the page URL.
       CLODEX_WEB_TOKEN: "${CLODEX_WEB_TOKEN:-}"
       # Comma-separated workspace ids to restore (single-workspace by convention).
+      # NOTE: browser-created workspaces are NOT auto-added here, so they don't
+      # survive a container relaunch unless you extend this list (see README).
       CLODEX_WORKSPACES: "${CLODEX_WORKSPACES:-default}"
+      # The browser-reachable address of the wirescope dashboard (the 7811 publish
+      # above). The web client rewrites the engine's loopback dashboard links to
+      # this so "Open full dashboard" resolves. Change it if you remap 7811.
+      CLODEX_WIRESCOPE_PUBLIC_URL: "${CLODEX_WIRESCOPE_PUBLIC_URL:-http://localhost:7811}"
     volumes:
       - clodex-data:/data                     # sessions.json + stores + exports
       - clodex-dot:/home/clodex/.clodex       # agent registry / messages / log

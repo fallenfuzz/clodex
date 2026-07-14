@@ -52,6 +52,19 @@ const {
   buildRelayEnvelope, buildTerminalDm, isRelayEnvelope, hopRule, relayVersionOk,
 } = require('./relay-protocol');
 
+// A blocking registry file (agent.json) is STALE — safe to force-clean and
+// re-register over — when the process it names is dead, OR when it names OUR OWN
+// pid for a session this process isn't running. The latter is the deterministic-
+// pid case: in Docker the engine is the same pid every boot, so an agent.json
+// surviving an unclean shutdown always points at the new engine itself and a bare
+// isAlive() check would read it as "running elsewhere" forever, wedging restore
+// and fresh create under that name. Desktop is unaffected — a genuinely-other
+// Clodex sharing ~/.clodex never has our pid. Pure so it can be tested without the
+// create() spawn machinery.
+function isStaleRegistration(existingPid, ownPid, isAlive) {
+  return !isAlive(existingPid) || existingPid === ownPid;
+}
+
 function createSessionManager(deps) {
   const {
     AGENT_NAME_RE,
@@ -870,7 +883,10 @@ function createSessionManager(deps) {
               const existing = JSON.parse(
                 fs.readFileSync(pathFor(REGISTRY_DIR, name, 'registry'), 'utf-8'),
               );
-              if (!isAlive(existing.pid)) {
+              // Stale (dead pid, or our own pid for a session we don't run — the
+              // deterministic-pid Docker case) → force-clean and re-register. See
+              // isStaleRegistration above for the full rationale.
+              if (isStaleRegistration(existing.pid, process.pid, isAlive)) {
                 registry.unregister(name);
                 try { fs.unlinkSync(existing.socket); } catch {}
                 registry.register(name, socketPath);
@@ -3488,4 +3504,4 @@ function createSessionManager(deps) {
   return SessionManager;
 }
 
-module.exports = { createSessionManager };
+module.exports = { createSessionManager, isStaleRegistration };

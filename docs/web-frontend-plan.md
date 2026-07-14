@@ -455,3 +455,37 @@ per chunk, stop for rulings on genuine tensions)
 - **Chunk 4** (M): remaining dialog / in-page-modal theming (the b6 residue not
   pulled forward by the bar).
 - Fold the (a) verify passes into each chunk.
+
+### Container reachability (interleaved chunk — one loopback-bind disease)
+
+Three container issues Bogdan hit live, all the same shape (a service binds
+loopback-only, so nothing outside the container's own network can reach it) —
+fixed together, one review:
+
+- **Wirescope full-dashboard links** point at the engine's loopback proxyBase
+  (`127.0.0.1:7800`), unreachable from the browser. Fix: `CLODEX_WIRESCOPE_HOST`
+  widens the uvicorn bind (0.0.0.0 in the image only; `_base()`/probes stay
+  loopback — in-process); compose publishes `127.0.0.1:7811:7800`; the welcome
+  frame carries `proxyBase` + `wirescopePublicBase` (from
+  `CLODEX_WIRESCOPE_PUBLIC_URL`) and the shim rewrites any open-external url whose
+  origin matches proxyBase to publicBase. `openWirescopeWindow` degrades to the
+  open-external fan (the earlier dead log stub is gone).
+- **Peering the container** was impossible: the peer wire (RemoteServer) binds
+  loopback (`remote.js`) and the container never enabled it. Fix:
+  `CLODEX_REMOTE_HOST` widens the bind (threaded through remote-wiring),
+  `CLODEX_REMOTE_ENABLE=1` brings it up at first boot with no GUI toggle, compose
+  publishes `127.0.0.1:7820:7900`. Desktop peers it as a direct-URL peer
+  (`http://127.0.0.1:7820`), no SSH.
+- **Deterministic-pid registry wedge**: in Docker the engine is the same pid every
+  boot, so an `agent.json` surviving an unclean shutdown points at the new engine
+  itself; `isAlive()` reads it as "running elsewhere" forever, wedging restore and
+  fresh create under that name. Fix: a registration claiming our OWN pid for a
+  session we don't run is treated as stale and force-cleaned, like a dead pid
+  (`session-manager.js` `isStaleRegistration`). Desktop is unaffected — a
+  genuinely-other Clodex sharing `~/.clodex` never has our pid.
+
+All three bind overrides default to loopback and are set ONLY by the web image, so
+the desktop app is byte-for-byte unchanged. **Caveat (README):** container
+relaunch restores only `CLODEX_WORKSPACES`-listed workspaces, so a
+browser-created workspace needs that env extended to survive a relaunch — surfaced
+as a README caveat, not solved here.

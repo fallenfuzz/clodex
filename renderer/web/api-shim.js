@@ -75,9 +75,29 @@ function invoke(channel, args) {
   }));
 }
 
+// Rewrite a wirescope/proxy dashboard url so it resolves FROM THE BROWSER. The
+// renderer builds those links against the engine's loopback proxyBase
+// (127.0.0.1:<port>), which the browser can't reach; the container publishes
+// wirescope on a separate host port advertised as wirescopePublicBase (welcome).
+// If the url's origin matches proxyBase, swap the origin for publicBase, keeping
+// the path/query/hash. Anything else (github links, a blank publicBase, an
+// unparseable url) passes through untouched. Pure + exported for unit testing.
+function rewriteExternalUrl(url, proxyBase, publicBase) {
+  if (!url || !proxyBase || !publicBase) return url;
+  let origin;
+  try { origin = new URL(url).origin; } catch { return url; }
+  let proxyOrigin;
+  try { proxyOrigin = new URL(proxyBase).origin; } catch { return url; }
+  if (origin !== proxyOrigin) return url;
+  return publicBase.replace(/\/+$/, '') + url.slice(origin.length);
+}
+
 // ── synthetic host channels + local event fan-out.
 function dispatchEvent(channel, args) {
-  if (channel === 'open-external') { try { window.open(args[0], '_blank', 'noopener,noreferrer'); } catch { /* popup blocked */ } return; }
+  if (channel === 'open-external') {
+    const url = rewriteExternalUrl(args[0], welcomeInfo && welcomeInfo.proxyBase, welcomeInfo && welcomeInfo.wirescopePublicBase);
+    try { window.open(url, '_blank', 'noopener,noreferrer'); } catch { /* popup blocked */ } return;
+  }
   if (channel === 'open-path') { toast(`Can't open on this machine from the browser: ${args[0]}`); return; }
   if (channel === 'show-item-in-folder') { toast(`Can't reveal in Finder from the browser: ${args[0]}`); return; }
   if (channel === 'focus-hint') { try { window.focus(); } catch { /* not permitted */ } return; }
@@ -384,4 +404,4 @@ function start() {
 // incoming event frame, minus the wire.
 function emit(channel, ...args) { dispatchEvent(channel, args); }
 
-module.exports = { start, emit, toast, invoke };
+module.exports = { start, emit, toast, invoke, rewriteExternalUrl };
