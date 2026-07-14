@@ -146,6 +146,12 @@ function sanitizePeers(raw) {
       // the absence invariant syncPeerManager reads). Only a hard `=== true`
       // survives; truthy-but-not-true is dropped.
       ...(p.disabled === true ? { disabled: true } : {}),
+      // Relay-mesh membership (hub-relay federation): SAME presence-encoding as
+      // disabled — setRelayAllowed's off path deletes the key, so absence = not
+      // in the mesh (the symmetric gate's default-deny). MUST be preserved here
+      // or every settings write strips it and the flag never persists (the gate
+      // then stays OFF forever and no roster is ever pushed).
+      ...(p.relayAllowed === true ? { relayAllowed: true } : {}),
     });
   }
   return out;

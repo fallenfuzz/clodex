@@ -48,6 +48,36 @@ test('persistence: setSessionId accumulates a dedup move-to-end history', () => 
   } finally { cleanup(); }
 });
 
+test('uiSettings: peer relayAllowed + disabled survive the sanitize round-trip (presence-encoded)', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    const { uiSettings } = stores;
+    // A peer with both flags set, plus a plain one.
+    uiSettings.set({ peers: [
+      { id: 'a', label: 'A', url: 'http://a', relayAllowed: true, disabled: true },
+      { id: 'b', label: 'B', sshHost: 'b-host' },
+    ] });
+    let peers = uiSettings.get().peers;
+    const a = peers.find((p) => p.id === 'a');
+    const b = peers.find((p) => p.id === 'b');
+    // Both flags must survive the sanitizer (the bug: relayAllowed was stripped).
+    assert.strictEqual(a.relayAllowed, true, 'relayAllowed persists through sanitizePeers');
+    assert.strictEqual(a.disabled, true, 'disabled persists through sanitizePeers');
+    // Default-deny / absence invariant on a peer that never set them.
+    assert.strictEqual('relayAllowed' in b, false, 'absent relayAllowed stays absent (gate default-deny)');
+    assert.strictEqual('disabled' in b, false, 'absent disabled stays absent');
+    // Survives an unrelated settings write (the clobber path that broke it live).
+    uiSettings.set({ theme: uiSettings.get().theme });
+    peers = uiSettings.get().peers;
+    assert.strictEqual(peers.find((p) => p.id === 'a').relayAllowed, true,
+      'relayAllowed survives a later unrelated set() (no clobber)');
+    // Clearing to falsy deletes the key rather than writing relayAllowed:false.
+    uiSettings.set({ peers: peers.map((p) => p.id === 'a' ? (({ relayAllowed, ...rest }) => rest)(p) : p) });
+    assert.strictEqual('relayAllowed' in uiSettings.get().peers.find((p) => p.id === 'a'), false,
+      'deleting the key persists as ABSENT, not relayAllowed:false');
+  } finally { cleanup(); }
+});
+
 test('persistence: setHoldUntil round-trips and clears to an ABSENT key', () => {
   const { stores, cleanup } = freshStores();
   try {
