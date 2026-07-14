@@ -49,7 +49,7 @@ const NOTIFY_USER_MAX_BYTES = 16 * 1024;
 const { readEffectiveClaudeEnv, teeBlindBackend } = require('./claude-env');
 const {
   RELAY_ROSTER_TTL_MS, RELAY_MAX_HOPS,
-  buildRelayEnvelope, buildTerminalDm, isRelayEnvelope, hopRule,
+  buildRelayEnvelope, buildTerminalDm, isRelayEnvelope, hopRule, relayVersionOk,
 } = require('./relay-protocol');
 
 function createSessionManager(deps) {

@@ -1638,3 +1638,52 @@ test('_flushParkedNow: empty claim (another drainer won) is a no-op returning co
   assert.deepStrictEqual(m._flushParkedNow(target, 'cap.1', 'park-cap'), { ok: true, count: 0 });
   assert.strictEqual(m._injected.length, 0);
 });
+
+// --- hub relay: _relayClaimedDm ------------------------------------------
+// Behavioral guard for the claimed-relay hot path. This path shipped broken
+// (relayVersionOk used but missing from the relay-protocol destructure — a
+// ReferenceError on EVERY claimed relay envelope, logged-and-dropped by the
+// claim loop's catch) while the whole suite stayed green: relay-protocol.test
+// covers the pure functions and nothing drove the session-manager side. The
+// free-identifier scanner can't see it either — it checks names against
+// main.js's module scope, not sibling-module imports. So: drive the real
+// method with a valid envelope and assert the terminal leg fires.
+function mkRelay({ statuses, conn } = {}) {
+  const dm = [];
+  const c = conn || { dm: (payload, cb) => { dm.push(payload); cb && cb({ ok: true }); } };
+  const m = mk({
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    getUiSettings: () => ({ get: () => ({ peers: [
+      { label: 'docker', relayAllowed: true },
+      { label: 'murmurfi', relayAllowed: true },
+    ] }) }),
+    getPeerManager: () => ({
+      statuses: () => statuses || [{ id: 'p2', label: 'murmurfi', online: true, caps: ['dm', 'relay'], sessions: [] }],
+      get: (id) => (id === 'p2' ? c : null),
+    }),
+  });
+  return { m, dm };
+}
+
+test('_relayClaimedDm: valid envelope relays as a plain terminal DM (fields stripped, from sacred)', () => {
+  const { m, dm } = mkRelay();
+  m._relayClaimedDm('p1', 'docker', { label: 'docker', relayAllowed: true }, {
+    rv: 1, to: 'murmur', finalTarget: 'murmur@murmurfi', from: 'docker@docker',
+    body: 'hello across the star', urgent: false, hops: 1, ts: 1,
+  });
+  assert.strictEqual(dm.length, 1, 'terminal leg delivered exactly once');
+  assert.deepStrictEqual(dm[0], { to: 'murmur', from: 'docker@docker', body: 'hello across the star', urgent: false });
+});
+
+test('_relayClaimedDm: exhausted hop budget and offline destination both drop without delivering', () => {
+  const { m, dm } = mkRelay();
+  m._relayClaimedDm('p1', 'docker', { label: 'docker', relayAllowed: true }, {
+    rv: 1, to: 'murmur', finalTarget: 'murmur@murmurfi', from: 'docker@docker', body: 'x', hops: 0,
+  });
+  const offline = mkRelay({ statuses: [{ id: 'p2', label: 'murmurfi', online: false, caps: ['dm'], sessions: [] }] });
+  offline.m._relayClaimedDm('p1', 'docker', { label: 'docker', relayAllowed: true }, {
+    rv: 1, to: 'murmur', finalTarget: 'murmur@murmurfi', from: 'docker@docker', body: 'x', hops: 1,
+  });
+  assert.strictEqual(dm.length, 0, 'hop-exhausted envelope dropped');
+  assert.strictEqual(offline.dm.length, 0, 'offline destination dropped');
+});
