@@ -11,10 +11,14 @@ a web client served over WebSocket by the headless host inside the container.
 ## Quickstart
 
 ```sh
-docker compose -f docker/web/compose.yaml up --build
+npm run docker:build   # build the image
+npm run docker:up      # start (detached)
 ```
 
-Then open **http://localhost:8080**. You get the full Clodex UI: create
+(These wrap `docker compose -f docker/web/compose.yaml …`; `docker:down` and
+`docker:logs` exist too. Or run compose directly with `up --build`.)
+
+Then open **http://localhost:7810**. You get the full Clodex UI: create
 sessions, run Claude/Codex agents, watch their terminals, message between them.
 
 First run has one manual step — log the agent CLIs in (see
@@ -45,11 +49,13 @@ port to loopback only:
 
 ```yaml
 ports:
-  - "127.0.0.1:8080:8080"
+  - "127.0.0.1:7810:8080"
 ```
 
 So only your own machine can reach it, and no token is required — that's the
-localhost-trust stance.
+localhost-trust stance. (The host side is 7810; the container side is always
+8080, the port the engine listens on internally. To move it, change only the
+left-hand side.)
 
 To reach it from anywhere else — another machine on your LAN, a tunnel — you
 must set a token first:
@@ -59,8 +65,8 @@ CLODEX_WEB_TOKEN=$(openssl rand -hex 32) \
   docker compose -f docker/web/compose.yaml up --build
 ```
 
-and widen the publish (e.g. `"0.0.0.0:8080:8080"`). The browser then loads
-`http://<host>:8080/?token=<secret>`; the token gates every route and the
+and widen the publish (e.g. `"0.0.0.0:7810:8080"`). The browser then loads
+`http://<host>:7810/?token=<secret>`; the token gates every route and the
 WebSocket upgrade. **Never widen the publish without a token.**
 
 This is auth v1 — a shared secret, no TLS, no per-user login. For anything

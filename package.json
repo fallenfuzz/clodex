@@ -13,6 +13,10 @@
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac --arm64",
     "build:web": "node build/build-web.js",
+    "docker:build": "docker compose -f docker/web/compose.yaml build",
+    "docker:up": "docker compose -f docker/web/compose.yaml up -d",
+    "docker:down": "docker compose -f docker/web/compose.yaml down",
+    "docker:logs": "docker compose -f docker/web/compose.yaml logs -f",
     "release": "scripts/release.sh"
   },
   "dependencies": {
