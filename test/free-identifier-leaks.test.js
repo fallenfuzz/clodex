@@ -52,6 +52,8 @@ const SCANNED_MODULES = [
   'claude-env.js',
   'relay-protocol.js',
   'session-restore.js',
+  'engine.js',
+  'headless-main.js',
 ];
 
 // The same guard for renderer.js extractions — these modules were carved out of
