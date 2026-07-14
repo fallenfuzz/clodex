@@ -1,0 +1,6 @@
+/* app.css — the browser bundle's stylesheet entry. esbuild inlines both imports
+   into one web-dist/app.css: xterm's own CSS (the Electron page loads it from
+   node_modules) followed by the app's styles.css. Kept in this order so app rules
+   win over xterm defaults, matching renderer/index.html's link order. */
+@import "../../node_modules/@xterm/xterm/css/xterm.css";
+@import "../styles.css";

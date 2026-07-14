@@ -12,6 +12,7 @@
     "rebuild": "electron-rebuild",
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac --arm64",
+    "build:web": "node build/build-web.js",
     "release": "scripts/release.sh"
   },
   "dependencies": {
@@ -24,7 +25,8 @@
   "devDependencies": {
     "@electron/rebuild": "^4.0.4",
     "electron": "^43.0.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1"
   },
   "build": {
     "appId": "com.bogdan.clodex",
