@@ -26,9 +26,13 @@ Conventions the refactor established:
   get+set pairs (`getRemoteServer`/`setRemoteServer`).
 - **The electron gap.** `session-manager.js` and the M3 infra modules never
   `require('electron')` — electron-touching behavior injects as seam
-  functions, which is what makes them unit-testable. `app-menus.js`,
-  `ipc-handlers.js`, `remote-wiring.js` require electron directly by design
-  (they ARE the electron layer).
+  functions, which is what makes them unit-testable. The gap was widened in
+  the engine-extraction arc: **`engine.js` assembles the entire electron-free
+  module graph** and only the host-adapter layer (`main.js`, `app-menus.js`,
+  `ipc-handlers.js`, `preload.js`) imports electron.
+  `test/electron-boundary.test.js` pins that allowed set — shrinking it is
+  welcome, growing it needs a documented ruling. See *Engine and host
+  adapters* below.
 - **Leak gates.** `test/free-identifier-leaks.test.js` guards both
   directions of every extraction: a module referencing a coordinator-scope
   name that was never injected (forward), and a coordinator referencing a
@@ -41,15 +45,60 @@ Conventions the refactor established:
 
 ## Main process
 
+### Engine and host adapters
+
+The engine-extraction arc (2026-07, phases 1–4) split the main process into a
+plain-Node **engine** and thin **host adapters**, so the Electron desktop app
+is one frontend among several (a headless Linux/k8s node is the second).
+
+- **engine.js** — `createEngine({ userDataPath, seams, log })` owns the whole
+  electron-free bootstrap: stores → pollers → scheduler → log → wirescope +
+  watchdog → remote → peers → cleanup → legacy sweep → restore, in that exact
+  order. It constructs the SessionManager and every module above, and returns
+  a **flat handle object**: the six primary handles (`manager`, `stores`,
+  `syncRemoteServer`, `syncPeerManager`, `restoreSessionsForWorkspace`,
+  `shutdown`), the shared infra, the `get{RemoteServer,PeerManager,…}`
+  accessors, and the ~80-key helper surface `ipc-handlers.js` / `app-menus.js`
+  consume. The return is deliberately **broad, not a lean six-tuple**: the
+  adapters need dozens of engine internals (`manager` most of all), and
+  constructing `manager` in `main.js` would drag the entire electron-free graph
+  back into the adapter. Handing the internals out through the return keeps the
+  adapter from reaching into engine internals directly. `engine.js` is in the
+  leak-scanner's `SCANNED_MODULES` and never imports electron
+  (`test/electron-boundary.test.js`).
+- **The seam contract** — the host→engine boundary. Every electron touch the
+  engine needs is an optional seam fn on `createEngine`'s `seams`, each
+  defaulted to a no-op / sane fallback: `openPath`, `notifyOS`,
+  `setAppQuitting`, `appVersion`, `isPackaged`, `refreshAppMenu`,
+  `scheduleAppMenuRefresh`, `refreshTrayMenu`, `scheduleTrayRefresh`,
+  `restartHost`. A seam nothing reads is a lying contract — an inert
+  `getUserDataPath` seam was dropped in Phase 3 (the engine derives
+  `userDataPath` from its own param). `userDataPath` is a plain constructor
+  arg, not a seam.
+- **main.js** (~0.5k lines) — the **desktop adapter**. Its `whenReady`
+  resolves `userDataPath` (`app.getPath('userData')`), builds the electron
+  seams (`shell.openPath`, `Notification`, `app.relaunch`, the tray/menu
+  refreshers), calls `createEngine`, then stacks the desktop-only layer on top:
+  windows (`createWindow`, `workspaceOfSender`, `openWirescopeWindow`), tray +
+  app menu, `registerIpcHandlers`, update-checker banners, and the shared
+  session helpers (`fetchProxyContext/Report/Bust`,
+  `fetchSessionFiles/FilePeek/FileDiff`, `restartSession`,
+  `waitForSessionExit`, `peerProxyView` — injected into both remote-wiring and
+  ipc-handlers; deliberately NOT a module). `before-quit` /
+  `window-all-closed` route to `engine.shutdown()`.
+- **headless-main.js** — the **headless adapter**, `node headless-main.js`. No
+  Electron, no Xvfb, no windows/tray/ipc: `userDataPath` from
+  `CLODEX_DATA_DIR` (or the platform default), a pidfile single-instance lock,
+  log-only `openPath`/`notifyOS` seams, `restartHost` that shuts down and exits
+  64 for a supervisor to relaunch, and SIGTERM/SIGINT → `engine.shutdown()` →
+  exit 0. It restores `DEFAULT_WORKSPACE_ID` (or `CLODEX_WORKSPACES`). Also in
+  `SCANNED_MODULES`. Deployment: [../peering/README.md](../peering/README.md).
+
 ### Coordinator
 
-- **main.js** (~1.6k lines) — module requires, config consts, the intent
-  helpers, the shared session helpers (`fetchProxyContext/Report/Bust`,
-  `fetchSessionFiles/FilePeek/FileDiff`, `restartSession`,
-  `waitForSessionExit`, `peerProxyView` — injected into both remote-wiring
-  and ipc-handlers; deliberately NOT a module), window lifecycle
-  (`createWindow`, `workspaceOfSender`, `openWirescopeWindow`), and the
-  `app.whenReady()` bootstrap that wires everything below.
+The module-graph bootstrap that once lived in `main.js`'s `whenReady` is now
+`engine.js` (see *Engine and host adapters* above); `main.js` is the desktop
+adapter that hosts it. The modules below are what the engine assembles.
 
 ### Extracted by the refactor (M1–M5)
 

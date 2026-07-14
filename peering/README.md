@@ -1,13 +1,123 @@
-# Headless Clodex on Linux (peer node)
+# Headless Clodex (peer node)
 
-Clodex ships as a macOS GUI app, but it's an Electron/Node app with
-platform-aware code — so the **main process runs on Linux** too. With a virtual
-display (Xvfb) it runs fully headless on a server and joins your fleet as a peer
-you tunnel to from your Mac. Agents on the box can attach, take control,
-`[agent:spawn]` other agents, and everything persists across restarts.
+Clodex ships as a macOS GUI app, but its main process is plain Node with
+platform-aware code, so it runs fully headless on a server and joins your fleet
+as a peer you tunnel to from your Mac. Agents on the box can attach, take
+control, `[agent:spawn]` other agents, and everything persists across restarts.
 
-Proven end-to-end on Ubuntu 24.04 (x86_64). No app-code changes are needed —
-it's stock Clodex plus the two helpers in this folder:
+There are **two ways** to run it headless:
+
+| Path | Command | Runtime | Status |
+|---|---|---|---|
+| **Native Node** | `node headless-main.js` | plain Node, no Electron | **current** — no Xvfb, no GUI libs, no SUID sandbox |
+| **Xvfb under Electron** | `xvfb-run npm start` | full Electron under a virtual X display | **legacy** — kept working until every spoke migrates |
+
+The native path runs `headless-main.js`, a second host for the same engine
+(`engine.js`) that `main.js` — the desktop app — drives: same sessions, same
+peer wire, same persistence, none of the GUI baggage. Prefer it for new boxes.
+The Xvfb path (the original) is documented in full further down and stays
+supported meanwhile. Both are proven on Ubuntu 24.04 (x86_64), no app-code
+changes needed.
+
+---
+
+## Native headless path (`node headless-main.js`)
+
+`headless-main.js` stands the engine up under plain Node — no Electron runtime,
+so **no Xvfb, no Chromium GUI libs, and no SUID chrome-sandbox** (none of the
+legacy steps 4–5 below). node-pty compiles against Node's own ABI, so a plain
+`npm install` builds it — **not** `npx electron-rebuild`, which targets
+Electron's ABI and would make `node headless-main.js` fail to load node-pty.
+
+### Setup
+
+Toolchain + Claude CLI login are steps 1–2 of the legacy setup below, unchanged
+(Node ≥ 20 / git / a C++ toolchain for node-pty, then the `claude` OAuth once).
+Then:
+
+```bash
+git clone https://github.com/avirtual/clodex.git ~/wb-wrap-ui
+cd ~/wb-wrap-ui
+npm install          # builds node-pty against Node's ABI — NO electron-rebuild
+```
+
+### Run
+
+```bash
+node headless-main.js
+```
+
+Configuration is by environment:
+
+- **`CLODEX_DATA_DIR`** — the persistence dir (`sessions.json` + the stores).
+  Defaults to what a *non-packaged* Electron run resolves `app.getPath('userData')`
+  to: `~/.config/clodex` on Linux (**lowercase** — the dev/package name, since
+  spokes run `npm start`, never the packaged `Clodex` bundle). So on a box that
+  has been running the legacy `xvfb-run npm start` path, a bare `node
+  headless-main.js` **auto-adopts the existing `~/.config/clodex/sessions.json`
+  unchanged** — the sessions carry straight over. Set it explicitly to migrate
+  from a packaged build or to relocate the data dir.
+- **`CLODEX_WORKSPACES`** — comma-separated workspace ids to restore. Defaults to
+  the single default workspace (headless nodes are single-workspace by
+  convention).
+
+### Exit codes & supervision
+
+`headless-main.js` is built to run under a supervisor:
+
+- **0** — clean SIGTERM/SIGINT teardown (kills PTYs, stops remote/peer/tunnel).
+- **1** — another headless instance already holds the pidfile
+  (`$CLODEX_DATA_DIR/headless.pid`).
+- **64** — restart requested (the phone/menu restart over the peer wire). The
+  process shuts down cleanly and exits; **the supervisor does the relaunch.**
+
+So the systemd **user** unit wants `Restart=always` — it relaunches on both a
+crash and the deliberate exit-64 restart:
+
+```ini
+[Unit]
+Description=Clodex (headless, native Node) — multi-agent PTY manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/wb-wrap-ui
+# claude CLI lives in the user-global npm prefix; put it on PATH for spawns.
+Environment=PATH=%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Optional: Environment=CLODEX_DATA_DIR=%h/.config/clodex  (bare default shown)
+#           Environment=CLODEX_WORKSPACES=default
+ExecStart=/usr/bin/node headless-main.js
+Restart=always
+RestartSec=5
+# exit 64 = a deliberate restart request; Restart=always relaunches it like a
+# crash. Give the app time to release its pidfile + unix sockets first.
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
+```
+
+Install it the same way as the legacy unit — drop it in
+`~/.config/systemd/user/`, then `loginctl enable-linger <user>` and `systemctl
+--user enable --now <unit>` (see *Persistent service* below for the exact
+commands). `journalctl --user -u <unit> -f` tails it; the app also mirrors to
+`~/.clodex/clodex.log` and to stdout/stderr.
+
+Creating/removing sessions and peering from your Mac are identical to the legacy
+path — see *Creating &amp; removing sessions* and *Peering to it from your Mac*
+below (same `~/.config/clodex/sessions.json`, same 127.0.0.1:7900 peer server
+over an SSH tunnel). The one difference: with no live reload, a seeded session
+needs a `systemctl --user restart <unit>` to spawn, same as today.
+
+---
+
+## Legacy path (Xvfb under Electron)
+
+> **Legacy.** This runs the *full Electron app* under a virtual X display. It
+> still works and is what deployed spokes use today — migrate them to the native
+> `node headless-main.js` path above when convenient. Everything from here down
+> describes this path; it's stock Clodex plus the three helpers in this folder:
 
 | File | Role |
 |---|---|

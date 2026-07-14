@@ -26,14 +26,23 @@ const { createEngine } = require('./engine');
 const { DEFAULT_WORKSPACE_ID } = require('./catalogs');
 
 // ── userDataPath ── CLODEX_DATA_DIR wins; otherwise the platform default that
-// Electron's app.getPath('userData') resolves to for the packaged productName
-// ('Clodex'), so an existing Xvfb-under-Electron deployment's sessions.json is
-// picked up unchanged. In practice a spoke sets CLODEX_DATA_DIR explicitly.
+// `app.getPath('userData')` resolves to for a NON-packaged run of this codebase
+// — the LOWERCASE dev name `clodex` (from package.json `name`), NOT the packaged
+// productName `Clodex`. The Xvfb spokes launch via `xvfb-run npm start`
+// (= `electron .`, dev mode), never the packaged bundle, so Electron derives
+// userData from `name`; see the CLAUDE.md "userData rename" gotcha ("npm start
+// uses lowercase clodex"). Matching it lets a bare `node headless-main.js`
+// auto-adopt an existing Xvfb spoke's sessions.json unchanged. Do NOT "correct"
+// this to capital-C to match productName — that points at an empty dir and
+// silently loses every session on the first migration. To migrate from a
+// PACKAGED build (e.g. a mac Clodex.app, capital-C) set CLODEX_DATA_DIR
+// explicitly. Lowercase on all three platforms for the same reason: dev-Electron
+// resolves to `~/Library/Application Support/clodex` / `%APPDATA%/clodex` too.
 function defaultUserDataPath() {
   const home = os.homedir();
-  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'Clodex');
-  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Clodex');
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'Clodex');
+  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'clodex');
+  if (process.platform === 'win32') return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'clodex');
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'clodex');
 }
 const userDataPath = process.env.CLODEX_DATA_DIR || defaultUserDataPath();
 ensureDir(userDataPath);
