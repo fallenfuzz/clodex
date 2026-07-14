@@ -44,6 +44,8 @@ const CLAUDE_TOOLS = [
   'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup',
   // Notifications, remote & prompts
   'PushNotification', 'RemoteTrigger', 'ShareOnboardingGuide', 'AskUserQuestion',
+  // Conversation control
+  'EndConversation',
   // Publishing & review (Artifact uploads local content to claude.ai hosting)
   'Artifact', 'ReportFindings',
   // MCP plumbing
@@ -66,8 +68,11 @@ const CLAUDE_TOOLS = [
 // notifications, predate the deprecation, so denying it breaks nothing even
 // for orchestration-heavy agents), Artifact (publishes local content to
 // claude.ai hosting — egress; deny by default, enable per-session when a
-// hosted page is actually wanted), and ReportFindings (code-review-host
-// plumbing, unused in a console session). Orchestration
+// hosted page is actually wanted), ReportFindings (code-review-host
+// plumbing, unused in a console session), and EndConversation (abuse-
+// termination affordance with one of the largest always-shipped
+// descriptions in the roster; pointless in a managed console where the
+// operator kills sessions from the UI). Orchestration
 // tools (Cron*/other Task*/Monitor/worktrees) are intentionally NOT here — some
 // agents genuinely use them, and denying-by-default would force the per-session
 // overrides that re-fragment M1. The default is an editable FLOOR, not a ceiling;
@@ -75,7 +80,7 @@ const CLAUDE_TOOLS = [
 // settings panel.
 const DEFAULT_TOOL_DENY_FLOOR = [
   'NotebookEdit', 'LSP', 'PowerShell', 'ShareOnboardingGuide', 'DesignSync', 'Workflow',
-  'TaskOutput', 'Artifact', 'ReportFindings',
+  'TaskOutput', 'Artifact', 'ReportFindings', 'EndConversation',
 ];
 
 // Known CLI-shipped built-in skills. Unlike tools, skills are normally
