@@ -99,24 +99,40 @@ else
 APT_PKGS="xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 build-essential python3"
 missing=""
 for p in $APT_PKGS; do
-  # On Ubuntu 24.04 several of these are PROVIDED by their `t64` renames
-  # (time_t transition): apt satisfies `libasound2` via `libasound2t64`, but
-  # `dpkg -s libasound2` stays non-zero. Without the alias check every re-run
-  # (= the update path) re-detects them as missing → eternal need-sudo on a box
-  # without passwordless sudo. The install line keeps the unsuffixed names; apt
-  # resolves the provider. Keep this list synced with peering/README.md step 4.
+  # On Ubuntu 24.04 several of these were RENAMED to a `t64` suffix (the time_t
+  # transition) and the old name survives only as a virtual `Provides` of the
+  # t64 package. Detect either name so an already-satisfied box isn't re-flagged
+  # as missing on every re-run (= the update path) → eternal need-sudo without
+  # passwordless sudo. Keep this list synced with peering/README.md step 4.
   dpkg -s "$p" >/dev/null 2>&1 || dpkg -s "${p}t64" >/dev/null 2>&1 || missing="$missing $p"
 done
 if [ -n "$missing" ]; then
-  log "installing:$missing"
+  log "missing:$missing"
+  # `apt-get install libasound2` FAILS on a clean noble box ("no installation
+  # candidate"): apt won't auto-select a virtual provider, so the unsuffixed
+  # name is uninstallable even though libasound2t64 provides it. Map each
+  # missing name to one that actually HAS a candidate (unsuffixed on older
+  # releases, `...t64` on noble) before installing. Needs current lists, so the
+  # apt-get update runs first in the sudo path.
   if can_sudo; then
-    $SUDO apt-get update -qq \
-      && $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $missing \
+    $SUDO apt-get update -qq || fail apt-deps "apt-update-failed"
+  fi
+  install_list=""
+  for p in $missing; do
+    if apt-cache policy "$p" 2>/dev/null | grep -q 'Candidate: (none)'; then
+      install_list="$install_list ${p}t64"
+    else
+      install_list="$install_list $p"
+    fi
+  done
+  log "installing:$install_list"
+  if can_sudo; then
+    $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $install_list \
       || fail apt-deps "apt-install-failed"
   else
     need_sudo "install system packages (Electron GUI libs, Xvfb, build tools)" \
       "sudo apt-get update" \
-      "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y$missing"
+      "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y$install_list"
   fi
 fi
 ok apt-deps
@@ -138,6 +154,21 @@ ok source
 step npm-install
 npm install --no-audit --no-fund --loglevel=error >&2 || fail npm-install "npm-install-failed"
 ok npm-install
+
+# --- electron binary: guarantee it downloaded ------------------------------
+# npm sometimes SILENTLY skips electron's postinstall binary download on minimal
+# boxes (observed repeatably in fresh container/VPS installs): `npm install`
+# exits 0 but node_modules/electron/dist/ is empty, so the app can't launch and
+# `verify` later times out with no hint. electron's own install.js is idempotent
+# (isInstalled() early-exits when the binary is already there), so run it
+# directly whenever dist/ is missing to fetch the ~100MB Electron build.
+step electron-binary
+ELECTRON_DIR="$SRC_DIR/node_modules/electron"
+if [ -d "$ELECTRON_DIR" ] && [ ! -d "$ELECTRON_DIR/dist" ]; then
+  log "electron binary missing after npm install — fetching (~100MB)"
+  node "$ELECTRON_DIR/install.js" >&2 || fail electron-binary "electron-download-failed"
+fi
+ok electron-binary
 
 # --- electron-rebuild: only when the native addon needs it -----------------
 # node-pty must be built against the installed Electron ABI. Rebuild when the

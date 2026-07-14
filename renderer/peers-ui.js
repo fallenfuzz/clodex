@@ -1058,23 +1058,58 @@ function initPeersUi({
     let wasAttached = false;
     return {
       fetch: async () => {
-        const r = await window.api.peerSessionArgs(id, name);
+        // Pull the box's editable args and, in parallel, its skill catalog — the
+        // Edit Session dialog now hosts a peer-only Skills section (skills editing
+        // folded in here instead of a separate popover). Both read the box's own
+        // truth (its catalog/library), never local. The skill fetch is best-effort:
+        // a non-Claude session or an older box just yields no section.
+        const [r, sc] = await Promise.all([
+          window.api.peerSessionArgs(id, name),
+          window.api.peerSkillCatalog(id, name).catch(() => null),
+        ]);
         if (!r || !r.ok) return r || { ok: false, error: `Session "${name}" not found on ${label}.` };
         const cat = r.catalogs || {};
-        // Normalize to openArgsDialog's four data slots. settings mirrors the
-        // getSettings fields the dialog reads (claudeTools + proxy default) from
-        // the BOX, never local.
+        // Normalize to openArgsDialog's data slots. settings mirrors the getSettings
+        // fields the dialog reads (claudeTools + proxy default) from the BOX, never
+        // local. skillCatalog is the readSkillCatalog shape (names/disabledSkills/
+        // effective/skillLib/injectSkills) or null when unavailable.
         return {
           ok: true,
           res: r,
           settings: { claudeTools: cat.claudeTools || [], proxyUrl: cat.proxyUrl, proxyEnabled: cat.proxyEnabled },
           promptLib: cat.prompts || [],
           agentLib: cat.agents || [],
+          skillCatalog: (sc && sc.ok) ? sc : null,
         };
       },
+      // The dialog hands us the args patch plus (for a Claude peer) disabledSkills/
+      // injectSkills. Skills are roster-frozen on the box (fixed at conversation
+      // creation), so a plain box-side resume restart wouldn't re-read them — the
+      // exact reason the old Skills popover used a FRESH restart. So when skills ride
+      // along we persist args WITHOUT the box restart, persist skills separately,
+      // and (if the user asked to apply now) do a fresh restart + reattach here,
+      // which re-reads args AND the skill roster. A non-skills peer edit keeps the
+      // box-side resume restart (history-preserving) as before.
       save: async (patch) => {
         wasAttached = sessions.has(key);
-        return window.api.peerSetSessionArgs(id, name, patch);
+        const { disabledSkills, injectSkills, restart, ...argsPatch } = patch || {};
+        const hasSkills = disabledSkills !== undefined;
+        const r = await window.api.peerSetSessionArgs(id, name, { ...argsPatch, restart: hasSkills ? false : restart });
+        if (!r || !r.ok) return r;
+        if (hasSkills) {
+          const rs = await window.api.peerSetSessionSkills(id, name, disabledSkills, injectSkills);
+          if (!rs || !rs.ok) return rs;
+        }
+        // Fresh restart is the only kind that applies the Claude roster (skills/
+        // agents/tools). Confirm the history-clearing reload, then reattach through
+        // the shared helper (which toasts + reattaches). Returning restarted:false
+        // keeps the generic handler from double-reattaching via onRestarted.
+        if (hasSkills && restart) {
+          if (!await window.api.confirmPeerReload(name, label)) return { ok: true, restarted: false };
+          await restartPeerSessionWithReattach(id, name, true);
+          return { ok: true, restarted: false };
+        }
+        return { ok: true, restarted: !!(restart && r.restarted) };
       },
       onRestarted: () => { if (wasAttached) reattachPeerSession(id, name); },
     };
@@ -1111,6 +1146,23 @@ function initPeersUi({
     showToast(`${fresh ? 'Reloaded' : 'Restarted'} "${name}" on ${label}.`, { kind: 'peer-ui' });
     if (!wasAttached) return;   // wasn't showing it — nothing to reattach
     reattachPeerSession(id, name);
+  }
+
+  // The `⚙ Edit session` button on a PEER session's proxy bar. It opens the shared
+  // Edit Session dialog fed by a peer data source (peerArgsSource) — the same path
+  // the row's right-click "Edit Session…" uses, so the two can't drift. Skills fold
+  // INTO that dialog (a peer-only section there), so a single button covers all the
+  // remote config a viewer can edit — no dropdown. Caps ride the hello
+  // (peerStatuses), never the telemetry payload (which carries none by design), and
+  // the button's own gate (activePeerConfigurable in core) already required the
+  // 'args' cap + online, so this just opens.
+  function openPeerArgs(key) {
+    const entry = key ? sessions.get(key) : null;
+    if (!entry || !entry.peer) return;
+    const { id, name } = entry.peer;
+    const st = peerStatuses.get(id);
+    if (!st || !st.online || !peerSupportsArgs(st)) return;
+    openArgsDialog(name, peerArgsSource(id, name, peerDisplayHost(st)));
   }
 
   // --- Per-peer session visibility popover ---------------------------------
@@ -1306,6 +1358,7 @@ function initPeersUi({
   return {
     typeToTakeControl, renderPeerBar, forgetControlMirror,
     openPeerSession, peerDisplayHost, peerHideFromList,
+    openPeerArgs,
   };
 }
 

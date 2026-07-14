@@ -557,6 +557,19 @@
           <span class="hint-text">Unchecked built-ins are denied (<code>Agent(name)</code>): filtered out of the roster (reclaims their per-turn description tokens) and no longer delegatable — a trim <em>and</em> a capability removal. Not every session loads all of these; denying an absent one is a no-op. Applies on a fresh restart.</span>
         </label>
       </details>
+      <details id="args-skills-section" class="dialog-section">
+        <summary>Skills</summary>
+        <label id="args-skills-row">
+          <div class="popover-bulk"><button type="button" data-bulk="all">Check all</button><button type="button" data-bulk="none">Uncheck all</button></div>
+          <div id="args-skills-list" class="agent-checklist"></div>
+          <span class="hint-text">Unchecked skills are turned off for this session (<code>skillOverrides</code>), reclaiming their per-turn context. Skills disabled by a lower settings layer are shown locked, with their source. Like subagents, a skill change takes effect only in a NEW conversation — tick "Restart session now" to apply immediately (this clears the session's history).</span>
+          <div id="args-inject-skills-section" style="display:none;">
+            <div class="popover-subhead">Inject from Skill Library</div>
+            <div id="args-inject-skills-list" class="agent-checklist"></div>
+            <span class="hint-text">Checked library skills are injected into this session (via <code>--plugin-dir</code>). Also applies only in a new conversation.</span>
+          </div>
+        </label>
+      </details>
       <details id="args-exec-section" class="dialog-section">
         <summary>Exec commands</summary>
         <label id="args-exec-row">

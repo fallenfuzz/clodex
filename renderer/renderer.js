@@ -9,6 +9,12 @@ const { renderDiffHtml, costStackBlock, svgCostChart, bustRow } = require('./lib
 const { splitModelArg, withModelArg } = require('./lib/args-model');
 const { renderAppendChecklist, collectAppendChecklist, renderAgentChecklist, collectAgentChecklist, renderExecChecklist, collectExecChecklist, renderIntentChecklist, collectIntentChecklist, renderBuiltinChecklist, collectBuiltinChecklist, renderInjectChecklist, collectInjectChecklist, renderToolChecklist, collectToolChecklist, renderSkillChecklist, collectSkillChecklist, setChecklistAll, wireBulkToggles, setPromptLibCache, setAgentLibCache, setSkillLibCache, setExecLibCache, setClaudeToolsCache, setDefaultToolDenyCache, getPromptLibCache, getSkillLibCache, getDefaultToolDenyCache } = require('./lib/checklists');
 const { autoEnabledFor, reconcilePartialSelection } = require('../scope-util');
+const { parseSkillFrontmatter } = require('../skills-util');
+// `sessions:`-scoped skills are auto-injected for a matching session (checked +
+// disabled in the inject list). Mirrors checklist-popovers' local helper so the
+// Edit Session dialog's peer skills section marks them the same way.
+const skillAutoSet = (skillLib, session) => new Set(autoEnabledFor(
+  (skillLib || []).map((s) => ({ name: s.name, meta: parseSkillFrontmatter(s.content || '').meta })), session));
 const { createIpcLog } = require('./ipc-log');
 const { createInboxDrawer } = require('./inbox-drawer');
 const { createTermSearch } = require('./term-search');
@@ -1399,6 +1405,19 @@ function activePeerQueryable() {
   const st = peerStatuses.get(entry.peer.id);
   return !!(st && st.online && Array.isArray(st.caps) && st.caps.includes('query'));
 }
+// Attached peer AGENT tab whose owner advertises remote config editing (the 'args'
+// cap) — such a tab gets a `⚙ Edit session` button on the proxy bar that opens the
+// shared Edit Session dialog (with Skills folded in as a peer-only section), served
+// by peers-ui's openPeerArgs. Gated to agent sessions so a remote bash tab doesn't
+// sprout a config button.
+function activePeerConfigurable() {
+  const entry = activeSession ? sessions.get(activeSession) : null;
+  if (!entry || !entry.peer) return false;
+  const st = peerStatuses.get(entry.peer.id);
+  if (!st || !st.online || !Array.isArray(st.caps) || !st.caps.includes('args')) return false;
+  const type = (st.sessions || []).find((s) => s.name === entry.peer.name)?.type;
+  return !type || type === 'claude' || type === 'codex';
+}
 
 // Per-session quick-access icons on the left of the status bar. Claude gets a
 // Tools button (tool gating is Claude-only); both agent types get an Edit
@@ -1444,6 +1463,12 @@ function renderSessionActions(holdHtml = '') {
     const unseen = filesUnseen.has(activeSession) ? ' px-files-new' : '';
     btns.push(`<button class="px-action${unseen}" data-act="files" title="Files this agent's tools touched (on its own machine) — click to view or diff">${label}</button>`);
   }
+  // Peer config: a single button opening the Edit Session dialog for the REMOTE
+  // session (Skills fold in there as a peer-only section), served by peers-ui's
+  // openPeerArgs through the existing peer data source.
+  if (activePeerConfigurable()) {
+    btns.push('<button class="px-action" data-act="peer-edit" title="Edit this remote session\'s settings (args, prompts, tools, skills…)">⚙ Edit session</button>');
+  }
   el.innerHTML = btns.join('') + (holdHtml || '');
 }
 
@@ -1458,7 +1483,7 @@ function renderProxyBar() {
   // always reachable), or whenever there's telemetry to show. Hide it only for
   // non-agent sessions with nothing to display.
   if (!st || !st.payload) {
-    if (activeIsAgent() || activePeerQueryable()) {
+    if (activeIsAgent() || activePeerQueryable() || activePeerConfigurable()) {
       bar.style.display = '';
       if (main) main.classList.add('has-proxy-bar');
       tele.className = '';
@@ -1956,6 +1981,11 @@ setInterval(() => {
     const action = e.target.closest('.px-action');
     if (action && activeSession) {
       if (action.dataset.act === 'files') openFilesPopover(activeSession, action);
+      else if (action.dataset.act === 'peer-edit') {
+        // Peer proxy-bar config button — opens the shared Edit Session dialog with a
+        // peer data source (peers-ui owns the source; the dialog DOM is identical).
+        openPeerArgs(activeSession);
+      }
       else if (action.dataset.act === 'session-menu') {
         // Toggle the consolidated launcher menu. onPick routes the chosen entry
         // to its opener — the openers span two islands + a core dialog, so the
@@ -2125,6 +2155,7 @@ createInboxDrawer();
 const {
   typeToTakeControl, renderPeerBar, forgetControlMirror,
   openPeerSession, peerDisplayHost, peerHideFromList,
+  openPeerArgs,
 } = initPeersUi({
   sessions, sessionList, getActiveSession: () => activeSession,
   createTerminal, switchSession, removeSession, updateSidebarActive,
@@ -2943,7 +2974,17 @@ const argsIntentsList = document.getElementById('args-intents-list');
 const argsIntentsSection = document.getElementById('args-intents-section');
 const argsExecList = document.getElementById('args-exec-list');
 const argsExecSection = document.getElementById('args-exec-section');
+// Skills section — PEER-only (a local edit keeps the standalone Skills popover on
+// the ⚙ session menu). Folded here so a peer viewer edits every travelable setting
+// from one dialog whose modal scrolls (the floating popover overflowed under the
+// top chrome when anchored to the proxy bar).
+const argsSkillsRow = document.getElementById('args-skills-row');
+const argsSkillsList = document.getElementById('args-skills-list');
+const argsSkillsSection = document.getElementById('args-skills-section');
+const argsInjectSkillsSection = document.getElementById('args-inject-skills-section');
+const argsInjectSkillsList = document.getElementById('args-inject-skills-list');
 wireBulkToggles(argsToolsRow, argsToolsList);
+wireBulkToggles(argsSkillsRow, argsSkillsList);
 let argsEditingName = null;
 // Non-null when the open dialog targets a PEER session: a { fetch, save,
 // onRestarted } source (built by peers-ui) that swaps the data layer while the
@@ -2955,6 +2996,11 @@ let argsEditingSource = null;
 let argsAgentsPersisted = [];
 let argsAgentsRendered = [];
 let argsAgentsAuto = [];
+// Same scoped-checklist Save inputs for the peer skills inject list (mirrors the
+// standalone Skills popover): persisted inject set, rendered names, auto-included.
+let argsSkillsInjectPersisted = [];
+let argsSkillsInjectRendered = [];
+let argsSkillsInjectAuto = [];
 
 argsProxyMode.addEventListener('change', () => {
   argsProxyUrl.style.display = argsProxyMode.value === 'custom' ? '' : 'none';
@@ -2969,11 +3015,11 @@ argsProxyMode.addEventListener('change', () => {
 // never the local libraries (the box's agents/prompts/tools are the truth for its
 // sessions), and rows with no box catalog fall back to empty, not local data.
 async function openArgsDialog(name, argsSource = null) {
-  let res, settings, promptLib, agentLib;
+  let res, settings, promptLib, agentLib, skillCatalog = null;
   if (argsSource) {
     const r = await argsSource.fetch();
     if (!r || !r.ok) { alert(r && r.error ? r.error : 'Session not found.'); return; }
-    ({ res, settings, promptLib, agentLib } = r);
+    ({ res, settings, promptLib, agentLib, skillCatalog } = r);
   } else {
     [res, settings, promptLib] = await Promise.all([
       window.api.getSessionArgs(name),
@@ -3046,7 +3092,31 @@ async function openArgsDialog(name, argsSource = null) {
     setExecLibCache((await window.api.listExecCommands()) || []);
     renderExecChecklist(argsExecList, new Set(res.execCommands || []));
   }
-  for (const sec of [argsAppendSection, argsToolsSection, argsOtherSection, argsExecSection, argsIntentsSection]) sec.open = false;
+  // Skills — PEER Claude only (a local edit uses the standalone popover). Rendered
+  // from the box's skill catalog carried in the peer fetch; hidden (never collected
+  // or sent) for a local edit or a non-Claude / catalog-less peer. Mirrors the
+  // standalone Skills popover: a disable checklist + an optional library-inject
+  // section shown only when the box's skill library is non-empty.
+  const isSkillsEditable = isClaude && !!argsSource && !!skillCatalog;
+  argsSkillsSection.style.display = isSkillsEditable ? '' : 'none';
+  if (isSkillsEditable) {
+    const sc = skillCatalog;
+    renderSkillChecklist(argsSkillsList, sc.names || [], new Set(sc.disabledSkills || []),
+      sc.effective || {}, { skillsLocked: sc.skillsLocked, canReenable: sc.canReenable });
+    setSkillLibCache(sc.skillLib || []);
+    if ((sc.skillLib || []).length) {
+      const auto = skillAutoSet(sc.skillLib, name);
+      renderInjectChecklist(argsInjectSkillsList, new Set(sc.injectSkills || []), auto);
+      argsSkillsInjectPersisted = sc.injectSkills || [];
+      argsSkillsInjectRendered = (sc.skillLib || []).map((s) => s.name);
+      argsSkillsInjectAuto = [...auto];
+      argsInjectSkillsSection.style.display = '';
+    } else {
+      argsInjectSkillsSection.style.display = 'none';
+      argsSkillsInjectPersisted = []; argsSkillsInjectRendered = []; argsSkillsInjectAuto = [];
+    }
+  }
+  for (const sec of [argsAppendSection, argsToolsSection, argsOtherSection, argsSkillsSection, argsExecSection, argsIntentsSection]) sec.open = false;
   argsRestart.checked = false;
   argsOverlay.classList.remove('hidden');
   setTimeout(() => argsInput.focus(), 50);
@@ -3089,6 +3159,17 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
   // the peer patch express differently: the local path passes the collected array (or,
   // when hidden, omits it below); the peer path never carries the key at all.
   const execCommandsGrant = argsExecSection.style.display === 'none' ? undefined : collectExecChecklist(argsExecList);
+  // Skills — collected only when the peer-only section is shown; undefined otherwise
+  // so the save preserves the persisted set (a hidden section = local edit or a
+  // non-Claude peer, neither of which owns skills here). Inject is RECONCILED against
+  // the scoped render (out-of-scope survivors kept, auto excluded), exactly like the
+  // standalone popover; undefined when the library section is hidden.
+  const skillsShown = argsSkillsSection.style.display !== 'none';
+  const disabledSkills = skillsShown ? collectSkillChecklist(argsSkillsList) : undefined;
+  const injectSkills = !skillsShown || argsInjectSkillsSection.style.display === 'none'
+    ? undefined
+    : reconcilePartialSelection(argsSkillsInjectPersisted, argsSkillsInjectRendered,
+        collectInjectChecklist(argsInjectSkillsList), argsSkillsInjectAuto);
   const name = argsEditingName;
   // Capture the peer source before closeArgsDialog() clears it (the save runs
   // after the dialog closes).
@@ -3107,9 +3188,12 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
     ? await source.save({
         // Peer save NEVER carries execCommands — exec grants are local-only, so the
         // key is omitted entirely (not even []) so a peer edit can't clear the box's
-        // grants. remote-wiring strips it belt-and-suspenders regardless.
+        // grants. remote-wiring strips it belt-and-suspenders regardless. Skills DO
+        // travel now (peer-only section): disabledSkills/injectSkills carry the
+        // collected values, and the peer source persists them + fresh-restarts on
+        // apply-now (a resume wouldn't re-read the roster).
         extraArgs: parsed, restart, proxy, systemPrompt: undefined, agents, denyBuiltins,
-        disabledTools, disabledSkills: undefined, injectSkills: undefined, systemPromptFile, appendPromptFiles, intents,
+        disabledTools, disabledSkills, injectSkills, systemPromptFile, appendPromptFiles, intents,
       })
     : await window.api.setSessionArgs(name, parsed, restart, proxy, undefined, agents, denyBuiltins, disabledTools, undefined, undefined, systemPromptFile, appendPromptFiles, intents, execCommandsGrant);
   if (!res || !res.ok) {

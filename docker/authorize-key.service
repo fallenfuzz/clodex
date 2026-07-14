@@ -1,0 +1,12 @@
+[Unit]
+Description=Install mounted SSH pubkey for clodex
+Before=ssh.service
+ConditionPathExists=/authorized_keys
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/authorize-key.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
