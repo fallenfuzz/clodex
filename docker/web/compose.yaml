@@ -28,8 +28,12 @@ services:
       - clodex-data:/data                     # sessions.json + stores + exports
       - clodex-dot:/home/clodex/.clodex       # agent registry / messages / log
       - claude-auth:/home/clodex/.claude      # Claude OAuth — persists the login
-      # Mount host project checkouts for agents to work on (uncomment + adjust):
-      # - ./work:/home/clodex/work
+      # The agents' workspace. A named volume by default so work created inside
+      # the container SURVIVES `down` — but the recommended setup is a bind
+      # mount of a real host folder (work lands on your disk, editable and
+      # backed up like any other project). Swap the line to e.g.:
+      #   - ~/clodex-work:/home/clodex/work
+      - clodex-work:/home/clodex/work
     init: true                            # PID-1 reaper for PTY process trees
     # The supervisor half of the exit-64 restart contract: relaunch on a
     # restart-request (exit 64) and on a clean exit-0, as a service should.
@@ -47,3 +51,4 @@ volumes:
   clodex-data:
   clodex-dot:
   claude-auth:
+  clodex-work:

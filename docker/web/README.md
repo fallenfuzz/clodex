@@ -75,25 +75,40 @@ authentication (that layered arc is future work; the token predicate is the
 single seam it will replace). Treat the token like a password: anyone who has
 it has full control of the agents.
 
-## Volumes
+## Where your work lives (read this before `down`)
 
-Three named volumes persist state across `up`/`down`/rebuild:
+The container filesystem is a throwaway: `stop`/`restart` keep it, but
+`down` (and any rebuild) destroys it. Everything that matters is therefore
+on volumes, which survive `down`, rebuilds, and image upgrades:
 
 | Volume | Mount | Holds |
 |---|---|---|
 | `clodex-data` | `/data` | `sessions.json`, stores, saved exports |
 | `clodex-dot` | `/home/clodex/.clodex` | agent registry, inter-agent messages, log |
 | `claude-auth` | `/home/clodex/.claude` | Claude login (see below) |
+| `clodex-work` | `/home/clodex/work` | the agents' workspace |
 
-To let agents work on a real checkout, mount it under the home directory by
-uncommenting the example bind in `compose.yaml`:
+Only `down -v` deletes the volumes — that is the "wipe everything" switch
+(sessions, login, and the work volume included).
+
+**Recommended: bind-mount a real host folder as the workspace.** The
+`clodex-work` named volume is just the safety net so nothing is lost by
+default; a named volume is awkward to reach from the host. Point the
+workspace at a host directory instead, in `compose.yaml`:
 
 ```yaml
-    # - ./work:/home/clodex/work
+      - ~/clodex-work:/home/clodex/work
 ```
 
-Point the left side at a host directory; whatever you put there is the agents'
-workspace and the only host path they can touch.
+Now everything agents create or clone lands on your disk — editable,
+backed up, and still there when the container is long gone. Put existing
+checkouts in that folder to hand them to the agents; it is the only host
+path they can touch.
+
+If you switch from the named volume to a bind later, copy anything you
+want to keep out of the volume first (`docker compose -f
+docker/web/compose.yaml cp clodex:/home/clodex/work ./rescued-work`,
+while it's up).
 
 ## Agent login (the macOS OAuth gotcha)
 
@@ -136,4 +151,5 @@ desktop. To turn it off, disable the proxy in Preferences.
 - **Restart contract**: the service restarts automatically on a clean exit and
   on an in-app restart request (a deliberate exit code the supervisor relaunches).
 - **Stop / wipe**: `down` keeps the volumes; add `-v` to delete them (this drops
-  sessions AND the agent login, forcing a fresh OAuth).
+  sessions, the agent login, AND the `clodex-work` volume — bind-mounted host
+  folders are never touched).
