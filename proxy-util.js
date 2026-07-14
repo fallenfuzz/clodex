@@ -158,13 +158,30 @@ function headroomBand(ttl_s) {
 // those as "a human touched this pane" killed the atPrompt latch whenever the
 // user merely LOOKED at a session — an idle agent never turns again, so the
 // latch stayed dead and auto-compact could never fire (live miss 2026-07-08).
-// Only data that isn't purely auto-replies counts as human. Unknown sequences
-// count as human — that fails toward a missed compact, never a bad injection.
+//
+// The worse case is MOUSE TRACKING: the Claude CLI enables it (DECSET 1000/1006),
+// so xterm forwards every scroll/click over a Claude pane as an SGR mouse report
+// (\x1b[<64;x;yM) — or a legacy X10 report (\x1b[M + 3 raw bytes) — through this
+// same path. Scrolling to merely READ a pane then stamps lastUserInputTs, which
+// makes _maybeParkDelivery think the operator is composing and parks EVERY DM to
+// that agent until the 300s quiet-gate cap drains it ("everything 5 minutes late";
+// mouse reports carry no Enter so the draft never closes on its own). So these
+// must classify as non-human too. Only data that isn't purely auto-replies counts
+// as human; unknown sequences count as human — that fails toward a missed compact
+// or an unnecessary take-control, never a bad injection or a swallowed keystroke.
 const PTY_AUTO_REPLY_RE = new RegExp(
   '\\x1b\\[[IO]' // focus in / focus out (mode 1004)
   + '|\\x1b\\[\\d+;\\d+R' // cursor position report (DSR 6 reply)
+  + '|\\x1b\\[\\?\\d+;\\d+R' // ?-prefixed cursor position report
   + '|\\x1b\\[0n' // status report ok (DSR 5 reply)
   + '|\\x1b\\[[?>]\\d+(;\\d+)*c' // device attributes reply (DA1/DA2)
+  + '|\\x1b\\[<\\d+;\\d+;\\d+[Mm]' // SGR mouse report (mode 1006) — scroll/click/drag
+  + '|\\x1b\\[M[\\s\\S]{3}' // legacy X10 mouse — 3 arbitrary raw bytes (may incl \n)
+  + '|\\x1b\\[\\?\\d+u' // kitty keyboard protocol flags report
+  + '|\\x1b\\[\\?\\d+;\\d+\\$y' // DECRPM mode report (DECRQM reply)
+  + '|\\x1b\\[\\?6n' // DECDSR (startup one-shot)
+  + '|\\x1b\\[>q' // XTVERSION request (startup one-shot)
+  + '|\\x1bP[\\s\\S]*?\\x1b\\\\' // DCS string, terminated by ST (\x1b\\)
   + '|\\x1b\\]\\d+;[^\\x07\\x1b]*(\\x07|\\x1b\\\\)', // OSC query reply (color etc.)
   'g');
 

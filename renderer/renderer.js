@@ -580,8 +580,9 @@ function createTerminal(name, peer = null) {
 
   // Send keystrokes to PTY. Peer terminals: pass through while holding control;
   // otherwise the first data-producing key auto-takes control (buffering what
-  // you type during the acquire). onData only fires for actual input, so plain
-  // clicks / scroll / copy never trigger it — passive browsing stays passive.
+  // you type during the acquire). onData ALSO fires for mouse/scroll reports
+  // (the Claude pane enables mouse tracking) and terminal query replies, so
+  // typeToTakeControl gates on isHumanPtyInput — passive browsing stays passive.
   terminal.onData((data) => {
     if (peer) {
       if (peer.controlled) {

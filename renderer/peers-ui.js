@@ -33,7 +33,7 @@
 // DOM-bound, so no unit tests per the R1 rule — move-only fidelity is the guarantee.
 
 const { PendingInput } = require('../peer-input-queue');
-const { versionSeverity, updateApplies, releaseAgeInfo } = require('../proxy-util');
+const { versionSeverity, updateApplies, releaseAgeInfo, isHumanPtyInput } = require('../proxy-util');
 const { parseDeployLine } = require('../peer-deploy');
 const { SEV_LINE } = require('./lib/constants');
 const { esc, baseName } = require('./lib/format');
@@ -419,6 +419,11 @@ function initPeersUi({
   // is pending appends to the same queue (no second acquire) via the in-flight
   // guard inside PendingInput.
   function typeToTakeControl(key, data) {
+    // xterm's onData also carries terminal chatter — mouse reports (the Claude
+    // pane enables tracking), focus/query replies — so scroll-reading a read-only
+    // peer tab would otherwise STEAL control. Gate on the same classifier the main
+    // process uses for human-input detection: only a real keystroke takes control.
+    if (!isHumanPtyInput(data)) return;
     const entry = sessions.get(key);
     if (!entry || !entry.peer || entry.peer.controlled) return;
     // Offline peer: nothing to acquire (the bar already says "reconnecting"); a

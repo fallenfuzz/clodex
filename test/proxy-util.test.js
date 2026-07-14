@@ -188,6 +188,20 @@ test('isHumanPtyInput: terminal auto-replies are not human', () => {
   assert.strictEqual(isHumanPtyInput('\x1b[>0;276;0c'), false); // DA2
   assert.strictEqual(isHumanPtyInput('\x1b]11;rgb:1e1e/1e1e/1e1e\x07'), false); // OSC color reply (BEL)
   assert.strictEqual(isHumanPtyInput('\x1b]10;rgb:ffff/ffff/ffff\x1b\\'), false); // OSC reply (ST)
+  // Mouse tracking (modes 1000/1006) — scroll-reading a Claude pane emits these;
+  // misclassifying them as human parked every DM for 300s (the fix's whole point).
+  assert.strictEqual(isHumanPtyInput('\x1b[<64;12;4M'), false); // SGR wheel-up (press)
+  assert.strictEqual(isHumanPtyInput('\x1b[<0;12;4m'), false); // SGR button release (lowercase m)
+  assert.strictEqual(isHumanPtyInput('\x1b[<35;40;12M'), false); // SGR drag
+  assert.strictEqual(isHumanPtyInput('\x1b[M\x20\x21\x22'), false); // legacy X10 mouse (3 raw bytes)
+  assert.strictEqual(isHumanPtyInput('\x1b[M \n!'), false); // X10 with a raw \n among the 3 bytes ([\s\S]{3})
+  // Other terminal reports.
+  assert.strictEqual(isHumanPtyInput('\x1b[?24;80R'), false); // ?-prefixed cursor position report
+  assert.strictEqual(isHumanPtyInput('\x1b[?1u'), false); // kitty keyboard flags report
+  assert.strictEqual(isHumanPtyInput('\x1b[?2026;2$y'), false); // DECRPM mode report
+  assert.strictEqual(isHumanPtyInput('\x1b[?6n'), false); // DECDSR startup one-shot
+  assert.strictEqual(isHumanPtyInput('\x1b[>q'), false); // XTVERSION startup one-shot
+  assert.strictEqual(isHumanPtyInput('\x1bP>|term 1.0\x1b\\'), false); // DCS reply, ST-terminated
   assert.strictEqual(isHumanPtyInput(''), false);
   assert.strictEqual(isHumanPtyInput(null), false);
 });
@@ -197,9 +211,11 @@ test('isHumanPtyInput: keystrokes are human, unknown sequences fail toward human
   assert.strictEqual(isHumanPtyInput('\r'), true);
   assert.strictEqual(isHumanPtyInput('\x15'), true); // Ctrl-U
   assert.strictEqual(isHumanPtyInput('\x1b[A'), true); // arrow key
-  assert.strictEqual(isHumanPtyInput('\x1b[<0;12;4M'), true); // mouse press — human-ish, keep
-  // Chatter mixed with a real keystroke is human.
+  // Chatter mixed with a real keystroke is still human — the strip removes the
+  // auto-reply and a genuine keystroke remains, so we must not swallow it.
   assert.strictEqual(isHumanPtyInput('\x1b[Ihello'), true);
+  assert.strictEqual(isHumanPtyInput('\x1b[<64;12;4Mx'), true); // a scroll report + a typed 'x'
+  assert.strictEqual(isHumanPtyInput('a\x1b[M \n!'), true); // a typed 'a' before an X10 mouse report
   // Unknown escape → human (fails toward a missed compact, never a bad injection).
   assert.strictEqual(isHumanPtyInput('\x1b[?999z'), true);
 });
