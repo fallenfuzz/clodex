@@ -936,6 +936,9 @@ html, body {
 /* The Update button toggles via .hidden (peers-ui) but had no rule — without this
    the dead (onclick=null) button shows even when no update is available. */
 #peer-info-update.hidden { display: none; }
+/* Relay-mesh toggle: hidden until the config read resolves (and for a peer whose
+   settings we can't read), toggled via .hidden in peers-ui. */
+#peer-info-relay-row.hidden { display: none; }
 
 /* Lay the (short, single-word) tool/skill checklists out in two columns so the
    popover stays wide-and-short instead of a tall scroll. */
@@ -2658,6 +2661,8 @@ html, body {
 .peer-info-body { display: flex; flex-direction: column; gap: 4px; padding: 4px 2px 2px; font-size: 12px; }
 .peer-info-line { line-height: 1.4; }
 .peer-info-key { display: inline-block; min-width: 62px; color: var(--text-dim); }
+.peer-info-relay-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding: 0 2px; font-size: 12px; cursor: pointer; }
+.peer-info-relay-row input { margin: 0; }
 /* A selected session the peer no longer lists (asleep / gone): shown so it
    isn't silently dropped from the selection, but visibly de-emphasized. */
 .agent-check.peer-select-gone { opacity: 0.55; }

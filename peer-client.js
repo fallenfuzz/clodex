@@ -15,6 +15,7 @@
 
 const http = require('http');
 const { URL } = require('url');
+const { RELAY_ENVELOPE_V } = require('./relay-protocol');
 
 const HELLO_INTERVAL_MS = 15000;      // offline poll cadence
 const RECONNECT_MIN_MS = 1000;        // attach/events stream backoff
@@ -25,11 +26,17 @@ const REQUEST_TIMEOUT_MS = 5000;
 const QUERY_TIMEOUT_MS = 20000;
 
 class PeerConnection {
-  constructor({ id, label, url, emit, selfLabel, helloIntervalMs }) {
+  constructor({ id, label, url, emit, selfLabel, helloIntervalMs, computeRoster }) {
     this.id = id;
     this.label = label;
     this.url = url.replace(/\/+$/, '');
     this._emit = emit;
+    // Hub-relay federation (we are the HUB for this connection). Injected callback
+    // computeRoster(id) → the split-horizon'd, access-gated roster of agents on our
+    // OTHER peers this spoke may reach (settings-aware, so it lives in peer-wiring,
+    // not here). Called once per successful hello tick, but only when the spoke
+    // advertised the 'relay' cap — so we never push to a box that can't act on it.
+    this._computeRoster = computeRoster || null;
     // Poll cadence; overridable so tests can drive multiple hellos in-window
     // (production always uses the 15s default).
     this._helloIntervalMs = helloIntervalMs || HELLO_INTERVAL_MS;
@@ -132,6 +139,16 @@ class PeerConnection {
         // latency. Emits 'peer-dms' up to main for local delivery.
         if (this._selfLabel && Array.isArray(body.dmOrigins) && body.dmOrigins.includes(this._selfLabel)) {
           this._claimAndEmit();
+        }
+        // Hub-relay: push this spoke its relay roster, but only if it advertised the
+        // 'relay' cap (else it 501s and can't cache it). Every hello tick is the
+        // blessed cadence — the full-replacement push keeps the spoke's roster fresh
+        // (its TTL-by-liveness expiry keys off this refresh), and a relayAllowed
+        // toggle converges within one tick as computeRoster recomputes the gate.
+        if (this._computeRoster && Array.isArray(next.caps) && next.caps.includes('relay')) {
+          let roster = null;
+          try { roster = this._computeRoster(this.id); } catch { roster = null; }
+          if (Array.isArray(roster)) this.pushRoster(roster);
         }
       } else {
         this._setOnline(false);
@@ -414,6 +431,19 @@ class PeerConnection {
     });
   }
 
+  // Push the relay roster to this spoke (hub-relay federation). WE are the hub for
+  // this connection; the caller computes the split-horizon'd, access-gated roster
+  // of agents on our OTHER peers that this spoke may reach, and we deliver it. Only
+  // fired when the spoke advertised the 'relay' cap (peer-wiring gates on the
+  // parsed hello caps), so this never 501-spams an old box. `via` is our own label
+  // (this._selfLabel) — what the spoke keys its via-table/outbox under. Fire-and-
+  // forget: a failed push just retries on the next tick with a fresh roster.
+  pushRoster(roster, cb) {
+    this._request('POST', '/api/peer/roster',
+      { rv: RELAY_ENVELOPE_V, via: this._selfLabel, roster: Array.isArray(roster) ? roster : [] },
+      (err, resp) => { if (cb) cb(err ? { ok: false, error: err.message } : resp || { ok: false }); });
+  }
+
   // ---- plumbing ----
 
   _request(method, path, payload, cb, timeout = REQUEST_TIMEOUT_MS) {
@@ -480,9 +510,13 @@ class PeerConnection {
 
 // Owns one PeerConnection per configured peer; reconciled from settings.
 class PeerManager {
-  constructor({ emit, selfLabel }) {
+  constructor({ emit, selfLabel, computeRoster }) {
     this._emit = emit;
     this._selfLabel = selfLabel || null; // our origin on the wire (DM federation)
+    // Hub-relay: settings-aware roster computation, handed to each connection so it
+    // can push per hello tick (see PeerConnection). Injected here so peer-client
+    // stays electron-free — the settings/statuses read lives in peer-wiring.
+    this._computeRoster = computeRoster || null;
     this._peers = new Map();          // id -> PeerConnection
   }
 
@@ -507,7 +541,7 @@ class PeerManager {
     }
     for (const [id, w] of wanted) {
       if (!this._peers.has(id)) {
-        const conn = new PeerConnection({ ...w, emit: this._emit, selfLabel: this._selfLabel });
+        const conn = new PeerConnection({ ...w, emit: this._emit, selfLabel: this._selfLabel, computeRoster: this._computeRoster });
         this._peers.set(id, conn);
         conn.start();
       }

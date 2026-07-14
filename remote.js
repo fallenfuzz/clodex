@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 
 const crypto = require('crypto');
+const { relayVersionOk, isQualifiedSender } = require('./relay-protocol');
 
 const NAME_RE = /^[a-zA-Z0-9._-]{1,64}$/;
 const MAX_BODY = 64 * 1024;          // matches the IPC message cap
@@ -34,7 +35,7 @@ class RemoteServer {
                 query, createSession, killSession, restartSession,
                 getSessionArgs, setSessionArgs,
                 getSkillCatalog, setSessionSkills,
-                deliverDm, claimDms, listDmOrigins }) {
+                deliverDm, claimDms, listDmOrigins, receiveRoster }) {
     this._port = port;
     this._pagePath = pagePath;
     this._getSessions = getSessions;
@@ -88,6 +89,13 @@ class RemoteServer {
     this._deliverDm = deliverDm || null;
     this._claimDms = claimDms || null;
     this._listDmOrigins = listDmOrigins || null;
+    // Hub-relay federation (spoke side). receiveRoster caches the relayable
+    // who-list the hub pushes to THIS box via POST /api/peer/roster (the hub is a
+    // consumer of us; it computes the split-horizon'd, access-gated roster and
+    // pushes it right after each hello poll). Presence gates the 'relay' cap so a
+    // hub only ever pushes to a spoke that can act on it — an old spoke without the
+    // callback 501s and the hub skips it. Absent → no 'relay' cap, no endpoint.
+    this._receiveRoster = receiveRoster || null;
     this._server = null;
     this._clients = new Set();       // live SSE responses (events feed)
     this._attach = new Map();        // name -> Set of SSE responses (attach feeds)
@@ -361,6 +369,7 @@ class RemoteServer {
       if (this._createSession) caps.push('create'); // covers create + kill + restart (ship together)
       if (this._getSessionArgs) caps.push('args');   // remote session config editing — args + skills pairs, ship together under one cap
       if (this._deliverDm) caps.push('dm'); // inbound DM + outbox claim (federation)
+      if (this._receiveRoster) caps.push('relay'); // accepts a hub-pushed relay roster (hub-relay federation)
       return this._json(res, 200, {
         ok: true, app: 'clodex', host: this._hostLabel,
         version: this._version, caps,
@@ -637,7 +646,10 @@ class RemoteServer {
         const origin = String(msg.origin || '');
         const text = typeof msg.body === 'string' ? msg.body : '';
         if (!NAME_RE.test(to)) return this._json(res, 400, { ok: false, error: 'bad target name' });
-        if (!NAME_RE.test(from)) return this._json(res, 400, { ok: false, error: 'bad sender name' });
+        // `from` may be bare (a direct DM) or fully-qualified `name@origin` (the
+        // terminal leg of a relayed DM — `from` is sacred, carried through unchanged
+        // from the originating spoke). deliverDm keys the senderTag off the '@'.
+        if (!isQualifiedSender(from)) return this._json(res, 400, { ok: false, error: 'bad sender name' });
         if (!NAME_RE.test(origin)) return this._json(res, 400, { ok: false, error: 'bad origin' });
         if (!text) return this._json(res, 400, { ok: false, error: 'empty message' });
         if (text.length > MAX_BODY) return this._json(res, 413, { ok: false, error: 'message too large' });
@@ -661,6 +673,44 @@ class RemoteServer {
         Promise.resolve()
           .then(() => this._claimDms(origin))
           .then((messages) => this._json(res, 200, { ok: true, messages: Array.isArray(messages) ? messages : [] }))
+          .catch((e) => this._json(res, 500, { ok: false, error: e.message }));
+      });
+    }
+    // Relay roster push — {rv, via, roster:[{name,origin,type}]}. The HUB (a
+    // consumer of this box) computes the set of agents on its OTHER peers that
+    // THIS spoke is permitted to reach (split-horizon + symmetric relayAllowed
+    // gate, both applied hub-side) and pushes it here every hello tick. `via` is
+    // the hub's own label — what this spoke keys its via-table and outbox under
+    // (HTTP doesn't self-identify the caller; it's the same label the hub uses as
+    // `origin` on /api/dm to us). Full-replacement, not a delta. receiveRoster
+    // caches it as the spoke's via-table; a subsequent [agent:dm name@origin]
+    // whose origin is unconfigured-but-in-roster routes out through `via`.
+    if (req.method === 'POST' && p === '/api/peer/roster') {
+      if (!this._receiveRoster) return this._json(res, 501, { ok: false, error: 'relay not available' });
+      return this._readBody(req, res, (body) => {
+        let msg;
+        try { msg = JSON.parse(body); } catch { return this._json(res, 400, { ok: false, error: 'bad JSON' }); }
+        if (!relayVersionOk(msg.rv)) return this._json(res, 400, { ok: false, error: 'unsupported relay version' });
+        const via = String(msg.via || '');
+        if (!NAME_RE.test(via)) return this._json(res, 400, { ok: false, error: 'bad via' });
+        // Sanitize the roster wire value into trusted shape before it's cached:
+        // both name and origin must be name-charset (they become dm targets/keys),
+        // and the origin must not be `via` itself (a hub advertising its own label
+        // as a reachable origin would make the spoke try to relay back to it).
+        const rosterIn = Array.isArray(msg.roster) ? msg.roster : [];
+        const roster = [];
+        for (const e of rosterIn) {
+          if (!e || typeof e !== 'object') continue;
+          const name = String(e.name || '');
+          const origin = String(e.origin || '');
+          const type = e.type === 'codex' ? 'codex' : 'claude';
+          if (!NAME_RE.test(name) || !NAME_RE.test(origin)) continue;
+          if (origin === via) continue;
+          roster.push({ name, origin, type });
+        }
+        Promise.resolve()
+          .then(() => this._receiveRoster({ via, roster }))
+          .then(() => this._json(res, 200, { ok: true }))
           .catch((e) => this._json(res, 500, { ok: false, error: e.message }));
       });
     }

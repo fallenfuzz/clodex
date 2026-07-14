@@ -1279,6 +1279,8 @@ function initPeersUi({
   const peerInfoBody = document.getElementById('peer-info-body');
   const peerInfoUpdateBtn = document.getElementById('peer-info-update');
   const peerInfoDisableBtn = document.getElementById('peer-info-disable');
+  const peerInfoRelayRow = document.getElementById('peer-info-relay-row');
+  const peerInfoRelayCheck = document.getElementById('peer-info-relay');
 
   function closePeerInfoPopover() {
     peerInfoPopover.classList.add('hidden');
@@ -1286,6 +1288,8 @@ function initPeersUi({
     peerInfoUpdateBtn.classList.add('hidden');
     peerInfoUpdateBtn.onclick = null;
     peerInfoDisableBtn.onclick = null;
+    peerInfoRelayRow.classList.add('hidden');
+    peerInfoRelayCheck.onchange = null;
   }
 
   function openPeerInfoPopover(id, anchorBtn) {
@@ -1325,6 +1329,22 @@ function initPeersUi({
     // Disable (pause) — always offered here: the ⓘ icon only renders for a live
     // peer, so anything reaching this popover is disable-able.
     peerInfoDisableBtn.onclick = () => { closePeerInfoPopover(); disablePeer(id, label); };
+    // Relay-mesh membership (hub-relay federation, default OFF). The flag is a
+    // hub-side per-peer SETTING, not part of the peer's hello, so read it from
+    // config (non-blocking, like the Update resolve below). Guard a stale resolve
+    // landing after the popover was closed/retargeted. Toggling persists via main;
+    // the gated roster push converges within one hello tick (~15s).
+    peerInfoRelayRow.classList.add('hidden');
+    peerInfoRelayCheck.onchange = null;
+    window.api.getSettings().then((s) => {
+      if (peerInfoPopover.classList.contains('hidden') || peerInfoPopover.dataset.peerId !== String(id)) return;
+      const cfg = ((s && s.peers) || []).find((p) => String(p.id) === String(id));
+      peerInfoRelayCheck.checked = !!(cfg && cfg.relayAllowed);
+      peerInfoRelayRow.classList.remove('hidden');
+      peerInfoRelayCheck.onchange = () => {
+        window.api.peerSetRelayAllowed(id, peerInfoRelayCheck.checked).catch(() => {});
+      };
+    }).catch(() => {});
     // Hidden when the peer isn't behind us: same-version or ahead has nothing to
     // gain from our deploy (the script pulls latest master). Kept for
     // patch/minor/major and 'unknown' (dev/unparseable — can't rule it out).

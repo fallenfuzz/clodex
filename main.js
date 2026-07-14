@@ -994,6 +994,7 @@ const SessionManager = createSessionManager({
     REGISTRY_DIR,
     RELOAD_CONTINUATION_DELAY,
     SCROLLBACK_MAX,
+    SELF_LABEL,
     SHORT_TEXT_DELAY,
     Transport,
     WIRE_INTENTS_LIVE,

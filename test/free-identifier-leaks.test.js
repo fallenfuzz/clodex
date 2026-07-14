@@ -50,6 +50,7 @@ const SCANNED_MODULES = [
   'transcript.js',
   'fs-util.js',
   'claude-env.js',
+  'relay-protocol.js',
 ];
 
 // The same guard for renderer.js extractions — these modules were carved out of

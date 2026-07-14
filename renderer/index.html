@@ -257,6 +257,9 @@
     <div id="peer-info-popover" class="hidden">
       <div class="popover-title"><span>Peer — <span id="peer-info-popover-name"></span></span><button type="button" class="popover-close" id="peer-info-popover-close" title="Close" aria-label="Close">&times;</button></div>
       <div id="peer-info-body" class="peer-info-body"></div>
+      <label id="peer-info-relay-row" class="peer-info-relay-row hidden" title="Let this peer's sessions see and DM sessions on your other relay-enabled peers, routed through this hub. Off by default.">
+        <input type="checkbox" id="peer-info-relay"> Relay mesh — allow cross-peer see &amp; DM via this hub
+      </label>
       <div class="popover-actions">
         <button id="peer-info-update" type="button" class="hidden">Update Clodex</button>
         <button id="peer-info-disable" type="button" class="secondary">Disable</button>

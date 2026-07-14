@@ -778,6 +778,21 @@ function registerIpcHandlers(deps) {
     log.info('peer', `${rec.label || id} ${on ? 'disabled' : 'enabled'}`);
     return { ok: true };
   });
+  // Per-peer relay-mesh membership (hub-relay federation, default OFF). Absence =
+  // off, mirroring the `disabled` flag's presence-encoding. The hub reads this
+  // flag when it computes each spoke's relayable roster (P1) and when it relays a
+  // claimed DM (P4): a cross-peer leg forms only when BOTH endpoints are
+  // relayAllowed (symmetric gate). No broadcast/sync needed — nothing in the peer
+  // connection lifecycle depends on it; the roster push reads it live each tick.
+  ipcMain.handle('peer:setRelayAllowed', (_e, id, on) => {
+    const peers = (uiSettings.get().peers || []).map((p) => ({ ...p }));
+    const rec = peers.find((p) => String(p.id) === String(id));
+    if (!rec) return { ok: false, error: 'no such peer' };
+    if (on) rec.relayAllowed = true; else delete rec.relayAllowed;
+    uiSettings.set({ peers });
+    log.info('peer', `${rec.label || id} relay ${on ? 'allowed' : 'disallowed'}`);
+    return { ok: true };
+  });
   // Per-peer visibility selection. Renderer reads the whole map at startup and
   // keeps a local copy fresh from setVisible responses.
   ipcMain.handle('peer:visible', () => uiSettings.get().peerVisible || {});

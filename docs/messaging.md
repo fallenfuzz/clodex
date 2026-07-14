@@ -211,6 +211,64 @@ the two directions use different transports (full wire detail in
   no notice; the claim endpoint is origin-unauthenticated (tunnel-trust,
   same posture as control acquisition).
 
+## 4a. Hub-relay federation (spoke ↔ hub ↔ spoke)
+
+Spokes never dial each other — only the hub holds a tunnel to each. So a
+spoke→spoke DM is **relayed through the hub**, reusing the two federation legs
+above wholesale. Wire-format single source of truth: **relay-protocol.js**
+(`RELAY_ENVELOPE_V`, `RELAY_MAX_HOPS`, the envelope/roster helpers); the
+per-peer opt-in is the `relayAllowed` setting; the build capability is the
+distinct `relay` cap.
+
+- **Discovery (roster push).** The hub computes, per allowed spoke X, the
+  agents on its OTHER allowed peers X may reach (`computeRosterFor`:
+  split-horizon — never X's own — plus the **symmetric** `relayAllowed(X) &&
+  relayAllowed(Y)` gate), and **pushes** it to X via `POST /api/peer/roster`
+  (served by the spoke, called by the hub each hello tick — but only to a spoke
+  advertising the `relay` cap, never 501-spamming an old box). Payload
+  `{rv, via, roster:[{name,origin,type}]}`; `via` is the hub's label. The spoke
+  caches it as its **via-table** (`_relayRosters`, keyed by `via`), TTL'd by
+  liveness (`RELAY_ROSTER_TTL_MS` — no refresh ⇒ hub leg dropped ⇒ reaped).
+  `[agent:who]` merges these as bare `name@origin` annotated `(via hub)`.
+- **Relay-out (spoke → hub), `_routeFederatedDm` leg 2.5.** After the direct
+  legs miss, `_relayViaForOrigin(origin)` consults the via-table; a hit enqueues
+  to the spoke's OWN outbox under `origin=<via>` with a **relay envelope**
+  (`buildRelayEnvelope`: adds `finalTarget` + `hops=RELAY_MAX_HOPS`, `from`
+  qualified with the spoke's `SELF_LABEL`). Reuses the box→consumer outbox leg
+  entirely — no new spoke→hub transport.
+- **Relay hop (the hub), `_deliverClaimedDms` → `_relayClaimedDm`.** A claimed
+  message carrying a `finalTarget` isn't for a local agent — the hub relays it
+  onward via a plain direct `conn.dm` (the terminal leg). This is the **one
+  deliberate, bounded exception** to the loop guard: it still NEVER passes through
+  `_handleIntent` (stays on the claimed-delivery side), and the **hop-count is the
+  belt** — `hopRule` drops at `hops<=0`, so a re-relay that loops back dies. The
+  **access gate is re-checked here** (`relayAllowed` both ends); a refusal (only
+  reachable via a hand-typed off-mesh address, since discovery already hides
+  non-allowed peers) bounces explicitly to the sender (`_bounceRelaySender`). The
+  bounce is tagged from the **reserved synthetic sender `relay`** (`relay@<hub>` on
+  the sender's spoke): a reply to it dies cleanly at the hub (no local agent
+  `relay`), so don't spawn a real agent named `relay` on a hub — it's reserved.
+- **The terminal-leg strip is a FEATURE, not a consequence.** `buildTerminalDm`
+  (and `conn.dm`'s fixed shape) carry ONLY `{to,from,origin,body,urgent}` — the
+  relay fields (`finalTarget`, `hops`, `rv`) are stripped. If the destination
+  agent is offline the dest box sees an ordinary direct DM to a missing local
+  name → normal park/bounce, with no `finalTarget` to chase and no way to
+  re-relay. Do NOT propagate `finalTarget` onto the terminal leg — that reopens
+  the loop the strip + `hops<=0` guard together close.
+- **`from` is sacred** — fully-qualified end-to-end (`agent@docker`), NEVER
+  rewritten to a hop origin. It's the load-bearing field for the reverse reply
+  path: the destination tags the recipient's sender with it, and the reply
+  re-enters the relay in reverse (dest's via-table → hub → origin). Because the
+  terminal leg carries a qualified `from`, the box's `/api/dm` accepts it
+  (`isQualifiedSender`) and `deliverDm` uses it as the senderTag directly rather
+  than re-qualifying with the hub's origin.
+- **Receipts — best-effort (v1), one deliberate exception to leg-2 silence.**
+  There's no true end-to-end verdict across the two async legs (that's a v2
+  receipt propagation). The relay-out DOES, unlike a normal silent outbox
+  enqueue, inject a sender-side `relayed via <via> → <target>` ack — a relayed
+  path is longer and less obvious than a direct outbox reply, so silence there
+  reads as a black hole. Sender-side only; the far end sends no receipt.
+
 ## 5. Memory (memory-store.js)
 
 Per-agent markdown units (frontmatter: id/scope/learned_at/pinned + body).

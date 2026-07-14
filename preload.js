@@ -215,6 +215,7 @@ window.api = {
   peerAttachedNames: () => ipcRenderer.invoke('peer:attachedNames'),
   peerForgetAttached: (id, name) => ipcRenderer.invoke('peer:forgetAttached', id, name),
   peerSetDisabled: (id, on) => ipcRenderer.invoke('peer:setDisabled', id, on),
+  peerSetRelayAllowed: (id, on) => ipcRenderer.invoke('peer:setRelayAllowed', id, on),
   peerControlledNames: () => ipcRenderer.invoke('peer:controlledNames'),
   peerForgetControlled: (id, name) => ipcRenderer.invoke('peer:forgetControlled', id, name),
   peerVisible: () => ipcRenderer.invoke('peer:visible'),

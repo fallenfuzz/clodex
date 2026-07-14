@@ -262,7 +262,12 @@ function createRemoteWiring(deps) {
         // reply trailer teaches an address that routes back.
         deliverDm: ({ to, from, origin, body, urgent }) => {
           manager._knownDmOrigins.add(origin);
-          const senderTag = `${from}@${origin}`;
+          // A bare `from` is a direct DM — qualify it with the origin that dialed us.
+          // An already-qualified `from` (contains '@') is the terminal leg of a
+          // relayed DM: the originating spoke's fully-qualified sender, carried
+          // through unchanged (sacred). Use it as the senderTag directly so the
+          // recipient's reply routes back to the TRUE origin, not the relay hub.
+          const senderTag = from.includes('@') ? from : `${from}@${origin}`;
           const r = manager._gatedDeliver(to, senderTag, body, urgent === true);
           manager._broadcast('ipc-message', { type: 'dm', from: senderTag, to, body: `WIRE←${origin}: ${body}` });
           if (r.delivered) return { ok: true, delivered: true };
@@ -282,6 +287,16 @@ function createRemoteWiring(deps) {
         // Advertise which origins have mail waiting, so a consumer only claims when
         // there's something to fetch.
         listDmOrigins: () => listOutboxOrigins(OUTBOX_DIR),
+        // ---- hub-relay federation (spoke side) ----
+        // A hub (a consumer of this box) pushed us its relay roster — the agents on
+        // its OTHER peers we're permitted to reach, keyed by `via` (the hub's label).
+        // Cache it as our via-table so [agent:who] can surface them and
+        // _routeFederatedDm can relay a dm out through `via`. Presence of this
+        // callback is what advertises the 'relay' cap in the hello.
+        receiveRoster: ({ via, roster }) => {
+          manager._setRelayRoster(via, roster);
+          log.info('peer', `relay roster from ${via}: ${roster.length} agent(s)`);
+        },
         // ---- peer-attach surface (Clodex-to-Clodex) ----
         hostLabel: SELF_LABEL,
         version: app.getVersion(),

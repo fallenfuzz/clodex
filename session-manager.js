@@ -47,6 +47,10 @@ const NOTIFY_USER_MAX_BYTES = 16 * 1024;
 // directly like ./wire-intents — it's stateless and electron-free, so it needs
 // no dep seam. See the wire-intent cutover gate in create().
 const { readEffectiveClaudeEnv, teeBlindBackend } = require('./claude-env');
+const {
+  RELAY_ROSTER_TTL_MS, RELAY_MAX_HOPS,
+  buildRelayEnvelope, buildTerminalDm, isRelayEnvelope, hopRule,
+} = require('./relay-protocol');
 
 function createSessionManager(deps) {
   const {
@@ -70,6 +74,7 @@ function createSessionManager(deps) {
     REGISTRY_DIR,
     RELOAD_CONTINUATION_DELAY,
     SCROLLBACK_MAX,
+    SELF_LABEL,
     SHORT_TEXT_DELAY,
     Transport,
     WIRE_INTENTS_LIVE,
@@ -157,6 +162,13 @@ function createSessionManager(deps) {
       // the box routes outbound DMs to an outbox only for an origin it has heard
       // from (plus any origin dir still on disk after a restart). Runtime-only.
       this._knownDmOrigins = new Set();
+      // Hub-relay federation (spoke side): relay rosters a hub pushed us, keyed by
+      // `via` (the hub's label). Each value is { roster:[{name,origin,type}], at }.
+      // The via-table (origin → via) and the [agent:who] relay listing both derive
+      // from this, gated on freshness (RELAY_ROSTER_TTL_MS — a roster not refreshed
+      // within the window means the hub's leg dropped). Runtime-only, like
+      // _knownDmOrigins.
+      this._relayRosters = new Map();
       // name -> last-broadcast parked-DM count, so the pending-count poll emits
       // deltas only (see startPendingPoll). Entry dropped when count returns to 0.
       this._lastPendingCounts = new Map();
@@ -1896,7 +1908,22 @@ function createSessionManager(deps) {
               }
             }
           }
-          const others = [...localAgents, ...externalNames, ...remoteNames].filter(p => p.name !== senderName);
+          // Hub-relay: agents on OTHER spokes reachable through a hub that pushed us
+          // its roster. The address stays BARE (`worker@remote-linux`) — the hub is
+          // inferred from our via-table at send time, never typed — but the entry is
+          // annotated `(via <hub>)` so the sender knows it's a relayed path (best-
+          // effort receipts, higher latency, dies if the hub's leg drops). Deduped
+          // against directly-reachable addresses so a peer we can reach both ways
+          // isn't listed twice.
+          const directAddrs = new Set([...localAgents, ...externalNames, ...remoteNames].map(p => p.name));
+          const relayNames = [];
+          for (const e of this._relayRosterEntries()) {
+            const addr = `${e.name}@${e.origin}`;
+            if (directAddrs.has(addr)) continue;
+            directAddrs.add(addr);
+            relayNames.push({ name: addr, label: `via ${e.via}` });
+          }
+          const others = [...localAgents, ...externalNames, ...remoteNames, ...relayNames].filter(p => p.name !== senderName);
           const list = others.length
             ? others.map(p => p.label ? `${p.name} (${p.label})` : p.name).join(', ')
             : '(none)';
@@ -2851,6 +2878,39 @@ function createSessionManager(deps) {
     // if `origin` is a known outbox origin (heard from this run, or a dir still on
     // disk), queue it for that origin to claim (box leg); (3) else bounce. Handles
     // its own notice + ipc-log; the caller just breaks after.
+    // Hub-relay: cache a roster a hub pushed us (full replacement for that `via`).
+    // An empty roster is stored too (not deleted) so a hub that just lost all its
+    // relayable agents converges us to empty on the next tick rather than leaving
+    // a stale set; the TTL then reaps the entry if the hub stops pushing entirely.
+    _setRelayRoster(via, roster) {
+      if (!via) return;
+      this._relayRosters.set(via, { roster: Array.isArray(roster) ? roster : [], at: Date.now() });
+    }
+
+    // Fresh relay entries across every via, as {name, origin, via, type}. Stale
+    // rosters (hub leg dropped — no refresh within the TTL) are skipped and pruned.
+    _relayRosterEntries() {
+      const now = Date.now();
+      const out = [];
+      for (const [via, rec] of this._relayRosters) {
+        if (now - rec.at > RELAY_ROSTER_TTL_MS) { this._relayRosters.delete(via); continue; }
+        for (const e of rec.roster) out.push({ name: e.name, origin: e.origin, via, type: e.type });
+      }
+      return out;
+    }
+
+    // The relay hop for an `origin` we can only reach via a hub: the `via` label to
+    // enqueue the outbox under, or null if no fresh roster lists that origin. First
+    // fresh match wins (our star has a single hub, so there's never a real choice).
+    _relayViaForOrigin(origin) {
+      const now = Date.now();
+      for (const [via, rec] of this._relayRosters) {
+        if (now - rec.at > RELAY_ROSTER_TTL_MS) { this._relayRosters.delete(via); continue; }
+        if (rec.roster.some((e) => e.origin === origin)) return via;
+      }
+      return null;
+    }
+
     _routeFederatedDm(session, senderName, intent) {
       const at = intent.target.indexOf('@');
       const name = intent.target.slice(0, at);
@@ -2896,8 +2956,32 @@ function createSessionManager(deps) {
         this._broadcast('ipc-message', { type: 'dm', from: senderName, to: `${name}@${origin}`, body: `WIRE→${origin} (outbox): ${intent.body}` });
         return;
       }
+      // (2.5) Relay leg: an `origin` we can't reach directly (no configured peer,
+      // never heard from) but which a hub advertised in a roster it pushed us. Route
+      // THROUGH the hub: enqueue to OUR OWN outbox under origin=<via> (the hub claims
+      // it like any box→consumer reply) carrying a relay envelope with the final
+      // target. `from` is qualified with OUR label here and never rewritten again —
+      // it's the load-bearing field for the reply path. Best-effort: the sender gets
+      // a "relayed" ack (ruling 5, the deliberate exception to leg-2 silence), but no
+      // end-to-end receipt (that's v2).
+      const via = this._relayViaForOrigin(origin);
+      if (via) {
+        const qualifiedFrom = `${senderName}@${SELF_LABEL}`;
+        const env = buildRelayEnvelope({
+          to: name, finalTarget: intent.target, from: qualifiedFrom, origin: via,
+          body: intent.body, urgent: intent.urgent === true,
+        });
+        const r = enqueueOutbox(OUTBOX_DIR, via, { ...env, ts: Date.now() }, this._nextParkSeq());
+        if (!r.ok) { bounce(`could not relay to ${intent.target} via ${via}: ${r.error}`); return; }
+        if (getRemoteServer()) { try { getRemoteServer().notifyDmMail(via); } catch {} }
+        if (session) this._injectText(session,
+          `[agent:dm] relayed via ${via} → ${intent.target} (best-effort; no delivery receipt${intent.urgent ? '' : ', held for a warm/active recipient'}).`,
+          { parkable: true });
+        this._broadcast('ipc-message', { type: 'dm', from: qualifiedFrom, to: intent.target, body: `WIRE→${via} (relay→${intent.target}): ${intent.body}` });
+        return;
+      }
       // (3) No route.
-      bounce(`no route to '${intent.target}' — peer '${origin}' is not configured or has never contacted this box.`);
+      bounce(`no route to '${intent.target}' — peer '${origin}' is not configured, has never contacted this box, and no hub advertises it.`);
     }
 
     // Deliver DMs a consumer just claimed from a box's outbox. Each rides straight
@@ -2908,11 +2992,18 @@ function createSessionManager(deps) {
     // anything else is dropped with an ipc-log line rather than looped. Park gives
     // the remote sender no notice (the accepted mailbox-leg asymmetry — nothing is
     // lost, it drains on the target's next turn).
+    //
+    // Hub-relay (P4): a claimed message carrying a finalTarget is NOT for a local
+    // agent — WE are the hub on the path between two spokes. Relay it onward via a
+    // plain direct DM (conn.dm), staying on this claimed-delivery side of the loop
+    // guard (never _handleIntent). The hop-count is the belt: a re-relay that
+    // somehow loops back arrives with hops already spent and is dropped.
     _deliverClaimedDms(peerId, messages) {
       const cfg = (getUiSettings().get().peers || []).find((p) => p && p.id === peerId);
       const peerLabel = (cfg && cfg.label) || String(peerId);
       for (const m of (Array.isArray(messages) ? messages : [])) {
         if (!m || typeof m.to !== 'string') continue;
+        if (isRelayEnvelope(m)) { this._relayClaimedDm(peerId, peerLabel, cfg, m); continue; }
         const senderTag = `${m.from || 'peer'}@${peerLabel}`;
         const local = this.sessions.get(m.to);
         if (!local || !local.agentType) {
@@ -2923,6 +3014,72 @@ function createSessionManager(deps) {
         this._gatedDeliver(m.to, senderTag, m.body || '', m.urgent === true);
         this._broadcast('ipc-message', { type: 'dm', from: senderTag, to: m.to, body: `WIRE←${peerLabel}: ${m.body || ''}` });
       }
+    }
+
+    // Relay one claimed relay-envelope onward (the hub hop). `srcId`/`srcLabel`/
+    // `srcCfg` identify the spoke we claimed from (the sender's side); `m` is the
+    // relay envelope { rv, to, finalTarget, from, body, urgent, hops }. The terminal
+    // leg is a PLAIN direct DM — conn.dm sends only {to,from,origin,body,urgent}, so
+    // the relay fields are stripped by construction (a deliberate loop-prevention
+    // feature: an offline destination sees an ordinary direct DM to a missing local
+    // name and parks/bounces it, with no finalTarget to chase). `from` is carried
+    // through UNCHANGED — sacred, the reply path depends on it.
+    _relayClaimedDm(srcId, srcLabel, srcCfg, m) {
+      const drop = (why) => {
+        log.info('peer', `relay from ${srcLabel} → ${m.finalTarget} dropped: ${why}`);
+        this._broadcast('ipc-message', { type: 'dm', from: m.from || srcLabel, to: m.finalTarget, body: `WIRE relay DROPPED (${why}): ${m.body || ''}` });
+      };
+      if (!relayVersionOk(m.rv)) return drop('unsupported relay version');
+      // Loop-guard belt: budget spent (or malformed) → drop. A legitimate single
+      // relay arrives with hops=1 → 0 and proceeds; a looped re-relay arrives at 0.
+      const hop = hopRule(m.hops);
+      if (!hop.relay) return drop('hop budget exhausted');
+      const at = String(m.finalTarget || '').indexOf('@');
+      if (at <= 0) return drop('malformed finalTarget');
+      const destName = m.finalTarget.slice(0, at);
+      const destOrigin = m.finalTarget.slice(at + 1);
+      // Access gate (symmetric, both endpoints must be relayAllowed on THIS hub).
+      // P1 already hides non-allowed peers from the roster, so reaching here means a
+      // hand-typed off-mesh address — bounce explicitly (ruling 7) so the sender
+      // isn't left guessing. srcCfg is the sender's spoke; destCfg the destination.
+      const peers = getUiSettings().get().peers || [];
+      const destCfg = peers.find((p) => p && (p.label || '').toLowerCase() === destOrigin.toLowerCase());
+      const srcAllowed = !!(srcCfg && srcCfg.relayAllowed);
+      const destAllowed = !!(destCfg && destCfg.relayAllowed);
+      if (!srcAllowed || !destAllowed) {
+        this._bounceRelaySender(srcId, m, `relay to ${m.finalTarget} not permitted (peer not relay-enabled)`);
+        return drop('relay not permitted (relayAllowed gate)');
+      }
+      // Resolve the destination peer connection (online + dm cap). Best-effort: an
+      // offline/unreachable destination just drops (no far-end receipt in v1).
+      const dest = (getPeerManager() ? getPeerManager().statuses() : [])
+        .find((st) => st.label && st.label.toLowerCase() === destOrigin.toLowerCase());
+      if (!dest || !dest.online) return drop(`destination peer '${destOrigin}' offline`);
+      if (!(dest.caps || []).includes('dm')) return drop(`destination peer '${destOrigin}' predates dm federation`);
+      const conn = getPeerManager().get(dest.id);
+      if (!conn) return drop(`destination peer '${destOrigin}' not reachable`);
+      // Terminal leg: plain direct DM, `from` preserved fully-qualified. The relay
+      // fields are stripped by construction — buildTerminalDm returns exactly
+      // conn.dm's {to,from,body,urgent} signature (conn.dm stamps origin itself).
+      conn.dm(buildTerminalDm({ to: destName, from: m.from, body: m.body || '', urgent: m.urgent === true }), (resp) => {
+        if (!(resp && resp.ok)) log.info('peer', `relay → ${m.finalTarget} not delivered: ${(resp && resp.error) || 'no response'}`);
+      });
+      this._broadcast('ipc-message', { type: 'dm', from: m.from || srcLabel, to: m.finalTarget, body: `WIRE relay ${srcLabel}→${destOrigin}: ${m.body || ''}` });
+    }
+
+    // Bounce a refused relay back to the originating sender on their spoke. Best-
+    // effort: the sender is a local agent on the spoke we claimed from (srcId), so
+    // we reach them via that spoke's own /api/dm (we're its consumer). `m.from` is
+    // `sender@srcLabel`; the bounce targets the bare local name. Silent on failure —
+    // a refusal that can't be delivered is logged at the drop site.
+    _bounceRelaySender(srcId, m, why) {
+      const conn = getPeerManager() ? getPeerManager().get(srcId) : null;
+      if (!conn) return;
+      const from = String(m.from || '');
+      const at = from.indexOf('@');
+      const senderLocal = at > 0 ? from.slice(0, at) : from;
+      if (!senderLocal) return;
+      try { conn.dm({ to: senderLocal, from: 'relay', body: `NOT delivered to ${m.finalTarget}: ${why}.`, urgent: false }, () => {}); } catch {}
     }
 
     // Is `senderName` an agent a recipient could actually [agent:dm] back RIGHT
@@ -2947,7 +3104,12 @@ function createSessionManager(deps) {
       if (at > 0) {
         const origin = senderName.slice(at + 1);
         const peers = getPeerManager() ? getPeerManager().statuses() : [];
-        return peers.some((p) => p.online && p.label && p.label.toLowerCase() === origin.toLowerCase());
+        if (peers.some((p) => p.online && p.label && p.label.toLowerCase() === origin.toLowerCase())) return true;
+        // Hub-relay: a sender whose origin isn't a directly-configured online peer
+        // may still be reachable THROUGH a hub — if a fresh relay roster lists that
+        // origin, the reply routes out via the relay leg (_routeFederatedDm 2.5).
+        // Without this the trailer would be wrongly suppressed for every relayed dm.
+        return this._relayViaForOrigin(origin) != null;
       }
       const s = this.sessions.get(senderName);
       return !!(s && s.agentType && !s._dead);

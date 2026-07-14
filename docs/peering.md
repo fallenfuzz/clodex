@@ -47,7 +47,9 @@ patch with kill+respawn on `restart:true`) and `GET /api/skill-catalog/:name` +
 `POST /api/session-skills/:name` (Edit Skills over the wire: read the box's skill
 catalog, persist the disabled/inject sets — a separate `/api/restart-session`
 applies) — all four under the `args` cap, shipped together — and `POST /api/dm` +
-`/api/dm/claim` (federation, `dm` cap).
+`/api/dm/claim` (federation, `dm` cap) and `POST /api/peer/roster` (hub-relay
+federation, `relay` cap — the hub pushes this spoke the roster of agents on its
+OTHER relay-enabled peers; see messaging.md §4a).
 
 Fan-out from the session manager (cheap no-ops when unattached):
 `pushOutput` (4MB backpressure → destroy the stream — a half-open tunnel
@@ -188,3 +190,8 @@ create/kill/restart now ride the `create` cap over the wire.
 - Control auto-releases on last-detach; re-take rides replay, not a loop.
 - `resolveDeployFolder` precedence: live srcDir > persisted > default.
 - The wire is one-directional; box→consumer traffic is outbox+claim only.
+- Hub-relay (messaging.md §4a): spokes never dial each other; a spoke→spoke DM
+  is relayed through the hub, reusing the outbox+claim legs. Opt-in per peer
+  (`relayAllowed`, default OFF, symmetric both-ends gate); distinct `relay` cap;
+  `from` is sacred (never rewritten); the terminal leg strips relay fields
+  (loop-prevention) and `RELAY_MAX_HOPS=1` is the belt.

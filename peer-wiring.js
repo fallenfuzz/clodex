@@ -60,8 +60,22 @@ function createPeerWiring(deps) {
     const s = getUiSettings().get();
     if (!getPeerManager()) {
       const { PeerManager } = require('./peer-client');
+      const { computeRosterFor } = require('./relay-protocol');
       setPeerManager(new PeerManager({
         selfLabel: SELF_LABEL,
+        // Hub-relay: compute the roster to push to spoke `targetId` — agents on our
+        // OTHER relayAllowed peers, split-horizon'd and both-endpoints-gated. Reads
+        // live settings + peer statuses each call, so a relayAllowed toggle takes
+        // effect on the next hello tick with no extra wiring.
+        computeRoster: (targetId) => {
+          const allowed = new Set(
+            (getUiSettings().get().peers || [])
+              .filter((p) => p && p.relayAllowed)
+              .map((p) => String(p.id)),
+          );
+          if (!allowed.has(String(targetId))) return [];
+          return computeRosterFor(targetId, getPeerManager().statuses(), allowed);
+        },
         emit: (channel, ...args) => {
           // DM federation: claimed box→consumer messages are internal, not a
           // renderer event — deliver them locally and stop (keep bodies off the
