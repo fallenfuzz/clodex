@@ -173,13 +173,15 @@ RUN git clone --quiet --branch "$BRANCH" "$REPO_URL" /home/clodex/wb-wrap-ui \
 # at boot) brings Clodex up automatically. `systemctl --user enable` just creates
 # the default.target.wants symlink — there's no user bus at build time, so we
 # make the symlink by hand (identical result). WorkingDirectory is pinned to the
-# baked source dir, exactly as clodex-deploy.sh's service step does.
+# baked source dir, exactly as clodex-deploy.sh's service step does. The
+# --no-sandbox flag lives in peering/clodex.service itself (that unit's comment
+# explains why), so a peer-update deploy reinstalling the unit can't strip it —
+# we only rewrite WorkingDirectory here, matching the deploy's single sed.
 RUN mkdir -p /home/clodex/.config/clodex \
              /home/clodex/.config/systemd/user/default.target.wants \
  && printf '{\n  "remoteEnabled": true,\n  "remotePort": 7900\n}\n' \
       > /home/clodex/.config/clodex/ui-settings.json \
  && sed -e 's#^WorkingDirectory=.*#WorkingDirectory=/home/clodex/wb-wrap-ui#' \
-        -e 's#^ExecStart=.*#ExecStart=/usr/bin/xvfb-run -a /usr/bin/npm start -- --no-sandbox#' \
       /home/clodex/wb-wrap-ui/peering/clodex.service \
       > /home/clodex/.config/systemd/user/clodex.service \
  && ln -sf ../clodex.service \
