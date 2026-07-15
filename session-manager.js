@@ -1349,7 +1349,9 @@ function createSessionManager(deps) {
 
       for (const line of lines) {
         const intent = parseIntent(line);
-        if (!intent || intent.type === 'escape') continue;
+        // `end` is the body terminator — meaningless on the line-at-a-time
+        // PTY path (no body capture here), swallowed like escape.
+        if (!intent || intent.type === 'escape' || intent.type === 'end') continue;
         this._handleIntent(session.name, intent);
       }
     }
@@ -1671,6 +1673,11 @@ function createSessionManager(deps) {
         const line = lines[i].trim();
         i++;
         const intent = parseIntent(line);
+        // `end` is a pure body terminator: as `next` inside a capture loop it
+        // ends the body (the generic boundary check below covers it — any
+        // recognized intent does); at THIS level it is spent and emits
+        // nothing. Never pushed → never dispatched, deduped, or gated.
+        if (intent && intent.type === 'end') continue;
         if (!intent || intent.type === 'escape') {
           const nearMiss = !intent && looksLikeIntent(line);
           if (nearMiss) {
@@ -1780,6 +1787,11 @@ function createSessionManager(deps) {
     async _handleIntent(senderName, intent) {
       const session = this.sessions.get(senderName);
 
+      // `end` is a body terminator, not an action — both scan paths filter it
+      // before dispatch, so this is defensive (a future call site must not
+      // bounce it through the gate as "the end intent is disabled").
+      if (intent.type === 'end') return;
+
       // Near-miss bounce (synthesized in _extractIntents): a `[agent:…]`-shaped
       // line that parsed to nothing used to vanish in silence — the agent
       // believed it acted and nothing happened. Diagnostic, not a capability,
@@ -1795,7 +1807,7 @@ function createSessionManager(deps) {
           const more = intent.more ? ` (+${intent.more} more unrecognized [agent:…] lines this turn)` : '';
           this._injectText(session,
             `[agent:?] unrecognized intent \`${intent.text}\`${more} — nothing was done. `
-            + 'Valid intents: dm, resend, who, name, context, memory, spawn, file, exec, remind, notify-user. '
+            + 'Valid intents: dm, resend, who, name, context, memory, spawn, file, exec, remind, notify-user, end. '
             + 'To quote an intent literally, escape it as \\[agent:…].', { parkable: true });
         }
         this._broadcast('ipc-message', {

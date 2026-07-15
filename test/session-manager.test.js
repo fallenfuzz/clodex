@@ -1290,6 +1290,57 @@ test('exec terminator: dm / memory multi-line capture is left untouched (greedy)
   assert.strictEqual(mem.body, 'fact one\nfact two');
 });
 
+// --- [agent:end] body terminator ---
+// The footgun this closes fired live: a memory-remember followed by
+// operator-facing prose saved the prose INTO the unit (bodies run to the next
+// intent or end of turn). `end` is the explicit close: it terminates the open
+// body via the generic boundary check and is itself discarded — never emitted
+// as an intent, so it can't be dispatched, deduped, or gated.
+
+test('[agent:end]: closes a dm body — trailing operator prose is NOT swallowed', () => {
+  const m = mkExtract();
+  const out = m._extractIntents(
+    '[agent:dm clodex] the message\nbody line two\n[agent:end]\nAnd here I talk to my operator.');
+  assert.deepStrictEqual(out.map((x) => x.type), ['dm'], 'end itself emits nothing, prose is not an intent');
+  assert.strictEqual(out[0].body, 'the message\nbody line two');
+});
+
+test('[agent:end]: closes a memory-remember body (the live incident shape)', () => {
+  const m = mkExtract();
+  const out = m._extractIntents(
+    '[agent:memory remember] the durable rule\n[agent:end]\nDone. Report to the operator follows.');
+  assert.deepStrictEqual(out.map((x) => x.type), ['memory']);
+  assert.strictEqual(out[0].body, 'the durable rule');
+});
+
+test('[agent:end]: enables interleaving — prose between two bodied intents', () => {
+  const m = mkExtract();
+  const out = m._extractIntents([
+    '[agent:dm alice] first message',
+    '[agent:end]',
+    'Console note between intents.',
+    '[agent:dm bob] second message',
+    '[agent:end]',
+    'Closing note.',
+  ].join('\n'));
+  assert.deepStrictEqual(out.map((x) => x.type), ['dm', 'dm']);
+  assert.strictEqual(out[0].body, 'first message');
+  assert.strictEqual(out[1].body, 'second message');
+});
+
+test('[agent:end]: bare at top level (no open body) is silently spent', () => {
+  const m = mkExtract();
+  assert.deepStrictEqual(m._extractIntents('[agent:end]'), []);
+  // and it is not a near-miss: no `unknown` bounce is synthesized for it
+  assert.deepStrictEqual(m._extractIntents('prose\n[agent:end]\nmore prose'), []);
+});
+
+test('[agent:end]: escaped \\[agent:end] stays literal body text, not a boundary', () => {
+  const m = mkExtract();
+  const out = m._extractIntents('[agent:dm clodex] quoting the terminator:\n\\[agent:end]\nstill the body');
+  assert.strictEqual(out[0].body, 'quoting the terminator:\n\\[agent:end]\nstill the body');
+});
+
 test('remind: multi-line reminder text is captured greedily (allow-set), stops at next intent', () => {
   const m = mkExtract();
   // Free-text body spans lines (greedy like dm — NOT the exec JSON terminator).

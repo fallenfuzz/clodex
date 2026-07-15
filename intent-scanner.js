@@ -47,6 +47,16 @@ function parseIntent(rawLine) {
 
   if (/^\[agent:name\]\s*$/.test(cleaned)) return { type: 'name' };
 
+  // `end` = explicit body TERMINATOR, the only intent that IS nothing: it
+  // closes an open multi-line body capture (dm/memory/remind/notify-user/…)
+  // and is then discarded — _extractIntents never emits it and _handleIntent
+  // never sees it. Exists because free-text bodies otherwise run to the next
+  // intent or end of turn, so an agent could not write operator prose AFTER
+  // a body (the prose was swallowed into the message — observed live on a
+  // memory-remember). Bare-only like who/name: trailing text would be
+  // ambiguous (body? prose?), so it doesn't parse.
+  if (/^\[agent:end\]\s*$/.test(cleaned)) return { type: 'end' };
+
   // Grouped-grammar self/system intents (spec §12): one top-level verb per
   // CATEGORY, dispatched on a sub-command — keeps the namespace small and the
   // IPC_PROMPT lean (one documented line per category, not per operation).

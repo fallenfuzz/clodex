@@ -77,7 +77,14 @@ compact there can still be dropped by the CLI (documented degradation).
   type/config; see sessions.md §5).
 - **Multi-line bodies** are captured in `_extractIntents`, not the scanner:
   a body runs from the intent line to the next column-1 real intent or end
-  of turn (applies to dm, memory remember, context compact/reload).
+  of turn (applies to dm, memory remember, remind, notify-user, context
+  compact/reload).
+- `[agent:end]` (bare-only) is the explicit body TERMINATOR: it closes an
+  open capture via the generic any-intent boundary and is itself discarded —
+  `_extractIntents` never emits it, `_handleIntent` early-returns defensively.
+  It exists so operator-facing prose can FOLLOW a body (without it, trailing
+  text is swallowed into the message — fired live on a memory-remember) and
+  so prose can interleave between several bodied intents in one turn.
 - `shadowIntentKey` gives each occurrence a stable identity for the dedupe
   ledger; `urgent` is folded into the key so an urgent retry isn't swallowed
   as a duplicate of the original.

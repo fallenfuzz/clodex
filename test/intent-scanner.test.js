@@ -65,6 +65,12 @@ test('parseIntent: who / name are bare-only', () => {
   assert.strictEqual(parseIntent('[agent:who] and more'), null);
 });
 
+test('parseIntent: end is bare-only (a body terminator, trailing text would be ambiguous)', () => {
+  assert.deepStrictEqual(parseIntent('[agent:end]'), { type: 'end' });
+  assert.deepStrictEqual(parseIntent('  [agent:end]  '), { type: 'end' });
+  assert.strictEqual(parseIntent('[agent:end] trailing prose'), null);
+});
+
 test('parseIntent: context sub-command + optional body', () => {
   assert.deepStrictEqual(parseIntent('[agent:context clear]'),
     { type: 'context', sub: 'clear', body: '' });

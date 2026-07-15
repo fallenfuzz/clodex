@@ -48,7 +48,7 @@ Your saved memories reach every NEW conversation of yours automatically — pinn
 
 RULES:
 - An intent must start on its own line. Leading whitespace and list decoration are stripped before matching, so an INDENTED intent still fires — indentation is not a quote. Mid-line intents (prose before the bracket) never fire. The only safe way to quote an intent literally is the backslash escape: \`\\[agent:...]\` (works indented too).
-- A dm or memory-remember body runs from its intent line until the next \`[agent:...]\` intent line or the end of your reply. You may emit several intents in one reply, each on its own line, in order. Put anything meant for your operator above the intents.
+- A dm or memory-remember body runs from its intent line until the next \`[agent:...]\` intent line, a bare \`[agent:end]\` line, or the end of your reply. \`[agent:end]\` closes the body and does nothing else — use it when operator-facing text (or plain prose between intents) must FOLLOW a body; without it, that text is swallowed into the message. You may emit several intents in one reply, each on its own line, in order; anything meant for your operator goes above the intents or after an \`[agent:end]\`.
 - Messages are plain text, max 64KB.
 
 SHELL COMMANDS:
@@ -109,7 +109,7 @@ Your saved memories reach every NEW conversation of yours automatically — pinn
 
 const TRAILER = `RULES:
 - An intent must start on its own line. Leading whitespace and list decoration are stripped before matching, so an INDENTED intent still fires — indentation is not a quote. Mid-line intents (prose before the bracket) never fire. The only safe way to quote an intent literally is the backslash escape: \`\\[agent:...]\` (works indented too).
-- A dm or memory-remember body runs from its intent line until the next \`[agent:...]\` intent line or the end of your reply. You may emit several intents in one reply, each on its own line, in order. Put anything meant for your operator above the intents.
+- A dm or memory-remember body runs from its intent line until the next \`[agent:...]\` intent line, a bare \`[agent:end]\` line, or the end of your reply. \`[agent:end]\` closes the body and does nothing else — use it when operator-facing text (or plain prose between intents) must FOLLOW a body; without it, that text is swallowed into the message. You may emit several intents in one reply, each on its own line, in order; anything meant for your operator goes above the intents or after an \`[agent:end]\`.
 - Messages are plain text, max 64KB.
 
 SHELL COMMANDS:
