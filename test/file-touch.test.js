@@ -78,6 +78,55 @@ test('collector: garbage data and unrelated events are inert', () => {
   c.onEvent('message_start', JSON.stringify({ type: 'message_start', message: {} }));
   c.onEvent(null, JSON.stringify({ type: 'content_block_stop', index: 9 }));
   assert.deepStrictEqual(c.files, []);
+  assert.deepStrictEqual(c.reads, []);
+});
+
+// --- Read channel (boiling pot tier 1) --------------------------------------
+
+test('collector: a Read is captured into reads with offset/limit, never files', () => {
+  const c = new FileToolCollector();
+  feedToolUse(c, 0, 'Read', ['{"file_path": "/tmp/big.js", "offset": 100, "limit": 50}']);
+  assert.deepStrictEqual(c.reads, [{ tool: 'Read', path: '/tmp/big.js', offset: 100, limit: 50 }]);
+  assert.deepStrictEqual(c.files, []); // a Read is not a mutation
+});
+
+test('collector: a Read without offset/limit omits those keys', () => {
+  const c = new FileToolCollector();
+  feedToolUse(c, 0, 'Read', ['{"file_path": "/a/b.py"}']);
+  assert.deepStrictEqual(c.reads, [{ tool: 'Read', path: '/a/b.py' }]);
+});
+
+test('collector: Read input split across deltas parses at stop', () => {
+  const c = new FileToolCollector();
+  feedToolUse(c, 0, 'Read', ['{"file_pa', 'th": "/split', '/x.js", "limit"', ': 20}']);
+  assert.deepStrictEqual(c.reads, [{ tool: 'Read', path: '/split/x.js', limit: 20 }]);
+});
+
+test('collector: Reads and mutations stay in strictly separate channels', () => {
+  const c = new FileToolCollector();
+  feedToolUse(c, 0, 'Read', ['{"file_path": "/r1"}']);
+  feedToolUse(c, 1, 'Edit', ['{"file_path": "/e1", "old_string": "x"}']);
+  feedToolUse(c, 2, 'Write', ['{"file_path": "/w1", "content": "y"}']);
+  feedToolUse(c, 3, 'Read', ['{"file_path": "/r2", "offset": 5}']);
+  // No cross-contamination: files = mutations only, reads = Reads only.
+  assert.deepStrictEqual(c.files, [{ tool: 'Edit', path: '/e1' }, { tool: 'Write', path: '/w1' }]);
+  assert.deepStrictEqual(c.reads, [{ tool: 'Read', path: '/r1' }, { tool: 'Read', path: '/r2', offset: 5 }]);
+});
+
+test('collector: a malformed Read input still yields the path via regex fallback', () => {
+  const c = new FileToolCollector();
+  // trailing garbage → JSON.parse fails; the path regex still matches, and
+  // offset/limit are simply absent (best-effort, no partial number guessing).
+  feedToolUse(c, 0, 'Read', ['{"file_path": "/frag.js", "offset": 10 NOPE']);
+  assert.deepStrictEqual(c.reads, [{ tool: 'Read', path: '/frag.js' }]);
+});
+
+test('collector: an oversized Read input is dropped (memory bound)', () => {
+  const c = new FileToolCollector();
+  const chunks = [];
+  for (let i = 0; i < 80; i++) chunks.push('"pad": "' + 'z'.repeat(1000) + '", ');
+  feedToolUse(c, 0, 'Read', ['{'].concat(chunks).concat(['"file_path": "/late"}']));
+  assert.deepStrictEqual(c.reads, []); // exceeded the cap before stop — dropped
 });
 
 // --- file-touch.js ----------------------------------------------------------

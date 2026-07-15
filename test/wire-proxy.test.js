@@ -44,6 +44,43 @@ const SSE_BODY = [
   '',
 ].join('\n');
 
+// A mixed turn: a Read block (index 0, with offset/limit) and an Edit block
+// (index 1) in one stream — the end-to-end cross-contamination pin. The Read
+// must land in turn.reads and NEVER in turn.files; the Edit the reverse.
+const MIXED_SSE_BODY = [
+  'event: message_start',
+  'data: {"type":"message_start","message":{"id":"msg_mix","usage":{"input_tokens":8}}}',
+  '',
+  'event: content_block_start',
+  'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu_r","name":"Read","input":{}}}',
+  '',
+  'event: content_block_delta',
+  'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"file_path\\": \\"/tmp/read-me.js\\", \\"off"}}',
+  '',
+  'event: content_block_delta',
+  'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"set\\": 40, \\"limit\\": 12}"}}',
+  '',
+  'event: content_block_stop',
+  'data: {"type":"content_block_stop","index":0}',
+  '',
+  'event: content_block_start',
+  'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_e","name":"Edit","input":{}}}',
+  '',
+  'event: content_block_delta',
+  'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"file_path\\": \\"/tmp/edited.js\\", \\"old_string\\": \\"a\\"}"}}',
+  '',
+  'event: content_block_stop',
+  'data: {"type":"content_block_stop","index":1}',
+  '',
+  'event: message_delta',
+  'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}',
+  '',
+  'event: message_stop',
+  'data: {"type":"message_stop"}',
+  '',
+  '',
+].join('\n');
+
 const SESSION_ID = '4a59af49-cc52-44b7-8b02-7f4196a4b486';
 
 function makeBody(overrides = {}) {
@@ -71,7 +108,7 @@ const REQUEST_BODY = makeBody();
 
 // Fake upstream: records the request, streams SSE in awkward chunk sizes
 // (boundaries land mid-frame) to exercise the framer's buffering.
-function startFakeUpstream() {
+function startFakeUpstream(body = SSE_BODY) {
   const seen = { requests: [] };
   const server = http.createServer((req, res) => {
     const chunks = [];
@@ -84,7 +121,7 @@ function startFakeUpstream() {
         body: Buffer.concat(chunks).toString('utf8'),
       });
       res.writeHead(200, { 'content-type': 'text/event-stream', 'x-upstream': 'fake' });
-      const payload = Buffer.from(SSE_BODY, 'utf8');
+      const payload = Buffer.from(body, 'utf8');
       let off = 0;
       const sizes = [7, 53, 211, 16, 1024];
       let i = 0;
@@ -164,6 +201,8 @@ test('e2e: byte-exact pass-through + turn.completed/session/usage events', async
   // Touched-files observer: the Edit tool_use streamed alongside the text
   // (path split across input_json_delta fragments, path key not first).
   assert.deepEqual(turn.files, [{ tool: 'Edit', path: '/tmp/wire-touched.js' }]);
+  // This turn read nothing — the Edit must NOT leak into the reads channel.
+  assert.deepEqual(turn.reads, []);
 
   assert.equal(events.session[0].agent, 'tester');
   assert.equal(events.session[0].sessionId, SESSION_ID);
@@ -177,6 +216,27 @@ test('e2e: byte-exact pass-through + turn.completed/session/usage events', async
   assert.equal(events['stream-start'].length, 1);
   assert.equal(events['stream-end'].length, 1);
   assert.deepEqual(order, ['usage', 'turn.completed', 'stream-end']);
+
+  await proxy.close();
+  up.server.close();
+});
+
+test('e2e: a mixed Read+Edit turn splits cleanly into reads and files (no cross-contamination)', async () => {
+  const up = await startFakeUpstream(MIXED_SSE_BODY);
+  const proxy = new WireProxy({ upstreams: { anthropic: `http://127.0.0.1:${up.port}` } });
+  await proxy.listen();
+  const events = collect(proxy, ['turn.completed']);
+
+  await request(proxy.port, '/agent/tester/v1/messages', REQUEST_BODY);
+  await new Promise((r) => setTimeout(r, 50));
+
+  assert.equal(events['turn.completed'].length, 1);
+  const turn = events['turn.completed'][0];
+  // The Read rides `reads` (offset/limit captured), the Edit rides `files` —
+  // and each is ABSENT from the other channel. This is the pin a future
+  // refactor of the collector's block routing would break silently.
+  assert.deepEqual(turn.reads, [{ tool: 'Read', path: '/tmp/read-me.js', offset: 40, limit: 12 }]);
+  assert.deepEqual(turn.files, [{ tool: 'Edit', path: '/tmp/edited.js' }]);
 
   await proxy.close();
   up.server.close();

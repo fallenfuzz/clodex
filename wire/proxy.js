@@ -57,6 +57,10 @@
 //                    (Edit/Write/NotebookEdit) seen in this response's
 //                    stream (wire/sse.js FileToolCollector). Anthropic SSE
 //                    only; [] elsewhere. Feeds the touched-files UI.
+//                    reads: [{ tool:'Read', path, offset?, limit? }] — Read
+//                    calls seen in the stream (same collector, separate
+//                    channel; never overlaps files). Anthropic SSE only; []
+//                    elsewhere. Feeds the boiling-pot file-heat ranking.
 //   'stream-end'     { agent, reqId }                  → activity: idle
 //   'session'        { agent, sessionId, previous }    → persistence/--resume
 //                    fires on CHANGE only (first sight or /clear rotation),
@@ -653,6 +657,7 @@ class WireProxy extends EventEmitter {
                 usage: usageRecord, truncated, model, status, billing: bill,
                 stop, sessionTotals, warmth: warmthRec,
                 files: ftools ? ftools.files : [],
+                reads: ftools ? ftools.reads : [],
               });
             }
           } catch (e) { fail(e); }
@@ -715,7 +720,7 @@ class WireProxy extends EventEmitter {
                 agent, provider, reqId, sessionId, role, sideCall, text: '',
                 usage: null, truncated: false, model, status, billing: bill,
                 stop, sessionTotals: { ...this.billing.session(sessionKey) },
-                warmth: null, files: [],
+                warmth: null, files: [], reads: [],
               });
             }
           } catch (e) { fail(e); }

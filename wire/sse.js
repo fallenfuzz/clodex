@@ -171,6 +171,15 @@ class UsageCollector {
 // Semantics note: a tool_use in the response is the model's REQUEST to touch
 // the file — the CLI runs it (or the user denies it) after this stream ends.
 // Slight over-report is accepted; the peek/diff UI shows ground truth.
+//
+// Two channels, kept STRICTLY separate (the boiling pot, docs/boiling-pot-plan.md
+// tier 1): `files` = MUTATIONS (FILE_TOOLS) — the touched-files UI's semantic
+// contract, unchanged. `reads` = Read calls, captured with offset/limit when
+// present, for file-heat ranking. A Read never enters `files` and a mutation
+// never enters `reads` — cross-contamination is the silent-refactor hazard the
+// wire-proxy test pins. Read inputs carry no huge field, so they skip the
+// early-extract/give-up machinery: the whole (small) input is buffered to
+// content_block_stop and parsed once (JSON, regex fallback for the path).
 const FILE_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 const _FT_EVENTS = new Set(['content_block_start', 'content_block_delta', 'content_block_stop']);
 // Give-up depth. The path key usually leads the input, but not always (real
@@ -181,8 +190,9 @@ const _FT_PATH_RE = /"(?:file_path|notebook_path)"\s*:\s*"((?:[^"\\]|\\.)*)"/;
 
 class FileToolCollector {
   constructor() {
-    this._blocks = new Map(); // index -> { tool, buf, path }
-    this._files = [];         // { tool, path } in stream order
+    this._blocks = new Map(); // index -> { kind:'edit'|'read', tool, buf, path }
+    this._files = [];         // { tool, path } mutations, in stream order
+    this._reads = [];         // { tool:'Read', path, offset?, limit? } in stream order
   }
 
   _tryExtract(entry) {
@@ -192,6 +202,30 @@ class FileToolCollector {
     entry.buf = '';
     this._files.push({ tool: entry.tool, path: entry.path });
     return true;
+  }
+
+  // A Read block's full input is buffered by content_block_stop; parse it once.
+  // Primary path: the accumulated buffer is a complete JSON object (Read inputs
+  // are tiny) → read file_path/offset/limit directly. Fallback: a malformed/
+  // partial buffer still yields the path via the shared regex (offset/limit then
+  // simply absent). offset/limit are emitted ONLY when present as integers.
+  _extractRead(entry) {
+    let filePath = null, offset = null, limit = null;
+    let obj = null;
+    try { obj = JSON.parse(entry.buf); } catch { obj = null; }
+    if (obj && typeof obj === 'object') {
+      if (typeof obj.file_path === 'string') filePath = obj.file_path;
+      if (Number.isInteger(obj.offset)) offset = obj.offset;
+      if (Number.isInteger(obj.limit)) limit = obj.limit;
+    } else {
+      const m = _FT_PATH_RE.exec(entry.buf);
+      if (m) { try { filePath = JSON.parse(`"${m[1]}"`); } catch { filePath = m[1]; } }
+    }
+    if (!filePath) return;
+    const rec = { tool: 'Read', path: filePath };
+    if (offset != null) rec.offset = offset;
+    if (limit != null) rec.limit = limit;
+    this._reads.push(rec);
   }
 
   onEvent(event, data) {
@@ -205,14 +239,26 @@ class FileToolCollector {
     const t = obj.type;
     if (t === 'content_block_start') {
       const cb = obj.content_block || {};
-      if (cb.type === 'tool_use' && FILE_TOOLS.has(cb.name) && typeof obj.index === 'number') {
-        this._blocks.set(obj.index, { tool: cb.name, buf: '', path: null });
+      if (cb.type === 'tool_use' && typeof obj.index === 'number') {
+        if (FILE_TOOLS.has(cb.name)) {
+          this._blocks.set(obj.index, { kind: 'edit', tool: cb.name, buf: '', path: null });
+        } else if (cb.name === 'Read') {
+          this._blocks.set(obj.index, { kind: 'read', tool: 'Read', buf: '', path: null });
+        }
       }
     } else if (t === 'content_block_delta') {
       const entry = this._blocks.get(obj.index);
-      if (!entry || entry.path !== null) return;
+      if (!entry) return;
       const d = obj.delta || {};
       if (d.type !== 'input_json_delta' || typeof d.partial_json !== 'string') return;
+      if (entry.kind === 'read') {
+        // Buffer to stop, then parse once. Bound memory even on a malformed
+        // never-ending input — a real Read input is well under the cap.
+        entry.buf += d.partial_json;
+        if (entry.buf.length > _FT_BUF_CAP) this._blocks.delete(obj.index);
+        return;
+      }
+      if (entry.path !== null) return; // edit: accumulate only until path known
       entry.buf += d.partial_json;
       if (!this._tryExtract(entry) && entry.buf.length > _FT_BUF_CAP) {
         this._blocks.delete(obj.index); // unbounded input, no path key — drop
@@ -220,14 +266,20 @@ class FileToolCollector {
     } else if (t === 'content_block_stop') {
       const entry = this._blocks.get(obj.index);
       if (entry) {
-        if (entry.path === null && entry.buf) this._tryExtract(entry);
+        if (entry.kind === 'read') this._extractRead(entry);
+        else if (entry.path === null && entry.buf) this._tryExtract(entry);
         this._blocks.delete(obj.index);
       }
     }
   }
 
-  // [{ tool, path }] for every file-tool call whose target path was seen.
+  // [{ tool, path }] for every file-MUTATING tool call whose target path was
+  // seen. Reads are NOT here — they ride `reads` (the pot's separate channel).
   get files() { return this._files; }
+
+  // [{ tool:'Read', path, offset?, limit? }] for every Read call, in stream
+  // order. Empty when the turn read nothing.
+  get reads() { return this._reads; }
 }
 
 // Codex/openai Responses-API stream: response.completed (or incomplete /
