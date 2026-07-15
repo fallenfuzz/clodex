@@ -907,6 +907,15 @@ function registerIpcHandlers(deps) {
     if (!conn) return resolve({ ok: false, error: 'no such peer' });
     conn.createSession(spec || {}, resolve);
   }));
+  // Session-less catalogs for a New Session dialog targeting a peer (M5) — so its
+  // checklists render the BOX's skills/agents/prompts/tools, not the viewer's own
+  // libraries. Rides the box's 'create'/'create2' cap; the owner wraps the result
+  // as { ok:true, catalogs } and it's returned intact (renderer reads `.catalogs`).
+  handle('peer:catalogs', (_e, id) => new Promise((resolve) => {
+    const conn = getPeerManager() && getPeerManager().get(id);
+    if (!conn) return resolve({ ok: false, error: 'no such peer' });
+    conn.getCatalogs(resolve);
+  }));
   handle('peer:killSession', (_e, id, name) => new Promise((resolve) => {
     const conn = getPeerManager() && getPeerManager().get(id);
     if (!conn) return resolve({ ok: false, error: 'no such peer' });

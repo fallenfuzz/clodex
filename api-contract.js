@@ -155,6 +155,7 @@ const API_CONTRACT = [
   { name: 'peerQuery', kind: 'invoke', channel: 'peer:query' },
   { name: 'peerRestart', kind: 'invoke', channel: 'peer:restart' },
   { name: 'peerCreateSession', kind: 'invoke', channel: 'peer:createSession' },
+  { name: 'peerCatalogs', kind: 'invoke', channel: 'peer:catalogs' },
   { name: 'peerKillSession', kind: 'invoke', channel: 'peer:killSession' },
   { name: 'peerRestartSession', kind: 'invoke', channel: 'peer:restartSession' },
   { name: 'peerSessionArgs', kind: 'invoke', channel: 'peer:sessionArgs' },
