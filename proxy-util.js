@@ -448,6 +448,17 @@ function shapeProxyRecord(r, probe, now = Date.now()) {
       requests: r.cost.requests ?? null,
     } : null,
     turns: typeof r.turns_completed === 'number' ? r.turns_completed : null,
+    // Since-compact rollup (wirescope, shape frozen 07-15 per its dm): counters
+    // from the last detected compact boundary — or session start when
+    // `compacted` is false. Whole-tree like cost. Absent (older proxy) === null
+    // (no totals yet); NEVER partial per the contract, so shape all-or-nothing.
+    sinceCompact: (r.since_compact && typeof r.since_compact === 'object') ? {
+      turns: typeof r.since_compact.turns === 'number' ? r.since_compact.turns : null,
+      requests: typeof r.since_compact.requests === 'number' ? r.since_compact.requests : null,
+      estUsd: typeof r.since_compact.est_usd === 'number' ? r.since_compact.est_usd : null,
+      boundaryTs: typeof r.since_compact.boundary_ts === 'number' ? r.since_compact.boundary_ts : null,
+      compacted: r.since_compact.compacted === true,
+    } : null,
     refusals: typeof r.refusals === 'number' ? r.refusals : 0,
     // Armed holds only fire pings once a real turn donates auth + a cache to
     // replay; pingable=false means "armed but pending the next turn".

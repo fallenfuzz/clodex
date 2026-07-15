@@ -12,7 +12,7 @@ const { attentionNotice, mentionNotice, badgeTitle, createWebNotifier } = requir
 const { detectNotice: sandboxDetectNotice, statusNotice: sandboxStatusNotice, openUrl: sandboxOpenUrl } = require('./lib/sandbox-view');
 const { SANDBOX_PLACEMENT_CWD, hasSandboxPeer, nextCwd: placementNextCwd, richFieldsGreyed } = require('./lib/placement');
 const { dropText } = require('./lib/drop-paths');
-const { turnSeg } = require('./lib/turn-stat');
+const { turnSeg, reqSeg } = require('./lib/turn-stat');
 const { renderAppendChecklist, collectAppendChecklist, renderAgentChecklist, collectAgentChecklist, renderExecChecklist, collectExecChecklist, renderIntentChecklist, collectIntentChecklist, renderBuiltinChecklist, collectBuiltinChecklist, renderInjectChecklist, collectInjectChecklist, renderToolChecklist, collectToolChecklist, renderSkillChecklist, collectSkillChecklist, setChecklistAll, wireBulkToggles, setPromptLibCache, setAgentLibCache, setSkillLibCache, setExecLibCache, setClaudeToolsCache, setDefaultToolDenyCache, getPromptLibCache, getSkillLibCache, getDefaultToolDenyCache } = require('./lib/checklists');
 const { autoEnabledFor, reconcilePartialSelection } = require('../scope-util');
 const { parseSkillFrontmatter } = require('../skills-util');
@@ -1706,14 +1706,12 @@ function renderProxyBar() {
   const tSeg = turnSeg(p);
   if (tSeg) segs.push(`<span class="px-seg" title="${esc(tSeg.tip)}">${esc(tSeg.text)}</span>`);
   // API roundtrips — the truer "how busy" gauge than turns (one prompt fans out
-  // into many tool-loop roundtrips; ~8× is typical). From wirescope's
-  // session_totals.requests, already shaped onto cost.requests. Aggregate incl.
-  // count_tokens probes — fine for an activity gauge. Still CUMULATIVE (spans
-  // compacts): the wire has no since-compact rollup yet — requested from
-  // wirescope; flips to since-compact + total-in-tooltip when that lands.
-  if (p.cost && p.cost.requests != null) {
-    segs.push(`<span class="px-seg" title="API roundtrips since session start, spans compacts (tool-loop calls, not just your prompts)">req ${p.cost.requests}</span>`);
-  }
+  // into many tool-loop roundtrips; ~8× is typical). Live-first like the turn
+  // seg: prefers wirescope's since_compact rollup (p.sinceCompact, shape frozen
+  // 07-15 — flips automatically once the proxy release vendors), cumulative in
+  // the tooltip; degrades to the cumulative count on older proxies.
+  const rSeg = reqSeg(p);
+  if (rSeg) segs.push(`<span class="px-seg" title="${esc(rSeg.tip)}">${esc(rSeg.text)}</span>`);
   if (p.warmth) {
     let txt;
     if (dead) {

@@ -46,4 +46,34 @@ function turnLine(p) {
   return `turn ${t.total} total`;
 }
 
-module.exports = { turnStat, turnSeg, turnLine };
+// Request count, same live-first policy. p.sinceCompact is the wirescope
+// since-compact rollup (poller-shaped; null on older proxies — degrades to the
+// cumulative count with a tip that says it spans compacts). `compacted:false`
+// means the session has never compacted, so since-boundary === since-start —
+// the tip stays honest either way.
+function reqSeg(p) {
+  const total = p && p.cost && typeof p.cost.requests === 'number' ? p.cost.requests : null;
+  const sc = p && p.sinceCompact;
+  const now = sc && typeof sc.requests === 'number' ? sc.requests : null;
+  if (now != null) {
+    const since = sc.compacted ? 'since the last compact' : 'since session start (never compacted)';
+    const tail = total != null && sc.compacted ? ` — ${total} total since session start` : '';
+    return { text: `req ${now}`, tip: `API roundtrips ${since} (tool-loop calls, not just your prompts)${tail}` };
+  }
+  if (total == null) return null;
+  return { text: `req ${total}`, tip: 'API roundtrips since session start, spans compacts (tool-loop calls, not just your prompts)' };
+}
+
+// Hovercard req line, mirroring turnLine: both numbers inline.
+function reqLine(p) {
+  const total = p && p.cost && typeof p.cost.requests === 'number' ? p.cost.requests : null;
+  const sc = p && p.sinceCompact;
+  const now = sc && typeof sc.requests === 'number' ? sc.requests : null;
+  if (now != null && sc.compacted) {
+    return total != null ? `req ${now} (${total} total)` : `req ${now}`;
+  }
+  if (total == null) return now != null ? `req ${now}` : null;
+  return `req ${total}`;
+}
+
+module.exports = { turnStat, turnSeg, turnLine, reqSeg, reqLine };

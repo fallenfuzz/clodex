@@ -14,7 +14,7 @@
 // DOM-bound, so no unit tests per the R1 rule.
 
 const { esc, fmtCountdown, fmtTokens } = require('./lib/format');
-const { turnLine } = require('./lib/turn-stat');
+const { turnLine, reqLine } = require('./lib/turn-stat');
 
 function initSessionHovercard({ sessionList, proxyState, ctxPct, ctxTokens, proxyPollMs, typeGlyph }) {
   const HOVER_DELAY_MS = 350;
@@ -118,7 +118,8 @@ function initSessionHovercard({ sessionList, proxyState, ctxPct, ctxTokens, prox
       // statusbar (turn-stat.js). No tooltips here; a hovercard IS the tooltip.
       const tl = turnLine(p);
       if (tl) act.push(tl);
-      if (p.cost && p.cost.requests != null) act.push(`req ${p.cost.requests}`);
+      const rl = reqLine(p);
+      if (rl) act.push(rl);
       if (act.length) rows.push(statRow('activity', act.join(' · ')));
     }
     if (rows.length) parts.push(`<div class="hovercard-stats">${rows.join('')}</div>`);

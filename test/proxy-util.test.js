@@ -78,6 +78,24 @@ test('shapeProxyRecord: maps wire fields to renderer payload', () => {
   assert.deepStrictEqual(p.hold, { until: 123, hours: 4 });
 });
 
+test('shapeProxyRecord: since_compact shaped per the frozen wirescope contract', () => {
+  const probe = { version: 'v1', capabilities: {} };
+  const r = {
+    session_id: 's',
+    since_compact: { turns: 12, requests: 61, est_usd: 0.4321, boundary_ts: 1752570000.5, compacted: true },
+  };
+  const p = shapeProxyRecord(r, probe, 1);
+  assert.deepStrictEqual(p.sinceCompact, {
+    turns: 12, requests: 61, estUsd: 0.4321, boundaryTs: 1752570000.5, compacted: true,
+  });
+});
+
+test('shapeProxyRecord: since_compact absent or null → null (absent === null per contract)', () => {
+  const probe = { version: 'v1', capabilities: {} };
+  assert.strictEqual(shapeProxyRecord({ session_id: 's' }, probe, 1).sinceCompact, null);
+  assert.strictEqual(shapeProxyRecord({ session_id: 's', since_compact: null }, probe, 1).sinceCompact, null);
+});
+
 test('shapeProxyRecord: pingable defaults false when absent', () => {
   const probe = { version: 'v1', capabilities: {} };
   const p = shapeProxyRecord({ session_id: 's' }, probe, 1);
