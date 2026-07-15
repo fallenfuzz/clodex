@@ -67,6 +67,9 @@ function registerIpcHandlers(deps) {
     // read-only mutable singletons (get seams)
     getRemoteServer, getRemoteError, getPeerManager, getTunnelManager,
     getUpdateInfo, getReleasesCache,
+    // Managed sandbox module accessor (engine.getSandbox) — lazy so a host that
+    // omits it simply has no sandbox handlers reachable.
+    getSandbox,
   } = deps;
 
   handle('session:create', async (e, name, type, cwd, extraArgs, systemPromptBody, resumeId, fork, proxy, agents, denyBuiltins, disabledTools, disabledSkills, injectSkills, stripLevel, systemPromptFile, appendPromptFiles, execCommands, intents) => {
@@ -973,6 +976,18 @@ function registerIpcHandlers(deps) {
       return { ok: false, error: String((e && e.message) || e) };
     }
   });
+
+  // ── Managed Docker sandbox (sandbox.js, docs/sandbox-plan.md M2) ──────────
+  // The engine's sandbox module owns lifecycle + config; these are thin relays
+  // (getSandbox() resolves it lazily so a host that omits it just 404s the row).
+  // Every result shape is already the module's own — no reshaping here.
+  handle('sandbox:detect', () => getSandbox().detect());
+  handle('sandbox:status', () => getSandbox().status());
+  handle('sandbox:getConfig', () => getSandbox().getConfig());
+  handle('sandbox:setConfig', (_e, partial) => getSandbox().setConfig(partial || {}));
+  handle('sandbox:up', () => getSandbox().up());
+  handle('sandbox:down', () => getSandbox().down());
+  handle('sandbox:logsTail', (_e, n) => getSandbox().logsTail(n));
 
   handle('session:exportMarkdown', async (_e, name) => {
     const s = manager.sessions.get(name);

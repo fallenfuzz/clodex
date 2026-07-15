@@ -700,9 +700,50 @@
       <div id="peers-list"></div>
       <button id="peers-add" class="secondary" type="button" style="margin-top: 6px;">Add peer</button>
       <div class="dialog-actions">
+        <button id="btn-peers-sandbox" class="secondary" type="button" title="Manage the local Docker sandbox peer">Sandbox…</button>
         <div style="flex: 1;"></div>
         <button id="btn-peers-cancel" class="secondary">Cancel</button>
         <button id="btn-peers-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Managed Docker sandbox: one-button local container run as the `sandbox` peer -->
+  <div id="sandbox-overlay" class="hidden">
+    <div id="sandbox-dialog">
+      <h3>Sandbox</h3>
+      <p class="hint-text">Run a Clodex engine inside a local Docker container and use it as a peer: agents placed here are sandboxed (their shell, file writes, and network live in the container) while keeping full Clodex features over the peer wire. The container publishes to <code>127.0.0.1</code> only.</p>
+      <div id="sandbox-docker" class="sandbox-row"></div>
+      <div id="sandbox-status" class="sandbox-row"></div>
+      <div class="sandbox-field">
+        <label for="sandbox-workdir">Work folder</label>
+        <div class="sandbox-workdir-row">
+          <input id="sandbox-workdir" type="text" placeholder="(named volume — work stays inside Docker)" spellcheck="false" />
+          <button id="sandbox-workdir-pick" class="secondary" type="button">Choose…</button>
+          <button id="sandbox-workdir-clear" class="secondary" type="button" title="Use a named volume instead of a host folder">Clear</button>
+        </div>
+      </div>
+      <div class="sandbox-ports">
+        <div class="sandbox-field">
+          <label for="sandbox-webport">Web port</label>
+          <input id="sandbox-webport" type="number" min="1" max="65535" />
+        </div>
+        <div class="sandbox-field">
+          <label for="sandbox-wsport">Wirescope port</label>
+          <input id="sandbox-wsport" type="number" min="1" max="65535" />
+        </div>
+        <div class="sandbox-field">
+          <label for="sandbox-wireport">Peer wire port</label>
+          <input id="sandbox-wireport" type="number" min="1" max="65535" />
+        </div>
+      </div>
+      <p class="hint-text" id="sandbox-ports-hint">Ports are editable while the sandbox is stopped. Collisions are bumped automatically when it starts.</p>
+      <label class="sandbox-check"><input id="sandbox-autostart" type="checkbox" /> Start the sandbox automatically when Clodex launches</label>
+      <div id="sandbox-open-row" class="sandbox-row hidden"><a id="sandbox-open-link" href="#">Open in browser →</a></div>
+      <div class="dialog-actions">
+        <button id="btn-sandbox-toggle">Start</button>
+        <div style="flex: 1;"></div>
+        <button id="btn-sandbox-close" class="secondary">Close</button>
       </div>
     </div>
   </div>

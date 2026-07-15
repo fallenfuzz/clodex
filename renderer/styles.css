@@ -1476,7 +1476,7 @@ html, body {
 
 /* Dialog */
 
-#dialog-overlay, #prefs-overlay, #args-overlay, #peers-overlay, #peer-session-overlay {
+#dialog-overlay, #prefs-overlay, #args-overlay, #peers-overlay, #peer-session-overlay, #sandbox-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
@@ -1486,7 +1486,7 @@ html, body {
   z-index: 100;
 }
 
-#dialog-overlay.hidden, #prefs-overlay.hidden, #args-overlay.hidden, #peers-overlay.hidden, #peer-session-overlay.hidden {
+#dialog-overlay.hidden, #prefs-overlay.hidden, #args-overlay.hidden, #peers-overlay.hidden, #peer-session-overlay.hidden, #sandbox-overlay.hidden {
   display: none;
 }
 
@@ -1631,6 +1631,50 @@ html, body {
 }
 #peers-dialog h3 { margin-bottom: 12px; font-size: 16px; }
 #peers-dialog .hint-text { margin-bottom: 8px; display: block; }
+/* Managed Docker sandbox dialog */
+#sandbox-dialog {
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 520px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+#sandbox-dialog h3 { margin-bottom: 12px; font-size: 16px; }
+#sandbox-dialog .hint-text { margin-bottom: 12px; display: block; }
+.sandbox-row { margin: 8px 0; font-size: 13px; }
+/* Per-id hidden rules (project invariant: no generic .hidden — see
+   css-hidden-invariant.test.js). #sandbox-open-row ships hidden until running;
+   #sandbox-workdir-pick is hidden via JS on the web frontend (text field only). */
+#sandbox-open-row.hidden, #sandbox-workdir-pick.hidden { display: none; }
+.sandbox-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.sandbox-dot.ok { background: var(--ok); }
+.sandbox-dot.warn { background: var(--warn); }
+.sandbox-dot.error { background: var(--error); }
+.sandbox-dot.idle { background: var(--text-dim); }
+.sandbox-field { margin: 10px 0; }
+.sandbox-field label { display: block; font-size: 12px; opacity: 0.75; margin-bottom: 4px; }
+.sandbox-field input {
+  box-sizing: border-box;
+  background: var(--input-bg, var(--active-bg));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.sandbox-field input:focus { outline: none; border-color: var(--accent); }
+.sandbox-field input:disabled { opacity: 0.5; }
+.sandbox-workdir-row { display: flex; gap: 6px; }
+.sandbox-workdir-row input { flex: 1; }
+.sandbox-ports { display: flex; gap: 10px; }
+.sandbox-ports .sandbox-field { flex: 1; }
+.sandbox-ports input { width: 100%; }
+.sandbox-check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 12px 0; cursor: pointer; }
+.sandbox-check input { margin: 0; }
+#sandbox-open-link { color: var(--accent); text-decoration: none; }
+#sandbox-open-link:hover { text-decoration: underline; }
 #prefs-dialog h3 { margin-bottom: 16px; font-size: 16px; }
 #prefs-dialog h4 { margin: 12px 0 4px; font-size: 13px; text-transform: uppercase; opacity: 0.7; letter-spacing: 0.5px; }
 #prefs-dialog section { margin-bottom: 16px; }

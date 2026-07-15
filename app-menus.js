@@ -424,6 +424,13 @@ function createAppMenus(deps) {
               if (win) win.webContents.send('request-open-inbox-drawer');
             },
           },
+          {
+            label: 'Sandbox…',
+            click: () => {
+              const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+              if (win) win.webContents.send('request-open-sandbox-dialog');
+            },
+          },
           { type: 'separator' },
           {
             label: 'Rename Workspace…',

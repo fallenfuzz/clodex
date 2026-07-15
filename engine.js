@@ -1371,6 +1371,22 @@ const {
   setTunnelManager: (v) => { tunnelManager = v; },
 });
 
+// ---------------------------------------------------------------------------
+// Managed Docker sandbox (sandbox.js, docs/sandbox-plan.md M1/M2) — one-button
+// local container run as the `sandbox` peer. Electron-free: deps are the same
+// seams/getters everything else here rides. registerPeer writes through the
+// uiSettings peers path and calls syncPeerManager to reconcile.
+// ---------------------------------------------------------------------------
+const { createSandbox } = require('./sandbox');
+const sandbox = createSandbox({
+  getUserDataPath: () => userDataPath,
+  getUiSettings: () => uiSettings,
+  syncPeerManager,
+  appVersion,
+  isPackaged,
+  log,
+});
+
   // ── Bootstrap — the electron-free part of the old app.whenReady body, in the
   // EXACT original order (stores → pollers → scheduler → log → wirescope +
   // watchdog → remote → peers → cleanup → sweep). ────────────────────────────
@@ -1427,6 +1443,15 @@ const {
 
   // Outbound connections to peered Clodexes — no-op with no peers configured.
   syncPeerManager();
+
+  // Managed sandbox auto-start: bring the container up at launch when the user
+  // opted in — AFTER peer wiring, so registerPeer's syncPeerManager reconcile
+  // lands on an initialized PeerManager. Fire-and-forget: a first-run image
+  // pull / build can take a while and the app must not block on it; failures
+  // just leave the sandbox stopped (the dialog surfaces the error on demand).
+  try {
+    if (sandbox.getConfig().autoStart) sandbox.up().catch(() => {});
+  } catch { /* config read failed — skip autostart */ }
 
   // Mid-run watchdog. Autostart only fires at launch and on the settings
   // toggle, so a managed wirescope that dies BETWEEN launches (crash, OOM,
@@ -1516,6 +1541,7 @@ const {
     getRemoteError: () => remoteError,
     getPeerManager: () => peerManager,
     getTunnelManager: () => tunnelManager,
+    getSandbox: () => sandbox,
     // ── ipc-handlers consumers (helper surface) ──
     CLAUDE_SKILLS, CLAUDE_SL_COMPONENTS, CLAUDE_TOOLS, CODEX_SL_COMPONENTS,
     DEPLOY_FIX_INJECT_DELAY_MS, SKILL_REENABLE_CONFIRMED,

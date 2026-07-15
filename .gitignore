@@ -7,3 +7,7 @@ web-dist/
 HANDOFF.local.md
 # personal infra (ingress/tunnel manifests) — generic Clodex just serves 7900
 deploy/
+
+# Python droppings from running/import-checking the vendored wirescope in place
+__pycache__/
+vendor/wirescope/warmth.sqlite*

@@ -9,6 +9,7 @@ const { renderDiffHtml, costStackBlock, svgCostChart, bustRow } = require('./lib
 const { splitModelArg, withModelArg } = require('./lib/args-model');
 const { altChordAction } = require('./lib/web-shortcuts');
 const { attentionNotice, mentionNotice, badgeTitle, createWebNotifier } = require('./lib/web-notify');
+const { detectNotice: sandboxDetectNotice, statusNotice: sandboxStatusNotice, openUrl: sandboxOpenUrl } = require('./lib/sandbox-view');
 const { renderAppendChecklist, collectAppendChecklist, renderAgentChecklist, collectAgentChecklist, renderExecChecklist, collectExecChecklist, renderIntentChecklist, collectIntentChecklist, renderBuiltinChecklist, collectBuiltinChecklist, renderInjectChecklist, collectInjectChecklist, renderToolChecklist, collectToolChecklist, renderSkillChecklist, collectSkillChecklist, setChecklistAll, wireBulkToggles, setPromptLibCache, setAgentLibCache, setSkillLibCache, setExecLibCache, setClaudeToolsCache, setDefaultToolDenyCache, getPromptLibCache, getSkillLibCache, getDefaultToolDenyCache } = require('./lib/checklists');
 const { autoEnabledFor, reconcilePartialSelection } = require('../scope-util');
 const { parseSkillFrontmatter } = require('../skills-util');
@@ -3023,6 +3024,144 @@ document.getElementById('btn-peers-save').addEventListener('click', async () => 
 });
 peersOverlay.addEventListener('mousedown', (e) => { if (e.target === peersOverlay) closePeersDialog(); });
 window.api.onRequestOpenPeersDialog(() => openPeersDialog());
+
+// ── Managed Docker sandbox dialog (docs/sandbox-plan.md M2) ─────────────────
+const sandboxOverlay = document.getElementById('sandbox-overlay');
+const sbDockerRow = document.getElementById('sandbox-docker');
+const sbStatusRow = document.getElementById('sandbox-status');
+const sbWorkdir = document.getElementById('sandbox-workdir');
+const sbWebPort = document.getElementById('sandbox-webport');
+const sbWsPort = document.getElementById('sandbox-wsport');
+const sbWirePort = document.getElementById('sandbox-wireport');
+const sbAutoStart = document.getElementById('sandbox-autostart');
+const sbToggleBtn = document.getElementById('btn-sandbox-toggle');
+const sbOpenRow = document.getElementById('sandbox-open-row');
+const sbOpenLink = document.getElementById('sandbox-open-link');
+const sbPortInputs = [sbWebPort, sbWsPort, sbWirePort];
+let sbPollTimer = null;
+let sbRunning = false;
+let sbBusy = false;
+
+// Render a notice {kind,text} into a .sandbox-row as a colored dot + text.
+function renderSandboxNotice(row, notice) {
+  row.innerHTML = '';
+  const dot = document.createElement('span');
+  dot.className = `sandbox-dot ${notice.kind}`;
+  row.appendChild(dot);
+  row.appendChild(document.createTextNode(notice.text));
+}
+
+// Reflect running/stopped into the button label, the Open-in-browser link, and
+// which fields are editable (ports lock while the sandbox is up).
+function applySandboxRunning(running) {
+  sbRunning = running;
+  sbToggleBtn.textContent = running ? 'Stop' : 'Start';
+  for (const inp of sbPortInputs) inp.disabled = running;
+  if (running) {
+    sbOpenLink.href = sandboxOpenUrl(sbWebPort.value || 7810);
+    sbOpenRow.classList.remove('hidden');
+  } else {
+    sbOpenRow.classList.add('hidden');
+  }
+}
+
+async function refreshSandboxStatus() {
+  try {
+    const [detect, status] = await Promise.all([
+      window.api.sandboxDetect(),
+      window.api.sandboxStatus(),
+    ]);
+    renderSandboxNotice(sbDockerRow, sandboxDetectNotice(detect));
+    const sn = sandboxStatusNotice(status && status.state);
+    renderSandboxNotice(sbStatusRow, sn);
+    if (!sbBusy) applySandboxRunning(sn.running);
+  } catch { /* dialog closed mid-poll, or engine hiccup — next tick retries */ }
+}
+
+async function openSandboxDialog() {
+  const cfg = await window.api.sandboxGetConfig();
+  sbWorkdir.value = cfg.workDir || '';
+  sbWebPort.value = cfg.webPort;
+  sbWsPort.value = cfg.wirescopePort;
+  sbWirePort.value = cfg.wirePort;
+  sbAutoStart.checked = !!cfg.autoStart;
+  sandboxOverlay.classList.remove('hidden');
+  await refreshSandboxStatus();
+  // Poll compose ps only while the dialog is open (the peer row's dot is the
+  // global indicator — no background polling).
+  if (sbPollTimer) clearInterval(sbPollTimer);
+  sbPollTimer = setInterval(refreshSandboxStatus, 3000);
+}
+
+function closeSandboxDialog() {
+  if (sbPollTimer) { clearInterval(sbPollTimer); sbPollTimer = null; }
+  sandboxOverlay.classList.add('hidden');
+}
+
+// Persist the editable config from the fields (ports coerced; blank workDir =
+// named volume). The engine's sanitizer is the backstop, but send clean values.
+function collectSandboxConfig() {
+  const intOr = (el, dflt) => { const n = parseInt(el.value, 10); return Number.isInteger(n) ? n : dflt; };
+  return {
+    workDir: sbWorkdir.value.trim() || null,
+    webPort: intOr(sbWebPort, 7810),
+    wirescopePort: intOr(sbWsPort, 7811),
+    wirePort: intOr(sbWirePort, 7820),
+    autoStart: sbAutoStart.checked,
+  };
+}
+
+// The work-folder picker is native on the desktop; on the web frontend the text
+// field is the input surface (the degraded picker would confuse), so hide the
+// button there.
+const sbWorkdirPick = document.getElementById('sandbox-workdir-pick');
+if (window.__CLODEX_WEB__) sbWorkdirPick.classList.add('hidden');
+sbWorkdirPick.addEventListener('click', async () => {
+  const dir = await window.api.selectDirectory();
+  if (dir) sbWorkdir.value = dir;
+});
+document.getElementById('sandbox-workdir-clear').addEventListener('click', () => { sbWorkdir.value = ''; });
+
+// Persist autoStart the moment it's toggled — it's honored at next launch even
+// if the user never clicks Start.
+sbAutoStart.addEventListener('change', () => { window.api.sandboxSetConfig({ autoStart: sbAutoStart.checked }); });
+
+sbToggleBtn.addEventListener('click', async () => {
+  if (sbBusy) return;
+  sbBusy = true;
+  const wasRunning = sbRunning;
+  sbToggleBtn.disabled = true;
+  sbToggleBtn.textContent = wasRunning ? 'Stopping…' : 'Starting…';
+  try {
+    // Persist the current field values before Start so the container comes up on
+    // the configured ports/workdir; a Stop doesn't need them but a save is cheap.
+    await window.api.sandboxSetConfig(collectSandboxConfig());
+    const r = wasRunning ? await window.api.sandboxDown() : await window.api.sandboxUp();
+    if (!r || r.ok === false) {
+      showToast(`Sandbox ${wasRunning ? 'stop' : 'start'} failed: ${(r && r.error) || 'unknown error'}`, { kind: 'error', duration: 12000 });
+    }
+  } catch (e) {
+    showToast(`Sandbox ${wasRunning ? 'stop' : 'start'} error: ${(e && e.message) || e}`, { kind: 'error', duration: 12000 });
+  } finally {
+    sbBusy = false;
+    sbToggleBtn.disabled = false;
+    await refreshSandboxStatus();
+  }
+});
+
+// Route through openExternal, not a target="_blank" anchor: the desktop has no
+// setWindowOpenHandler, so _blank would open a chromeless BrowserWindow instead
+// of the user's browser. openExternal degrades correctly on web (open-external
+// fan → shim window.open).
+sbOpenLink.addEventListener('click', (e) => {
+  e.preventDefault();
+  window.api.openExternal(sandboxOpenUrl(sbWebPort.value || 7810));
+});
+
+document.getElementById('btn-sandbox-close').addEventListener('click', closeSandboxDialog);
+sandboxOverlay.addEventListener('mousedown', (e) => { if (e.target === sandboxOverlay) closeSandboxDialog(); });
+document.getElementById('btn-peers-sandbox').addEventListener('click', () => { closePeersDialog(); openSandboxDialog(); });
+window.api.onRequestOpenSandboxDialog(() => openSandboxDialog());
 // Window > Peers > <peer> > <session>: attach in this (focused) window.
 window.api.onRequestOpenPeerSession((id, name) => openPeerSession(id, name));
 

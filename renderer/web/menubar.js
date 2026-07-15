@@ -88,6 +88,7 @@ function buildMenus(ctx) {
         { label: 'Templates…', run: () => emit('request-open-templates-drawer') },
         { label: 'Exec Commands…', run: () => emit('request-open-exec-drawer') },
         { label: 'Inbox…', run: () => emit('request-open-inbox-drawer') },
+        { label: 'Sandbox…', run: () => emit('request-open-sandbox-dialog') },
         { sep: true },
         { label: 'Rename Workspace…', run: () => emit('request-rename-workspace') },
         { label: 'Preferences…', run: () => emit('request-open-preferences') },
