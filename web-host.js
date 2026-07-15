@@ -47,6 +47,7 @@ const os = require('os');
 const https = require('https');
 const { AsyncLocalStorage } = require('async_hooks');
 const { WebSocketServer } = require('ws');
+const { makeTokenGate } = require('./auth-token');
 
 const APP_VERSION = require('./package.json').version;
 const UPDATE_REPO = 'avirtual/clodex'; // mirrors main.js — the deploy-briefing URL fallback
@@ -96,19 +97,13 @@ function createWebHost({ engine, log, port, token, userDataPath, registerHandler
   let menuSeq = 0, dialogSeq = 0;
 
   // ── token predicate — the single replaceable auth check (HTTP + upgrade +
-  // hello). Absent token = localhost-trust (Phase 4 documents the stance). A real
-  // auth layer later swaps this one function.
-  const checkToken = (provided) => !token || provided === token;
-  function tokenFromReq(req) {
-    try {
-      const u = new URL(req.url, 'http://localhost');
-      const q = u.searchParams.get('token');
-      if (q) return q;
-    } catch { /* malformed url — fall through to header */ }
-    const auth = req.headers['authorization'] || '';
-    const m = /^Bearer\s+(.+)$/i.exec(auth);
-    return m ? m[1] : null;
-  }
+  // hello). Absent token = localhost-trust (Phase 4 documents the stance). Now
+  // the shared auth-token.js leaf so web-host and remote.js can't drift; the
+  // move also upgrades the old `===` compare to a constant-time one. checkToken
+  // stays a thin alias so the three call sites below read unchanged.
+  const gate = makeTokenGate(token);
+  const checkToken = (provided) => gate.check(provided);
+  const tokenFromReq = (req) => gate.fromReq(req);
 
   // ── event fan-out — the interception point the Phase-2 audit identified.
   // handle.webContents.send(channel, ...args) lands here; we grow the scrollback
