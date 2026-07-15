@@ -18,6 +18,16 @@ const path = require('path');
 
 const crypto = require('crypto');
 const { relayVersionOk, isQualifiedSender } = require('./relay-protocol');
+const { makeTokenGate } = require('./auth-token');
+
+// A bind host counts as loopback when nothing off-box can reach it — the case
+// where "trust is the tunnel" still holds and no token is required. 0.0.0.0 / ::
+// (the container's CLODEX_REMOTE_HOST) and any specific LAN address are NOT
+// loopback, so they trip the fail-closed rule when no token is configured.
+function isLoopbackHost(h) {
+  const host = String(h || '').toLowerCase();
+  return host === '127.0.0.1' || host === '::1' || host === 'localhost' || host.startsWith('127.');
+}
 
 const NAME_RE = /^[a-zA-Z0-9._-]{1,64}$/;
 const MAX_BODY = 64 * 1024;          // matches the IPC message cap
@@ -35,7 +45,8 @@ class RemoteServer {
                 query, createSession, killSession, restartSession,
                 getSessionArgs, setSessionArgs,
                 getSkillCatalog, setSessionSkills,
-                deliverDm, claimDms, listDmOrigins, receiveRoster }) {
+                deliverDm, claimDms, listDmOrigins, receiveRoster,
+                token, insecure }) {
     this._port = port;
     // Bind host: loopback by default. The web-frontend container passes '0.0.0.0'
     // (via CLODEX_REMOTE_HOST, threaded in remote-wiring) so the peer wire can be
@@ -113,6 +124,14 @@ class RemoteServer {
     // dropped (last-sent dedup). _resizePending holds { cols, rows, timer }.
     this._resizePending = new Map(); // name -> { cols, rows, timer }
     this._resizeLast = new Map();    // name -> 'colsxrows' last flushed
+    // ── Operator auth (docs/remote-auth-plan.md §2–3). The shared auth-token.js
+    // gate; CLODEX_REMOTE_TOKEN threaded from remote-wiring. No token + loopback
+    // bind = today's localhost-trust (SSH-tunnel peers untouched). No token +
+    // non-loopback bind = the breach condition → fail-closed 503 unless the
+    // explicit CLODEX_REMOTE_INSECURE=1 escape hatch (this._insecure) is set.
+    this._gate = makeTokenGate(token);
+    this._insecure = !!insecure;
+    this._loopback = isLoopbackHost(this._host);
   }
 
   get running() { return !!this._server; }
@@ -331,7 +350,51 @@ class RemoteServer {
     }
   }
 
+  // Operator-auth gate — runs before ANY routing (viewer page, every /api/*, and
+  // the SSE stream: transcripts are sensitive, read-only is not harmless).
+  // Returns true to proceed; on refusal it has already written the response.
+  _authGate(req, res) {
+    // Fail-closed: a non-loopback bind with no configured token is the exact
+    // breach condition (container 0.0.0.0 + no secret). Refuse with a hard,
+    // observable 503 naming the env var, rather than silently localhost-trusting.
+    if (!this._gate.configured && !this._loopback && !this._insecure) {
+      res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end('Refusing to serve: bound to a non-loopback address with no CLODEX_REMOTE_TOKEN set. Set CLODEX_REMOTE_TOKEN, or CLODEX_REMOTE_INSECURE=1 to override.');
+      return false;
+    }
+    // Token check. No token configured (loopback, or the insecure override) →
+    // gate.check passes everything, exactly as before this change.
+    if (!this._gate.check(this._gate.fromReq(req))) {
+      res.writeHead(401, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'WWW-Authenticate': 'Bearer',
+      });
+      res.end('unauthorized');
+      return false;
+    }
+    // Bookmark path: a valid ?token= seeds an HttpOnly cookie so the viewer's
+    // later XHR + EventSource authenticate without page JS ever touching the
+    // token (EventSource can't set headers — the cookie is the mechanism).
+    if (this._gate.configured) this._maybeSetTokenCookie(req, res);
+    return true;
+  }
+
+  // Set the token cookie ONLY when the (already-validated) token arrived via the
+  // ?token= query param — the first bookmark hit. Bearer callers (peer-client)
+  // and cookie-carrying requests don't need it re-issued. Secure flag when the
+  // edge terminated TLS (x-forwarded-proto: https).
+  _maybeSetTokenCookie(req, res) {
+    let q = null;
+    try { q = new URL(req.url, 'http://localhost').searchParams.get('token'); } catch { /* keep null */ }
+    if (!q) return;
+    const proto = String((req.headers && req.headers['x-forwarded-proto']) || '');
+    const secure = /https/i.test(proto) ? '; Secure' : '';
+    res.setHeader('Set-Cookie', `clodex_remote_token=${encodeURIComponent(q)}; HttpOnly; SameSite=Strict; Path=/${secure}`);
+  }
+
   _route(req, res) {
+    if (!this._authGate(req, res)) return;
     const url = new URL(req.url, 'http://localhost');
     let p = url.pathname;
 

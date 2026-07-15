@@ -60,6 +60,15 @@ function createRemoteWiring(deps) {
     const envEnabled = process.env.CLODEX_REMOTE_ENABLE === '1';
     const enabled = s.remoteEnabled || envEnabled;
     const bindHost = process.env.CLODEX_REMOTE_HOST || '127.0.0.1';
+    // Operator auth (docs/remote-auth-plan.md §2). CLODEX_REMOTE_TOKEN gates the
+    // whole wire; CLODEX_REMOTE_INSECURE=1 is the loud escape hatch that lets a
+    // non-loopback bind serve with no token (fleet-migration only) — logged so
+    // it can never be silently on.
+    const remoteToken = process.env.CLODEX_REMOTE_TOKEN || null;
+    const remoteInsecure = process.env.CLODEX_REMOTE_INSECURE === '1';
+    if (remoteInsecure) {
+      log.error('remote', 'CLODEX_REMOTE_INSECURE=1 — the remote wire will serve with NO operator token on a non-loopback bind. This is insecure; set CLODEX_REMOTE_TOKEN and remove the flag.');
+    }
     if (!enabled) {
       if (getRemoteServer()) { getRemoteServer().stop(); setRemoteServer(null); }
       setRemoteError(null);
@@ -74,6 +83,8 @@ function createRemoteWiring(deps) {
       setRemoteServer(new RemoteServer({
         port: s.remotePort,
         host: bindHost,
+        token: remoteToken,
+        insecure: remoteInsecure,
         pagePath: path.join(__dirname, 'renderer', 'remote.html'),
         getSessions: () =>
           // Agents AND bash: bash sessions are IPC-private (no registry/socket/who)
