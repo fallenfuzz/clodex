@@ -1142,6 +1142,60 @@ test('create: an EMPTY execCommands grant writes NO key (absent ≡ [] ≡ no gr
   assert.strictEqual('execCommands' in persisted['b-nogrant'], false);
 });
 
+// --- session-exit meta: `expected` discriminates crash from deliberate teardown ---
+// Every deliberate teardown flags the session BEFORE the PTY dies (kill() →
+// _userKilled, which restart also routes through; killAll() → _shuttingDown),
+// so an unflagged exit means the process died on its own. The renderer's
+// crash toast keys off meta.expected — pin the flag at the send site for all
+// three paths. Drives a real create() on a bash session with a fake pty whose
+// onExit callback the probe captures and fires.
+function mkExitProbe() {
+  const sent = [];
+  let onExitCb = null;
+  const fakePty = { spawn: () => ({ onData() {}, onExit(cb) { onExitCb = cb; }, kill() {}, pid: 999 }) };
+  const m = mk({
+    getPersistence: () => ({
+      list: () => [], get: () => null, upsert: () => {}, setSessionId: () => {}, remove: () => {},
+    }),
+    resolveProxyBase: () => null,
+    lastTranscriptWrite: () => null,
+    pty: fakePty,
+    os: osReal,
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    setAppQuitting: () => {},
+  });
+  m._sendToSession = (...a) => sent.push(a);
+  return { m, sent, exit: (payload) => onExitCb(payload) };
+}
+// _sendToSession(name, channel, ...args) — the event payload starts at [2].
+const exitEventOf = (sent) => sent.find((a) => a[1] === 'session-exit');
+
+test('session-exit: natural death sends expected:false with code and signal', async () => {
+  const { m, sent, exit } = mkExitProbe();
+  await bashCreate(m, 'b-crash', null);
+  exit({ exitCode: 1, signal: undefined });
+  assert.deepStrictEqual(exitEventOf(sent), ['b-crash', 'session-exit', 'b-crash', 1, { expected: false, signal: null }]);
+});
+
+test('session-exit: a user-killed session (kill() flag) sends expected:true', async () => {
+  const { m, sent, exit } = mkExitProbe();
+  await bashCreate(m, 'b-killed', null);
+  // Set the flag directly rather than calling kill(): kill() arms a real 5s
+  // SIGKILL fallback timer against the fake pid — firing process.kill(999)
+  // from a test would hit whatever real process owns that pid.
+  m.sessions.get('b-killed')._userKilled = true;
+  exit({ exitCode: 1, signal: 15 });
+  assert.deepStrictEqual(exitEventOf(sent), ['b-killed', 'session-exit', 'b-killed', 1, { expected: true, signal: 15 }]);
+});
+
+test('session-exit: app-quit teardown (killAll) sends expected:true', async () => {
+  const { m, sent, exit } = mkExitProbe();
+  await bashCreate(m, 'b-quit', null);
+  await m.killAll();
+  exit({ exitCode: 0, signal: 15 });
+  assert.deepStrictEqual(exitEventOf(sent), ['b-quit', 'session-exit', 'b-quit', 0, { expected: true, signal: 15 }]);
+});
+
 // --- exec body-capture JSON terminator (_extractIntents) ---
 // exec bodies are JSON DATA: greedy multi-line capture swallowed trailing prose
 // a seat wrote on following lines INTO the payload, corrupting the downstream

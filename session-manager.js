@@ -1116,16 +1116,22 @@ function createSessionManager(deps) {
         }
       });
 
-      ptyProc.onExit(({ exitCode }) => {
+      ptyProc.onExit(({ exitCode, signal }) => {
         // The native fd is gone the moment the process exits; any later
         // write/resize/kill into node-pty throws an uncaught Napi::Error that
         // aborts the whole app (SIGABRT). Mark dead so deferred ops bail.
         session._dead = true;
-        log.info('session', `exit ${name} code=${exitCode}`);
+        log.info('session', `exit ${name} code=${exitCode}${signal ? ` signal=${signal}` : ''}`);
+        // Every deliberate teardown flags the session first (kill() →
+        // _userKilled, which restart also routes through; killAll() →
+        // _shuttingDown), so an unflagged exit means the process died on its
+        // own — the renderer uses that to surface it instead of silently
+        // dropping the tab.
+        const expected = !!(session._userKilled || session._shuttingDown);
         // Send the exit event BEFORE cleanup so the renderer can still resolve
         // the session → workspace → window mapping. Otherwise the sidebar
         // tab sticks around as a "dead" entry.
-        this._sendToSession(name, 'session-exit', name, exitCode);
+        this._sendToSession(name, 'session-exit', name, exitCode, { expected, signal: signal || null });
         if (getRemoteServer()) { try { getRemoteServer().notifyExit(name, exitCode); } catch {} }
         // Agents keep their entry on natural exit (they get --resume'd next
         // launch). A shell exiting naturally (user typed `exit`) is done —

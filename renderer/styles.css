@@ -1841,6 +1841,11 @@ html, body {
   border-left-color: var(--accent);
 }
 
+/* Unexpected session exit (crash — deliberate teardowns never toast). */
+.toast-error {
+  border-left-color: var(--error);
+}
+
 .toast-clickable {
   cursor: pointer;
 }

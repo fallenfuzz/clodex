@@ -1258,8 +1258,17 @@ window.api.onPtyData((name, data) => {
   if (s) s.terminal.write(data);
 });
 
-window.api.onSessionExit((name) => {
+window.api.onSessionExit((name, code, meta) => {
   removeSession(name);
+  // Deliberate exits (user kill, restart, app quit) arrive expected:true and
+  // stay silent, as does a clean self-exit (code 0, no signal — the user typed
+  // `exit`/quit in the pane they were looking at). What's left is the session
+  // dying on its own: without this toast the tab just vanished, and a crash
+  // was indistinguishable from a clean quit.
+  if (meta && !meta.expected && (code !== 0 || meta.signal)) {
+    const why = meta.signal ? `signal ${meta.signal}` : `code ${code}`;
+    showToast(`${name} exited unexpectedly (${why})`, { kind: 'error', duration: 15000 });
+  }
 });
 
 window.api.onSessionActivity((name, state) => {
