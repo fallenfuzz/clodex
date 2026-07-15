@@ -53,7 +53,7 @@ const {
 } = require('./relay-protocol');
 // Boiling-pot tier-1 producer + read-time merge (docs/boiling-pot-plan.md).
 // Pure electron-free leaves, required directly like ./claude-env — no dep seam.
-const { createFileHeat, aggregateStates, normalizeState } = require('./file-heat');
+const { createFileHeat, aggregateStates, normalizeState, foldRedundancy } = require('./file-heat');
 const { readJsonSafe } = require('./fs-util');
 
 // A blocking registry file (agent.json) is STALE — safe to force-clean and
@@ -1423,10 +1423,16 @@ function createSessionManager(deps) {
 
     // Boiling-pot read-time view. Flush every live recorder so the on-disk files
     // are current, then merge EVERY per-agent file-heat.json (live + dead agents)
-    // into one carriage-ranked snapshot. Cross-agent merge happens HERE at read
-    // time — never at write time (no shared-write contention). Tier-1 only: the
-    // redundancy columns stay null (wirescope /_pot fills them additively later).
-    potSnapshot(topN) {
+    // into one carriage-ranked snapshot (tier 1). Cross-agent merge happens HERE at
+    // read time — never at write time (no shared-write contention). Then tier 2:
+    // fetch wirescope's /_pot redundancy rollup once per DISTINCT proxy base
+    // (global-per-base — ?session= is ignored) and fold it into the ALREADY-SLICED
+    // top-N rows by path. Fold-after-slice is deliberate: redundancy never re-ranks
+    // (ordering is carriage, fixed by aggregateStates), so we only fold the rows we
+    // actually return. Wire-off / fetch failure degrades silently to tier-1 nulls —
+    // the drawer already gates its redundant column on non-null.
+    async potSnapshot(topN) {
+      let snap;
       try {
         for (const s of this.sessions.values()) {
           if (s.fileHeat) { try { s.fileHeat.flush(); } catch {} }
@@ -1438,10 +1444,24 @@ function createSessionManager(deps) {
           const raw = readJsonSafe(pathFor(REGISTRY_DIR, name, 'fileHeat'));
           if (raw) states.push(normalizeState(raw));
         }
-        return aggregateStates(states, { topN: Number.isInteger(topN) && topN > 0 ? topN : 10 });
+        snap = aggregateStates(states, { topN: Number.isInteger(topN) && topN > 0 ? topN : 10 });
       } catch {
         return { window: null, files: [] };
       }
+      // Tier 2 — best-effort, isolated so a proxy hiccup never sinks the tier-1
+      // view the drawer depends on.
+      try {
+        const bases = new Set();
+        for (const s of this.sessions.values()) { if (s.proxyBase) bases.add(s.proxyBase); }
+        if (bases.size && snap.files.length) {
+          const results = await Promise.all([...bases].map((base) =>
+            ProxyClient.potSeries(base).catch(() => ({ ok: false, files: [] }))));
+          const potFiles = [];
+          for (const r of results) { if (r && r.ok && Array.isArray(r.files)) potFiles.push(...r.files); }
+          if (potFiles.length) foldRedundancy(snap.files, potFiles);
+        }
+      } catch { /* tier-2 is additive; failure leaves tier-1 nulls intact */ }
+      return snap;
     }
 
     // Activity fan-out shared by both observation paths (wire tracker + legacy

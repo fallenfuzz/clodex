@@ -176,6 +176,25 @@ const ProxyClient = {
     return this._getJson(base, `/_bust?session=${encodeURIComponent(sessionId)}`, PROXY_REPORT_TIMEOUT);
   },
 
+  // Boiling-pot tier 2 (docs/boiling-pot-plan.md): wirescope's /_pot redundancy
+  // rollup — GLOBAL per base (the ?session= param is ignored, verified against
+  // v0.6.33), so callers fetch it once per DISTINCT base, never per session. This
+  // is the snake_case→camelCase SEAM: /_pot ships {files:[{file, reads,
+  // redundant_reads, redundant_tokens}]} and the snake_case never leaves this
+  // module — we hand back a clean camelCase shape. { ok:false } on any non-200 /
+  // missing body so the caller degrades to tier-1 nulls silently.
+  async potSeries(base) {
+    const r = await this._getJson(base, '/_pot', PROXY_REPORT_TIMEOUT);
+    if (r.status !== 200 || !r.json || !Array.isArray(r.json.files)) return { ok: false, files: [] };
+    const files = r.json.files.map((f) => ({
+      file: f.file,
+      reads: f.reads,
+      redundantReads: f.redundant_reads,
+      redundantTokens: f.redundant_tokens,
+    }));
+    return { ok: true, files };
+  },
+
   // Capture-log retention (wirescope v0.6.23+, gated on capabilities.prune —
   // presence of a 200/ok GET is the capability signal). MACHINE-WIDE, not
   // per-session: operates on the whole LOG_DIR. wirescope owns which files are

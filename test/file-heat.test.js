@@ -10,9 +10,10 @@ const assert = require('node:assert');
 const {
   createFileHeat,
   dateKey, estimateReadTokens, rangeSig, emptyState, normalizeState,
-  recordInto, pruneDays, aggregateStates,
+  recordInto, pruneDays, aggregateStates, foldRedundancy,
   DEFAULT_KEEP_DAYS, MAX_RANGES_PER_FILE_DAY,
 } = require('../file-heat');
+const { ProxyClient } = require('../wirescope-proxy');
 
 // A fixed clock — 2026-07-16T12:00:00Z — so day buckets are deterministic.
 const T0 = Date.parse('2026-07-16T12:00:00Z');
@@ -243,4 +244,69 @@ test('factory: an unweighable read (stat fails) still counts', async () => {
   assert.strictEqual(snap.files[0].reads, 1);
   assert.strictEqual(snap.files[0].approxReadTokens, 0);
   assert.strictEqual(snap.files[0].segments, 1);
+});
+
+// ── Tier 2: foldRedundancy (wirescope /_pot join) ────────────────────────────
+// Rows carry tier-1 carriage; foldRedundancy overlays wirescope's redundancy by
+// path. camelCase in (the wirescope-proxy seam already mapped snake_case away).
+
+function row(file, extra = {}) {
+  return { file, reads: 1, edits: 0, approxReadTokens: 100, segments: 1,
+    redundantReads: null, redundantTokens: null, lastSuggestion: null, ...extra };
+}
+
+test('foldRedundancy: a matched path gets BOTH columns; unmatched stays BOTH null', () => {
+  const rows = [row('/a'), row('/b')];
+  foldRedundancy(rows, [{ file: '/a', reads: 3, redundantReads: 2, redundantTokens: 500 }]);
+  assert.strictEqual(rows[0].redundantReads, 2);
+  assert.strictEqual(rows[0].redundantTokens, 500);
+  assert.strictEqual(rows[1].redundantReads, null);   // unmatched — all-or-nothing
+  assert.strictEqual(rows[1].redundantTokens, null);
+});
+
+test('foldRedundancy: never re-ranks — carriage order is untouched', () => {
+  const rows = [row('/hot', { approxReadTokens: 900 }), row('/cool', { approxReadTokens: 100 })];
+  // The cool row carries far more redundancy; ordering must NOT change.
+  foldRedundancy(rows, [{ file: '/cool', redundantReads: 99, redundantTokens: 9999 }]);
+  assert.strictEqual(rows[0].file, '/hot');
+  assert.strictEqual(rows[1].file, '/cool');
+});
+
+test('foldRedundancy: multi-base collision on one path SUMS both columns', () => {
+  const rows = [row('/x')];
+  foldRedundancy(rows, [
+    { file: '/x', redundantReads: 2, redundantTokens: 100 },
+    { file: '/x', redundantReads: 3, redundantTokens: 250 },
+  ]);
+  assert.strictEqual(rows[0].redundantReads, 5);
+  assert.strictEqual(rows[0].redundantTokens, 350);
+});
+
+test('foldRedundancy: empty/absent potFiles is a no-op (rows unchanged)', () => {
+  const rows = [row('/a')];
+  foldRedundancy(rows, []);
+  assert.strictEqual(rows[0].redundantReads, null);
+  foldRedundancy(rows, undefined);
+  assert.strictEqual(rows[0].redundantReads, null);
+});
+
+// ── The snake_case→camelCase seam (ProxyClient.potSeries) ────────────────────
+// Stub `this._getJson` so no network is touched; assert the mapping + the
+// degrade-to-{ok:false} gates. snake_case must NEVER survive past this method.
+
+test('potSeries: maps snake_case /_pot to camelCase and drops the raw keys', async () => {
+  const stub = { _getJson: async () => ({ status: 200, json: { files: [
+    { file: '/p', reads: 4, redundant_reads: 1, redundant_tokens: 281 },
+  ] } }) };
+  const out = await ProxyClient.potSeries.call(stub, 'http://x');
+  assert.strictEqual(out.ok, true);
+  assert.deepStrictEqual(out.files, [{ file: '/p', reads: 4, redundantReads: 1, redundantTokens: 281 }]);
+  assert.ok(!('redundant_reads' in out.files[0]), 'snake_case must not leak past the seam');
+});
+
+test('potSeries: a non-200 or shapeless body degrades to { ok:false, files:[] }', async () => {
+  const notFound = { _getJson: async () => ({ status: 404, json: { error: 'not found' } }) };
+  assert.deepStrictEqual(await ProxyClient.potSeries.call(notFound, 'http://x'), { ok: false, files: [] });
+  const shapeless = { _getJson: async () => ({ status: 200, json: { totals: {} } }) };
+  assert.deepStrictEqual(await ProxyClient.potSeries.call(shapeless, 'http://x'), { ok: false, files: [] });
 });

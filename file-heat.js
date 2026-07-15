@@ -144,6 +144,34 @@ function aggregateStates(states, { now = Date.now(), topN = 10, keepDays = DEFAU
   return { window: { from: cutoff, to: dateKey(now) }, files: top };
 }
 
+// Tier-2 join (docs/boiling-pot-plan.md): fold wirescope's redundancy rollup
+// into already-ranked tier-1 rows, matched by absolute path. `potFiles` is the
+// UNION of every distinct base's /_pot files (camelCase — mapped at the
+// wirescope-proxy seam, snake_case never reaches here). ADDITIVE + ALL-OR-NOTHING:
+// a matched row gets BOTH redundancy columns (they always ship together), an
+// unmatched row keeps BOTH null; multi-base collisions on one path SUM (same
+// additive semantics as tier-1 carriage). Redundancy NEVER re-ranks — carriage
+// ordering is fixed before this runs (fold happens after the topN slice). NOTE:
+// the redundancy figures ride WIRESCOPE'S own days-window, not our 14-day tier-1
+// window — close enough to rank against, never summed against carriage. Mutates
+// + returns the rows for call-site convenience.
+function foldRedundancy(rows, potFiles) {
+  if (!Array.isArray(rows) || !rows.length || !Array.isArray(potFiles) || !potFiles.length) return rows;
+  const byPath = new Map(); // path -> { reads, tokens } summed across bases
+  for (const f of potFiles) {
+    if (!f || !f.file) continue;
+    const cur = byPath.get(f.file) || { reads: 0, tokens: 0 };
+    if (Number.isFinite(f.redundantReads)) cur.reads += f.redundantReads;
+    if (Number.isFinite(f.redundantTokens)) cur.tokens += f.redundantTokens;
+    byPath.set(f.file, cur);
+  }
+  for (const row of rows) {
+    const hit = byPath.get(row.file);
+    if (hit) { row.redundantReads = hit.reads; row.redundantTokens = hit.tokens; }
+  }
+  return rows;
+}
+
 // ── Factory ─────────────────────────────────────────────────────────────────
 // Per-agent recorder: lazy load, debounced atomic flush, async stat for the byte
 // weight. `filePath` is the resolved run/<name>/file-heat.json (caller uses
@@ -220,7 +248,7 @@ module.exports = {
   createFileHeat,
   // pure leaf surface (exported for the tier-1 tests + the read-time aggregator)
   dateKey, estimateReadTokens, rangeSig, emptyState, normalizeState,
-  recordInto, pruneDays, aggregateStates,
+  recordInto, pruneDays, aggregateStates, foldRedundancy,
   DEFAULT_KEEP_DAYS, DEFAULT_FLUSH_MS, MAX_RANGES_PER_FILE_DAY,
   BYTES_PER_TOKEN, AVG_BYTES_PER_LINE, DEFAULT_READ_LIMIT,
 };
