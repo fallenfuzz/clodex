@@ -37,9 +37,13 @@ FROM node:22-slim AS runtime
 # node-pty's build toolchain, kept in the final image DELIBERATELY: agents in the
 # container will want to build things. python3-venv is for the wirescope
 # supervisor: it builds its venv (`python3 -m venv` + pip) at first boot, and
-# Debian ships venv/ensurepip as a separate package.
+# Debian ships venv/ensurepip as a separate package. The second line is the
+# agent/bash-session toolbox — the everyday basics (fetch, JSON, edit, search)
+# so a box session is usable out of the gate; anything beyond these is a
+# `sudo apt-get install` away.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git bash procps ca-certificates python3 python3-venv make g++ \
+      git bash procps ca-certificates python3 python3-venv make g++ sudo \
+      curl jq vim less tree unzip zip ripgrep openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
 # The agent CLIs, globally. Pin nothing — agents self-update.
@@ -47,7 +51,13 @@ RUN npm i -g @anthropic-ai/claude-code @openai/codex
 
 # Non-root user with a real home: agent-transport creates ~/.clodex 0700 and
 # fixPathFromLoginShell runs `$SHELL -ilc`, so HOME + SHELL must be real.
-RUN useradd --create-home --shell /bin/bash clodex
+# Passwordless sudo: agents in the box install their own tooling (apt-get vim,
+# etc.). Root-inside-the-container is fine — the container is the isolation
+# boundary, and the interesting state (volumes, host mounts) is reachable as
+# the clodex user already; the host library mounts stay ro either way.
+RUN useradd --create-home --shell /bin/bash clodex \
+ && printf 'clodex ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/clodex \
+ && chmod 0440 /etc/sudoers.d/clodex
 
 WORKDIR /app
 
