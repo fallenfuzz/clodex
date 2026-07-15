@@ -82,9 +82,11 @@ test('reqLine: both inline post-compact, plain otherwise', () => {
 });
 
 // ── costSeg / costLine (live-first cost, operator ruling 07-15) ──────────────
-// The three-scopes incident pinned here: p.cost.usd's scope varies by producer
-// (raw wire-session vs the W2 lifetime overlay's additive-across-restarts
-// figure), so the tooltip calls it just "total" — only since-compact is stable.
+// The three-scopes incident pinned here: under the W2 overlay p.cost.usd is
+// the ALL-TIME ledger (additive across restarts) and p.costRun.usd is
+// wirescope's per-registration figure (zeroes at process spawn) — both are
+// shown, scopes named. Without costRun the tooltip calls p.cost just "total"
+// (its scope varies by producer) — only since-compact is stable.
 
 const costPayload = { cost: { usd: 225.35 }, sinceCompact: { estUsd: 15.07, compacted: true } };
 
@@ -93,6 +95,30 @@ test('costSeg: since-compact spend leads, cumulative in tooltip as plain total',
   assert.strictEqual(seg.text, '~$15.07');
   assert.match(seg.tip, /since the last compact/);
   assert.match(seg.tip, /\$225\.35 total/);
+});
+
+test('costSeg: with costRun both cumulatives ride the tooltip, scopes named', () => {
+  const seg = costSeg({ ...costPayload, cost: { usd: 247.30 }, costRun: { usd: 96.12 } });
+  assert.strictEqual(seg.text, '~$15.07', 'since-compact still leads');
+  assert.match(seg.tip, /\$96\.12 this run/);
+  assert.match(seg.tip, /\$247\.30 all-time/);
+  assert.ok(!seg.tip.includes(' total'), 'named scopes replace the neutral "total"');
+});
+
+test('costSeg: costRun without sinceCompact leads with the run figure, all-time in tip', () => {
+  const seg = costSeg({ cost: { usd: 247.30 }, costRun: { usd: 96.12 }, sinceCompact: null });
+  assert.strictEqual(seg.text, '~$96.12');
+  assert.match(seg.tip, /this run/);
+  assert.match(seg.tip, /\$247\.30 all-time/);
+});
+
+test('costLine: run and all-time inline when costRun is present', () => {
+  assert.strictEqual(
+    costLine({ cost: { usd: 247.30 }, costRun: { usd: 96.12 }, sinceCompact: { estUsd: 15.07, compacted: true } }),
+    '~$15.07 ($96.12 run · $247.30 all-time)');
+  assert.strictEqual(
+    costLine({ cost: { usd: 247.30 }, costRun: { usd: 96.12 } }),
+    '~$96.12 ($247.30 all-time)');
 });
 
 test('costSeg: never-compacted says since-start honestly, no redundant total', () => {

@@ -239,6 +239,15 @@ class WireTelemetry {
       const wire = this.payload(name);
       if (!wire || !wire.sessionId) return poll;
       const out = { ...poll, telemetrySource: 'wire' };
+      // Preserve the poll's own cumulative before clobbering it: wirescope's
+      // figure is per-REGISTRATION (zeroes when the agent's CLI process spawns
+      // — a GUI restart, not /clear), while wire.cost below is the persisted
+      // ALL-TIME ledger (additive across restarts by design). Both are real,
+      // different scopes; the renderer labels them "this run" vs "all-time"
+      // (operator ruling 07-15 after the three-scopes cost incident — the
+      // single unlabeled "total" contradicted the wirescope dashboard).
+      // Absent when the overlay is off: pure-wire payloads carry no run figure.
+      out.costRun = poll.cost ? { ...poll.cost } : null;
       out.cost = wire.cost;
       out.turns = wire.turns;
       out.refusals = wire.refusals;

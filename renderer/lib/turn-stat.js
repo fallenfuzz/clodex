@@ -78,36 +78,52 @@ function reqLine(p) {
 
 // Cost, same live-first policy (operator ruling 07-15, reversing the earlier
 // cumulative-first call: THREE surfaces were showing three different cost
-// scopes — raw wire-session spend, the W2 lifetime overlay's additive-across-
-// restarts figure, wirescope's per-registration figure — under near-identical
-// labels). The number that answers "what is this costing me NOW" is
-// since-compact spend; the cumulative figure (whatever scope the payload's
-// producer gave it — overlay lifetime or wire-session) rides the tooltip,
-// labeled neutrally as "total" precisely because its scope varies.
-// { text, tip } — text keeps the ~$ estimate marker.
+// scopes under near-identical labels). The number that answers "what is this
+// costing me NOW" is since-compact spend; the cumulatives ride the tooltip
+// with their scopes NAMED (second ruling, same day — a single unlabeled
+// "total" contradicted the wirescope dashboard):
+//   p.costRun.usd — wirescope's per-registration figure, zeroes when the
+//                   agent's CLI process spawns ("this run"; preserved by the
+//                   W2 overlay before it clobbers p.cost, absent otherwise)
+//   p.cost.usd    — the payload producer's cumulative; under the overlay this
+//                   is the persisted ALL-TIME ledger (additive across
+//                   restarts), on a raw poll it's the run figure itself.
+// When both are present they are different scopes and both are shown; with
+// only p.cost the label stays the neutral "total" (its scope varies by
+// producer). { text, tip } — text keeps the ~$ estimate marker.
 function fmtCost(v) { return v >= 1 ? v.toFixed(2) : v.toFixed(4); }
-function costSeg(p) {
+function costScopes(p) {
   const total = p && p.cost && typeof p.cost.usd === 'number' ? p.cost.usd : null;
+  const run = p && p.costRun && typeof p.costRun.usd === 'number' ? p.costRun.usd : null;
+  return { total, run: run != null && total != null ? run : null };
+}
+function costSeg(p) {
+  const { total, run } = costScopes(p);
   const sc = p && p.sinceCompact;
   const now = sc && typeof sc.estUsd === 'number' ? sc.estUsd : null;
   if (now != null) {
     const since = sc.compacted ? 'since the last compact' : 'since session start (never compacted)';
-    const tail = total != null && sc.compacted ? ` — $${fmtCost(total)} total` : '';
+    let tail = '';
+    if (run != null) tail = ` — $${fmtCost(run)} this run · $${fmtCost(total)} all-time`;
+    else if (total != null && sc.compacted) tail = ` — $${fmtCost(total)} total`;
     return { text: `~$${fmtCost(now)}`, tip: `Estimated spend ${since} (whole tree incl. subagents)${tail}` };
   }
   if (total == null) return null;
+  if (run != null) return { text: `~$${fmtCost(run)}`, tip: `Estimated spend this run (since the agent's process started) — $${fmtCost(total)} all-time` };
   return { text: `~$${fmtCost(total)}`, tip: 'Estimated total spend (spans compacts)' };
 }
 
-// Hovercard cost line, mirroring turnLine/reqLine: both numbers inline.
+// Hovercard cost line, mirroring turnLine/reqLine: the numbers inline.
 function costLine(p) {
-  const total = p && p.cost && typeof p.cost.usd === 'number' ? p.cost.usd : null;
+  const { total, run } = costScopes(p);
   const sc = p && p.sinceCompact;
   const now = sc && typeof sc.estUsd === 'number' ? sc.estUsd : null;
   if (now != null && sc.compacted) {
+    if (run != null) return `~$${fmtCost(now)} ($${fmtCost(run)} run · $${fmtCost(total)} all-time)`;
     return total != null ? `~$${fmtCost(now)} ($${fmtCost(total)} total)` : `~$${fmtCost(now)}`;
   }
   if (total == null) return now != null ? `~$${fmtCost(now)}` : null;
+  if (run != null) return `~$${fmtCost(run)} ($${fmtCost(total)} all-time)`;
   return `~$${fmtCost(total)}`;
 }
 

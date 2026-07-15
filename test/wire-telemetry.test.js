@@ -248,6 +248,17 @@ test('overlay: wire-carried fields overwrite the poll payload, poll-only fields 
   assert.strictEqual(out.strip.configuredLevel, 2);                 // poll-only: kept
   assert.strictEqual(out.sessionId, 'sid-1');                       // poll ids stay (poll-backed IPC)
   assert.strictEqual(poll.cost.usd, 113.98);                        // input not mutated
+  // The poll's own cumulative survives as costRun (per-registration scope) —
+  // the renderer shows "this run" vs "all-time" instead of one unlabeled total.
+  assert.deepStrictEqual(out.costRun, { usd: 113.98, requests: 392 });
+});
+
+test('overlay: a poll without cost yields costRun null (renderer degrades to one scope)', () => {
+  const wt = new WireTelemetry({});
+  wt.noteTurn(mainTurn());
+  const out = wt.overlay('alice', { linked: true, sessionId: 'sid-1', cost: null });
+  assert.strictEqual(out.costRun, null);
+  assert.deepStrictEqual(out.cost, { usd: 0.1234, requests: 8 });
 });
 
 test('overlay: no wire identity / unlinked poll → poll returned untouched; never throws', () => {
