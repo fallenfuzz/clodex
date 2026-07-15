@@ -1234,6 +1234,12 @@ async function doCreate() {
   createTerminal(name);
   addSessionToSidebar(name, type, cwd, null, (result.session && result.session.backend) || null);
   switchSession(name);
+
+  // Non-fatal spawn warnings (e.g. an injected skill references a subagent this
+  // session hasn't enabled) — the session is already live; these just surface a
+  // config foot-gun that would otherwise fail silently at delegation time.
+  const warnings = (result.session && result.session.warnings) || [];
+  for (const w of warnings) showToast(w, { kind: 'warn', duration: 15000, name });
 }
 
 // The dialog's primary action depends on which mode it was opened in: create a

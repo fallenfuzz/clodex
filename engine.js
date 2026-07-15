@@ -386,20 +386,29 @@ const SKILL_PLUGIN_NAME = 'clodex-skills';
 
 
 
+// Resolve the exact library records ([{ name, content }, ...]) that WILL be
+// injected for this session: the persisted injectSkills UNION any `sessions:`-
+// scoped library skills assigned to it (assignment = intent, a spawn-time union
+// never written back to the record). skillLibrary.list() carries the raw file as
+// `content`, so parse the scope frontmatter here to feed autoEnabledFor (its
+// list() shape has no meta, kept lean for the wire). Single-sourced so the
+// injected-skill subagent-ref check scans EXACTLY what writeSkillPlugin loads —
+// scanning a different set than what's injected would be a lie.
+function effectiveInjectedSkills(name, injectSkills) {
+  const lib = skillLibrary.list();
+  const scoped = lib.map((s) => ({ name: s.name, meta: parseSkillFrontmatter(s.content).meta }));
+  const effective = unionEnabled(injectSkills, scoped, name);
+  const byName = new Map(lib.map((s) => [s.name, s]));
+  return effective.map((n) => byName.get(n)).filter(Boolean);
+}
+
 // Scaffold the per-session injection plugin from the enabled skill names and
 // return its directory (for --plugin-dir), or null when nothing is injected.
 // The dir is rebuilt from scratch each spawn so a removed/edited library skill
 // can't linger. Writes only under ~/.clodex — never the repo or ~/.claude.
 function writeSkillPlugin(name, injectSkills) {
-  const lib = skillLibrary.list();
-  // Auto-include `sessions:`-scoped library skills for this session (assignment =
-  // intent) — a spawn-time UNION with the persisted injectSkills, never written
-  // back to the record. skillLibrary.list() carries the raw file as `content`, so
-  // parse the scope frontmatter here to feed autoEnabledFor (its list() shape has
-  // no meta, kept lean for the wire).
-  const scoped = lib.map((s) => ({ name: s.name, meta: parseSkillFrontmatter(s.content).meta }));
-  const effective = unionEnabled(injectSkills, scoped, name);
-  const plugin = buildSkillPlugin(effective, lib, SKILL_PLUGIN_NAME);
+  const records = effectiveInjectedSkills(name, injectSkills);
+  const plugin = buildSkillPlugin(records.map((s) => s.name), records, SKILL_PLUGIN_NAME);
   const dir = path.join(SKILL_PLUGINS_DIR, name);
   // Clear any prior scaffold (set shrank, or nothing injected now).
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
@@ -473,7 +482,7 @@ function rebuildAllStatusScripts(manager) {
 // See https://github.com/avirtual/wirescope (INTEGRATION.md).
 
 const { PROXY_AGENT_PREFIX, mintProxyAgent, resolveProxyAgentId, pickProxyRecord, shapeProxyRecord, AUTO_COMPACT, shouldAutoCompact, autoCompactDecision, isHumanPtyInput, draftChunkSignal, isDraftOpen, peerStatusLabel, shouldHoldDm, updateApplies } = require('./proxy-util');
-const { buildAgentsArg, denyAgentRules } = require('./agents-util');
+const { buildAgentsArg, denyAgentRules, BUILTIN_AGENTS } = require('./agents-util');
 const { extractFileTouches, noteFileTouches, vetFileIntent } = require('./file-touch');
 const { classifyNotification } = require('./attention');
 const { InjectQueue, isInjectInFlight, canFireCompact } = require('./inject-queue');
@@ -499,7 +508,7 @@ function randBase36(len) {
   return s.slice(0, len);
 }
 const { ctxReminderFor } = require('./ctx-reminder');
-const { buildSkillPlugin, parseSkillFrontmatter } = require('./skills-util');
+const { buildSkillPlugin, parseSkillFrontmatter, unresolvedSubagentRefs } = require('./skills-util');
 const { unionEnabled } = require('./scope-util');
 const { sshRun } = require('./ssh-run');
 const { probePeer, fixSessionName, buildDeployFixBriefing, classifyDeployFolder, homeRelativize, resolveDeployFolder } = require('./peer-deploy');
@@ -821,6 +830,7 @@ const SessionManager = createSessionManager({
     Transport,
     WIRE_INTENTS_LIVE,
     WIRE_SHADOW,
+    BUILTIN_AGENTS,
     buildAgentsArg,
     buildIpcPrompt,
     childProcess: require('child_process'),
@@ -829,6 +839,8 @@ const SessionManager = createSessionManager({
     cleanupClaudeHook,
     cleanupCodexHook,
     cleanupSkillPlugin,
+    effectiveInjectedSkills,
+    unresolvedSubagentRefs,
     codexStatusLineArg,
     collectSystemDiagnostics,
     composeDigest,
