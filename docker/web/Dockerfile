@@ -79,11 +79,15 @@ COPY --from=builder /build/web-dist ./web-dist
 # "Select login method" screen — verified live, v2.1.209) even though the same
 # token authenticates fine in -p mode and in the post-onboarding REPL. Seeding
 # the flag skips onboarding so a seeded token (M4 auth.env) just works; without
-# a token, /login inside the REPL remains the documented fallback. The file
-# sits OUTSIDE the volumes on purpose — it's derived state, and baking it means
-# every recreate starts onboarded.
+# a token, /login inside the REPL remains the documented fallback.
+# It also ships the whole filesystem pre-trusted: claude's per-project trust
+# check walks PARENT directories (projects["/"] covers every cwd — verified
+# live, v2.1.210), and inside the box the container IS the trust boundary, so
+# the "trust this folder?" dialog is pure friction on every new session. The
+# file sits OUTSIDE the volumes on purpose — it's derived state, and baking it
+# means every recreate starts onboarded + trusted.
 RUN mkdir -p /data /home/clodex/.clodex /home/clodex/.claude /home/clodex/work \
- && printf '{"hasCompletedOnboarding": true}' > /home/clodex/.claude.json \
+ && printf '{"hasCompletedOnboarding": true, "projects": {"/": {"hasTrustDialogAccepted": true}}}' > /home/clodex/.claude.json \
  && chown -R clodex:clodex /app /data /home/clodex
 
 ENV HOME=/home/clodex \
