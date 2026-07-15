@@ -12,6 +12,7 @@ const { attentionNotice, mentionNotice, badgeTitle, createWebNotifier } = requir
 const { detectNotice: sandboxDetectNotice, statusNotice: sandboxStatusNotice, openUrl: sandboxOpenUrl } = require('./lib/sandbox-view');
 const { SANDBOX_PLACEMENT_CWD, hasSandboxPeer, nextCwd: placementNextCwd, richFieldsGreyed } = require('./lib/placement');
 const { dropText } = require('./lib/drop-paths');
+const { turnSeg } = require('./lib/turn-stat');
 const { renderAppendChecklist, collectAppendChecklist, renderAgentChecklist, collectAgentChecklist, renderExecChecklist, collectExecChecklist, renderIntentChecklist, collectIntentChecklist, renderBuiltinChecklist, collectBuiltinChecklist, renderInjectChecklist, collectInjectChecklist, renderToolChecklist, collectToolChecklist, renderSkillChecklist, collectSkillChecklist, setChecklistAll, wireBulkToggles, setPromptLibCache, setAgentLibCache, setSkillLibCache, setExecLibCache, setClaudeToolsCache, setDefaultToolDenyCache, getPromptLibCache, getSkillLibCache, getDefaultToolDenyCache } = require('./lib/checklists');
 const { autoEnabledFor, reconcilePartialSelection } = require('../scope-util');
 const { parseSkillFrontmatter } = require('../skills-util');
@@ -1699,13 +1700,19 @@ function renderProxyBar() {
   } else if (p.context && p.context.messages != null) {
     segs.push(`<span class="px-seg${ctxCls}"${ctxAttr} title="${ctxTip || 'Messages in context'}">🧠 ${p.context.messages} msg</span>`);
   }
-  if (p.turns != null) segs.push(`<span class="px-seg">turn ${p.turns}</span>`);
+  // Turn count: the LIVE number (turns in context, resets at compact) leads;
+  // the cumulative total rides the tooltip. Decision shared with the hovercard
+  // via turn-stat.js.
+  const tSeg = turnSeg(p);
+  if (tSeg) segs.push(`<span class="px-seg" title="${esc(tSeg.tip)}">${esc(tSeg.text)}</span>`);
   // API roundtrips — the truer "how busy" gauge than turns (one prompt fans out
   // into many tool-loop roundtrips; ~8× is typical). From wirescope's
   // session_totals.requests, already shaped onto cost.requests. Aggregate incl.
-  // count_tokens probes — fine for an activity gauge.
+  // count_tokens probes — fine for an activity gauge. Still CUMULATIVE (spans
+  // compacts): the wire has no since-compact rollup yet — requested from
+  // wirescope; flips to since-compact + total-in-tooltip when that lands.
   if (p.cost && p.cost.requests != null) {
-    segs.push(`<span class="px-seg" title="API roundtrips this session (tool-loop calls, not just your prompts)">req ${p.cost.requests}</span>`);
+    segs.push(`<span class="px-seg" title="API roundtrips since session start, spans compacts (tool-loop calls, not just your prompts)">req ${p.cost.requests}</span>`);
   }
   if (p.warmth) {
     let txt;
@@ -1730,9 +1737,9 @@ function renderProxyBar() {
     const timeline = !!(p.capabilities && p.capabilities.context_timeline && p.base && p.sessionId)
       || peerQueries.includes('cost');
     if (timeline) {
-      segs.push(`<span class="px-seg px-cost px-ctx-btn" data-act="cost" title="Cost over time — click for the breakdown">~$${costTxt}</span>`);
+      segs.push(`<span class="px-seg px-cost px-ctx-btn" data-act="cost" title="Estimated spend since session start — click for the over-time breakdown">~$${costTxt}</span>`);
     } else {
-      segs.push(`<span class="px-seg px-cost" title="wirescope cost estimate">~$${costTxt}</span>`);
+      segs.push(`<span class="px-seg px-cost" title="Estimated spend since session start (wirescope)">~$${costTxt}</span>`);
     }
   } else if (sc && typeof sc.cost === 'number' && sc.cost > 0) {
     // Wire-off fallback (Bedrock/Vertex or no proxy): the wirescope cost

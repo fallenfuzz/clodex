@@ -14,6 +14,7 @@
 // DOM-bound, so no unit tests per the R1 rule.
 
 const { esc, fmtCountdown, fmtTokens } = require('./lib/format');
+const { turnLine } = require('./lib/turn-stat');
 
 function initSessionHovercard({ sessionList, proxyState, ctxPct, ctxTokens, proxyPollMs, typeGlyph }) {
   const HOVER_DELAY_MS = 350;
@@ -113,7 +114,10 @@ function initSessionHovercard({ sessionList, proxyState, ctxPct, ctxTokens, prox
         rows.push(statRow('cost', `~$${p.cost.usd >= 1 ? p.cost.usd.toFixed(2) : p.cost.usd.toFixed(4)}`));
       }
       const act = [];
-      if (p.turns != null) act.push(`turn ${p.turns}`);
+      // Live turn count leads, cumulative in parens — shared decision with the
+      // statusbar (turn-stat.js). No tooltips here; a hovercard IS the tooltip.
+      const tl = turnLine(p);
+      if (tl) act.push(tl);
       if (p.cost && p.cost.requests != null) act.push(`req ${p.cost.requests}`);
       if (act.length) rows.push(statRow('activity', act.join(' · ')));
     }
