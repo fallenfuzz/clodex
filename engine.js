@@ -1350,6 +1350,10 @@ const { syncRemoteServer, refreshRemoteToken } = createRemoteWiring({
   // exposes the box's own skillLibrary — both correct for a remote edit.
   readSkillCatalog, applySessionSkills,
   getPromptLibrary: () => promptLibrary,
+  // Session-less catalogs (GET /api/catalogs, M5): the box's FULL agent + skill
+  // libraries (unscoped — no session to scope by pre-create).
+  getAgentLibrary: () => agentLibrary,
+  getSkillLibrary: () => skillLibrary,
   getPersistence: () => persistence,
   getUiSettings: () => uiSettings,
   getWorkspaces: () => workspaces,
