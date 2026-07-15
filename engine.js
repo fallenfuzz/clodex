@@ -1403,6 +1403,7 @@ const sandbox = createSandbox({
   syncPeerManager,
   appVersion,
   isPackaged,
+  registryDir: REGISTRY_DIR,
   log,
 });
 
