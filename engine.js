@@ -1331,7 +1331,8 @@ function applySessionSkills(name, disabledSkills, injectSkills) {
 // workspaces cross as getters (whenReady-assigned); remoteServer/remoteError
 // cross as get+set (this fn writes them, main.js reads them elsewhere).
 const { createRemoteWiring } = require('./remote-wiring');
-const { syncRemoteServer } = createRemoteWiring({
+const { readRemoteEnvToken, writeRemoteEnvToken, hasRemoteEnvToken, resolveRemoteToken } = require('./remote-token');
+const { syncRemoteServer, refreshRemoteToken } = createRemoteWiring({
   path, fs, os, log,
   DEFAULT_WORKSPACE_ID, AGENT_NAME_RE, REGISTRY_DIR, OUTBOX_DIR, SELF_LABEL,
   parseCtxFile, jsonlToMessages, ensureDir, homeRelativize,
@@ -1355,6 +1356,10 @@ const { syncRemoteServer } = createRemoteWiring({
   getRemoteServer: () => remoteServer,
   setRemoteServer: (v) => { remoteServer = v; },
   setRemoteError: (v) => { remoteError = v; },
+  // GUI-managed operator token: read bound to this host's userData; precedence
+  // (env-wins) applied in syncRemoteServer via resolveRemoteToken.
+  readRemoteEnvToken: () => readRemoteEnvToken(userDataPath),
+  resolveRemoteToken,
   appVersion,
   isPackaged,
 });
@@ -1551,6 +1556,11 @@ const sandbox = createSandbox({
   return {
     // ── Primary handles ──
     manager, stores, syncRemoteServer, syncPeerManager, restoreSessionsForWorkspace, shutdown,
+    // GUI-managed remote token (remote:setToken handler + settings payload's
+    // derived remoteHasToken boolean; the value itself never leaves this host).
+    refreshRemoteToken,
+    setRemoteToken: (token) => writeRemoteEnvToken(userDataPath, token),
+    hasRemoteToken: () => hasRemoteEnvToken(userDataPath),
     // ── Shared infra + read-only mutable-singleton accessors ──
     REGISTRY_DIR, proxyPoller, wirescope, ProxyClient, pty,
     getRemoteServer: () => remoteServer,

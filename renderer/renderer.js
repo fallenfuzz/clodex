@@ -2585,6 +2585,33 @@ const wsLogsClearBtn = document.getElementById('ws-logs-clear-btn');
 const prefsRemoteEnabled = document.getElementById('prefs-remote-enabled');
 const remoteDot = document.getElementById('remote-dot');
 const remoteStatusText = document.getElementById('remote-status-text');
+const prefsRemoteToken = document.getElementById('prefs-remote-token');
+const prefsRemoteTokenSave = document.getElementById('prefs-remote-token-save');
+const prefsRemoteTokenClear = document.getElementById('prefs-remote-token-clear');
+const prefsRemoteTokenState = document.getElementById('prefs-remote-token-state');
+
+// Reflect the write-only token state (a derived boolean — the value never leaves
+// main). Called on prefs-open and after every set/clear.
+function renderRemoteTokenState(hasToken) {
+  prefsRemoteTokenState.textContent = hasToken
+    ? 'A token is configured ✓ — paste a new one to replace it, or Clear to remove.'
+    : 'No token set — phone access is open to anyone who can reach the port.';
+  prefsRemoteTokenState.style.color = hasToken ? 'var(--ok, #3fb950)' : 'var(--warn, #d9a55b)';
+}
+
+async function saveRemoteToken(value) {
+  const res = await window.api.remoteSetToken(value);
+  if (!res || res.ok === false) {
+    showToast(`Failed to update token: ${(res && res.error) || 'unknown error'}`, { kind: 'error' });
+    return;
+  }
+  prefsRemoteToken.value = '';
+  renderRemoteTokenState(!!res.hasToken);
+  // The server was torn down + rebuilt with the new gate; reflect it now rather
+  // than waiting for the 1.5s poll tick.
+  refreshWsStatus();
+  showToast(res.hasToken ? 'Phone-access token saved.' : 'Phone-access token cleared.', { kind: res.hasToken ? 'warm' : 'peer-ui' });
+}
 const CLAUDE_LABELS = {
   'model': 'Model name',
   'context': 'Context usage (estimated)',
@@ -3352,6 +3379,8 @@ async function openPrefs() {
   prefsDisableDesignMcp.checked = s.disableClaudeDesignMcp !== false;
   prefsCompactOnResume.checked = !!s.compactOnResume;
   prefsRemoteEnabled.checked = !!s.remoteEnabled;
+  prefsRemoteToken.value = '';
+  renderRemoteTokenState(!!s.remoteHasToken);
   // Global default tool-deny set (cwd-independent, so no lower-layer provenance).
   // Unchecked = denied by default for new sessions.
   setClaudeToolsCache(s.claudeTools || []);
@@ -3391,6 +3420,16 @@ document.getElementById('btn-prefs-save').addEventListener('click', async () => 
   await window.api.setDefaultToolDeny(collectToolChecklist(prefsToolsList));
   closePrefs();
 });
+
+// Phone-access token is managed OUT of the main Save flow — it lives write-only
+// in <userData>/remote.env, not ui-settings, and applies immediately (the server
+// rebuilds), so Save/Clear act on their own.
+prefsRemoteTokenSave.addEventListener('click', () => {
+  const v = prefsRemoteToken.value.trim();
+  if (!v) { showToast('Paste a token first (use Clear to remove).', { kind: 'warn' }); return; }
+  saveRemoteToken(v);
+});
+prefsRemoteTokenClear.addEventListener('click', () => saveRemoteToken(''));
 
 window.api.onRequestOpenPreferences(() => openPrefs());
 

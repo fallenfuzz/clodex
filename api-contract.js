@@ -132,6 +132,7 @@ const API_CONTRACT = [
   { name: 'sandboxClearToken', kind: 'invoke', channel: 'sandbox:clearToken' },
   { name: 'onRequestOpenSandboxDialog', kind: 'on', channel: 'request-open-sandbox-dialog' },
   { name: 'remoteStatus', kind: 'invoke', channel: 'remote:status' },
+  { name: 'remoteSetToken', kind: 'invoke', channel: 'remote:setToken' },
   { name: 'peerProbe', kind: 'invoke', channel: 'peer:probe' },
   { name: 'peerDeploy', kind: 'invoke', channel: 'peer:deploy' },
   { name: 'peerDeployConfig', kind: 'invoke', channel: 'peer:deployConfig' },

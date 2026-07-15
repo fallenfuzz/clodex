@@ -46,6 +46,10 @@ function createRemoteWiring(deps) {
     getPersistence, getUiSettings, getWorkspaces,
     // mutable singletons (get+set, M4 pattern)
     getRemoteServer, setRemoteServer, setRemoteError,
+    // GUI-managed operator token (remote-token.js, bound to userData in engine):
+    // the file-backed fallback for the wire gate. resolveRemoteToken applies the
+    // env-wins precedence.
+    readRemoteEnvToken, resolveRemoteToken,
     // host seams (former electron reads): version by value, isPackaged as getter
     appVersion, isPackaged,
   } = deps;
@@ -64,7 +68,10 @@ function createRemoteWiring(deps) {
     // whole wire; CLODEX_REMOTE_INSECURE=1 is the loud escape hatch that lets a
     // non-loopback bind serve with no token (fleet-migration only) — logged so
     // it can never be silently on.
-    const remoteToken = process.env.CLODEX_REMOTE_TOKEN || null;
+    // Env var WINS (explicit override; keeps every existing env-var deployment
+    // working), else the GUI-managed <userData>/remote.env token, else null
+    // (localhost-trust). readRemoteEnvToken is injected bound to userData.
+    const remoteToken = resolveRemoteToken(process.env.CLODEX_REMOTE_TOKEN, readRemoteEnvToken());
     const remoteInsecure = process.env.CLODEX_REMOTE_INSECURE === '1';
     if (remoteInsecure) {
       log.error('remote', 'CLODEX_REMOTE_INSECURE=1 — the remote wire will serve with NO operator token on a non-loopback bind. This is insecure; set CLODEX_REMOTE_TOKEN and remove the flag.');
@@ -407,7 +414,16 @@ function createRemoteWiring(deps) {
     });
   }
 
-  return { syncRemoteServer };
+  // The RemoteServer reads its operator token only at construct, so a token
+  // change (remote:setToken) must tear down any live server before reconciling —
+  // syncRemoteServer's own stop/start only fires on a port change or a toggle.
+  // Forcing the teardown here makes the new gate live immediately.
+  function refreshRemoteToken() {
+    if (getRemoteServer()) { getRemoteServer().stop(); setRemoteServer(null); }
+    syncRemoteServer();
+  }
+
+  return { syncRemoteServer, refreshRemoteToken };
 }
 
 module.exports = { createRemoteWiring };

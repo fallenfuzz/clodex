@@ -22,6 +22,7 @@ const crypto = require('crypto');
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
+const { readEnvFile, writeEnvFile } = require('./env-file');
 
 // Host-port defaults — Clodex's service neighborhood (web 7810, wirescope 7811,
 // peer wire 7820), matching docker/web/compose.yaml. Collision-bumped at
@@ -266,33 +267,10 @@ function createSandbox(deps = {}) {
   //                              the same value feeds the sandbox peer entry's
   //                              Bearer (registerPeer), closing the wire end-to-end.
   // The file is a multi-key set so setting/clearing one token never disturbs the
-  // other. Writes are atomic (tmp + rename); an empty set deletes the file.
-  function readAuthEnv() {
-    const out = {};
-    let raw;
-    try { raw = fs.readFileSync(authEnvPath(), 'utf8'); } catch { return out; }
-    for (const line of raw.split('\n')) {
-      const t = line.trim();
-      const i = t.indexOf('=');
-      if (i <= 0) continue;
-      out[t.slice(0, i)] = t.slice(i + 1);
-    }
-    return out;
-  }
-  function writeAuthEnv(env) {
-    const keys = Object.keys(env).filter((k) => env[k] != null && String(env[k]).length).sort();
-    const file = authEnvPath();
-    if (!keys.length) {
-      try { fs.unlinkSync(file); } catch (e) { if (e && e.code !== 'ENOENT') throw e; }
-      return;
-    }
-    fs.mkdirSync(sandboxDir(), { recursive: true });
-    const body = keys.map((k) => `${k}=${env[k]}`).join('\n') + '\n';
-    const tmp = `${file}.tmp`;
-    fs.writeFileSync(tmp, body, { mode: 0o600 });
-    fs.renameSync(tmp, file);
-    try { fs.chmodSync(file, 0o600); } catch { /* best-effort mode reassert */ }
-  }
+  // other. Writes are atomic (tmp + rename); an empty set deletes the file. The
+  // atomic KEY=value primitives are shared with the host's remote.env (env-file.js).
+  function readAuthEnv() { return readEnvFile(authEnvPath()); }
+  function writeAuthEnv(env) { writeEnvFile(authEnvPath(), env); }
 
   // hasAuthToken tracks the OAuth key SPECIFICALLY (not mere file existence) —
   // the auth.env file may exist for the remote token alone, which must not read
