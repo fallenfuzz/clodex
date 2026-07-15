@@ -2825,6 +2825,9 @@ function addPeerRow(peer) {
     <input type="text" class="peer-row-port" title="Peer protocol port on the box (default 7900)" value="${esc(String(portVal))}">
     <label class="peer-row-advlabel">folder</label>
     <input type="text" class="peer-row-folder" title="Install/clone dir on the box — ~/… (home-relative) or /abs (default ~/wb-wrap-ui)" value="${esc(folderVal)}">
+    <label class="peer-row-advlabel">token</label>
+    <input type="password" class="peer-row-token" autocomplete="off" spellcheck="false" title="Operator auth token for a tokened remote wire (CLODEX_REMOTE_TOKEN on the box). Write-only: leave blank to keep the stored one." placeholder="${peer.hasToken ? 'set — blank keeps' : 'optional'}">
+    ${peer.hasToken ? `<label class="peer-row-cleartoken" title="Delete the stored token on save"><input type="checkbox" class="peer-row-token-clear"> clear</label>` : ''}
     ${folderReported ? `<span class="peer-row-folder-hint peer-status-dim">folder reported by the box</span>` : ''}`;
   // Status/progress area (probe result → install offer → deploy step list).
   // Below the inputs so it can grow without reflowing the row.
@@ -3109,6 +3112,16 @@ function collectPeers() {
     // pre-fill still round-trips harmlessly (main re-validates at deploy time).
     peer.remotePort = v.port;
     if (v.folder) peer.deployFolder = v.folder;
+    // Operator auth token — write-only (docs/remote-auth-plan.md §4). A typed
+    // value SETS it; the "clear" checkbox sends '' to delete it; leaving the field
+    // blank OMITS the key so sanitizePeers carries the stored token forward (the
+    // dialog only ever knows hasToken, never the value). Typed value wins over the
+    // clear box if both are somehow set.
+    const tokenInput = row.querySelector('.peer-row-token');
+    const clearBox = row.querySelector('.peer-row-token-clear');
+    const typed = tokenInput ? tokenInput.value.trim() : '';
+    if (typed) peer.token = typed;
+    else if (clearBox && clearBox.checked) peer.token = '';
     out.push(peer);
   }
   return { ok: true, peers: out };

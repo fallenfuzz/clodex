@@ -52,3 +52,22 @@ test('a url edit restarts the connection: peer-removed then a fresh offline anno
     mgr.stopAll();
   }
 });
+
+test('a token edit restarts the connection like a url/label edit (Bearer is fixed per connection)', () => {
+  const emits = [];
+  const mgr = new PeerManager({ emit: (ch, ...a) => emits.push([ch, ...a]) });
+  try {
+    mgr.sync([{ id: 'p', label: 'P', url: 'http://127.0.0.1:1', token: 't1' }]);
+    emits.length = 0;
+    // Same url+label, new token → must drop and re-create so the new Bearer applies.
+    mgr.sync([{ id: 'p', label: 'P', url: 'http://127.0.0.1:1', token: 't2' }]);
+    assert.deepEqual(emits.map(([ch]) => ch), ['peer-removed', 'peer-state'],
+      'a token change restarts the peer');
+    emits.length = 0;
+    // Re-syncing the identical token is a no-op (no needless restart).
+    mgr.sync([{ id: 'p', label: 'P', url: 'http://127.0.0.1:1', token: 't2' }]);
+    assert.equal(emits.length, 0, 'an unchanged token does not restart');
+  } finally {
+    mgr.stopAll();
+  }
+});

@@ -26,10 +26,15 @@ const REQUEST_TIMEOUT_MS = 5000;
 const QUERY_TIMEOUT_MS = 20000;
 
 class PeerConnection {
-  constructor({ id, label, url, emit, selfLabel, helloIntervalMs, computeRoster }) {
+  constructor({ id, label, url, token, emit, selfLabel, helloIntervalMs, computeRoster }) {
     this.id = id;
     this.label = label;
     this.url = url.replace(/\/+$/, '');
+    // Operator auth token for a tokened remote wire (docs/remote-auth-plan.md §4).
+    // Presented as `Authorization: Bearer <token>` on every request + SSE stream;
+    // null = no header (loopback / untokened peer, unchanged). A token change is a
+    // peer restart (PeerManager.sync), so it's fixed for a connection's lifetime.
+    this._token = (typeof token === 'string' && token) ? token : null;
     this._emit = emit;
     // Hub-relay federation (we are the HUB for this connection). Injected callback
     // computeRoster(id) → the split-horizon'd, access-gated roster of agents on our
@@ -446,6 +451,12 @@ class PeerConnection {
 
   // ---- plumbing ----
 
+  // Bearer header for a tokened peer, merged into a request's headers. Empty for
+  // an untokened peer so the wire is byte-for-byte unchanged there.
+  _authHeaders() {
+    return this._token ? { Authorization: `Bearer ${this._token}` } : {};
+  }
+
   _request(method, path, payload, cb, timeout = REQUEST_TIMEOUT_MS) {
     let u;
     try { u = new URL(this.url + path); } catch (e) { return cb(e); }
@@ -454,7 +465,10 @@ class PeerConnection {
       hostname: u.hostname, port: u.port || 80,
       path: u.pathname + u.search, method,
       agent: this._reqAgent, timeout,
-      headers: body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } : {},
+      headers: {
+        ...(body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } : {}),
+        ...this._authHeaders(),
+      },
     }, (res) => {
       let buf = '';
       res.on('data', (c) => { buf += c; if (buf.length > 1024 * 1024) req.destroy(); });
@@ -476,7 +490,7 @@ class PeerConnection {
       hostname: u.hostname, port: u.port || 80,
       path: u.pathname + u.search, method: 'GET',
       agent: this._sseAgent,
-      headers: { Accept: 'text/event-stream' },
+      headers: { Accept: 'text/event-stream', ...this._authHeaders() },
     }, (res) => {
       if (res.statusCode !== 200) { req.destroy(); return; }
       onOpen(req);
@@ -520,20 +534,24 @@ class PeerManager {
     this._peers = new Map();          // id -> PeerConnection
   }
 
-  // peers: [{ id, label, url }] from ui-settings. Reconcile: keep matching,
-  // drop removed, start added. URL/label change = restart that peer.
+  // peers: [{ id, label, url, token }] from ui-settings. Reconcile: keep matching,
+  // drop removed, start added. URL/label/TOKEN change = restart that peer (the
+  // Bearer header is fixed at construction, so a re-auth needs a fresh connection).
   sync(peers) {
     const wanted = new Map();
     for (const p of Array.isArray(peers) ? peers : []) {
       if (!p || !p.id || !p.url) continue;
-      wanted.set(String(p.id), { id: String(p.id), label: String(p.label || p.id), url: String(p.url) });
+      wanted.set(String(p.id), {
+        id: String(p.id), label: String(p.label || p.id), url: String(p.url),
+        token: (typeof p.token === 'string' && p.token) ? p.token : null,
+      });
     }
     for (const [id, conn] of this._peers) {
       const w = wanted.get(id);
-      if (!w || w.url !== conn.url || w.label !== conn.label) {
+      if (!w || w.url !== conn.url || w.label !== conn.label || (w.token || null) !== (conn._token || null)) {
         conn.stop();
         this._peers.delete(id);
-        // Announce the drop even on a URL/label edit — attachments died
+        // Announce the drop even on a URL/label/token edit — attachments died
         // with the old connection, so the UI must shed its tabs; the new
         // connection re-announces via peer-state.
         this._emit('peer-removed', id);

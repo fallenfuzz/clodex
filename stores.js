@@ -135,8 +135,18 @@ const DEFAULT_UI_SETTINGS = {
   },
 };
 
-function sanitizePeers(raw) {
+// `prior` (optional) is the CURRENT peers array — used to carry a peer's auth
+// token forward by id when an incoming entry OMITS `token` (docs/remote-auth-plan.md
+// §4). The Peers dialog round-trips `hasToken` only, never the value, so a plain
+// label-edit save omits `token` and must not wipe it. An incoming string SETS the
+// token (trimmed, cap 256); an explicit `''` CLEARS it; a dropped row drops its
+// token with the row. On a fresh disk load `prior` is absent — the persisted
+// string simply passes through the same set-on-string branch.
+function sanitizePeers(raw, prior) {
   if (!Array.isArray(raw)) return null;
+  const priorById = new Map(
+    (Array.isArray(prior) ? prior : []).map((p) => [String(p && p.id), p]),
+  );
   const out = [];
   for (const p of raw) {
     if (!p || typeof p.id !== 'string') continue;
@@ -150,7 +160,7 @@ function sanitizePeers(raw) {
     // back to the script's own $HOME/wb-wrap-ui default. Cap length defensively.
     const deployFolder = typeof p.deployFolder === 'string' && p.deployFolder.trim()
       ? p.deployFolder.trim().slice(0, 256) : null;
-    out.push({
+    const entry = {
       id: p.id,
       label: typeof p.label === 'string' && p.label ? p.label : (sshHost || url),
       url, sshHost,
@@ -167,7 +177,19 @@ function sanitizePeers(raw) {
       // or every settings write strips it and the flag never persists (the gate
       // then stays OFF forever and no roster is ever pushed).
       ...(p.relayAllowed === true ? { relayAllowed: true } : {}),
-    });
+    };
+    // Operator auth token — presence-encoded like disabled/relayAllowed (only a
+    // truthy value is written). Set on an incoming string, cleared on '', else
+    // carried forward from prior by id when omitted (see the header note).
+    let token;
+    if (typeof p.token === 'string') {
+      token = p.token.trim().slice(0, 256) || null;   // '' / whitespace clears
+    } else {
+      const prev = priorById.get(String(p.id));
+      token = (prev && typeof prev.token === 'string' && prev.token) ? prev.token : null;
+    }
+    if (token) entry.token = token;
+    out.push(entry);
   }
   return out;
 }
@@ -1203,7 +1225,7 @@ function initStores(userDataPath, { log, registryDir } = {}) {
         theme: THEME_KEYS.includes(partial?.theme) ? partial.theme : cur.theme,
         remoteEnabled: partial?.remoteEnabled ?? cur.remoteEnabled,
         remotePort: Number.isInteger(partial?.remotePort) ? partial.remotePort : cur.remotePort,
-        peers: sanitizePeers(partial?.peers) ?? cur.peers,
+        peers: sanitizePeers(partial?.peers, cur.peers) ?? cur.peers,
         peerAttached: sanitizePeerAttached(partial?.peerAttached) ?? cur.peerAttached,
         peerVisible: sanitizePeerVisible(partial?.peerVisible) ?? cur.peerVisible,
         peerControlled: sanitizePeerControlled(partial?.peerControlled) ?? cur.peerControlled,

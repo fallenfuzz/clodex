@@ -76,9 +76,14 @@ Extract web-host's predicate into one module both hosts use:
 ### 4. Peer-client side (desktop → container/remote peers)
 
 - Peer entry gains optional `token` (string, trimmed, cap 256).
-  `sanitizePeers` (stores.js:138) passes it through. Peers dialog gains a
-  write-only field like the sandbox OAuth one; `peer:list`-style IPC
-  results and the peers UI must return only `hasToken`, never the value.
+  `sanitizePeers` (stores.js:138) passes it through OR carries it forward on
+  omit: it takes the current peers array as a second arg and, when an incoming
+  entry omits `token`, reuses the stored value by id (an explicit `''` clears;
+  a dropped row drops its token). This is required because the Peers dialog
+  saves the whole array back knowing only `hasToken` — without carry-forward a
+  plain label edit would wipe every token. Peers dialog gains a write-only
+  field like the sandbox OAuth one; `getSettings`/`peer:list`-style IPC results
+  and the peers UI must return only `hasToken`, never the value.
 - peer-client.js presents `Authorization: Bearer <token>` on BOTH request
   paths: `_request` (:449) and the SSE attach (:479). No cookie logic on
   this side.

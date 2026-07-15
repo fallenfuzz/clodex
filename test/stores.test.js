@@ -78,6 +78,63 @@ test('uiSettings: peer relayAllowed + disabled survive the sanitize round-trip (
   } finally { cleanup(); }
 });
 
+test('uiSettings: peer auth token — set, trim, cap 256, and absence stays absent', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    const { uiSettings } = stores;
+    uiSettings.set({ peers: [
+      { id: 'a', label: 'A', url: 'http://a', token: '  sekret  ' },
+      { id: 'b', label: 'B', url: 'http://b' },
+      { id: 'c', label: 'C', url: 'http://c', token: 'x'.repeat(400) },
+    ] });
+    const peers = uiSettings.get().peers;
+    assert.strictEqual(peers.find((p) => p.id === 'a').token, 'sekret', 'trimmed and stored');
+    assert.strictEqual('token' in peers.find((p) => p.id === 'b'), false, 'no token stays absent (presence-encoded)');
+    assert.strictEqual(peers.find((p) => p.id === 'c').token.length, 256, 'capped at 256');
+  } finally { cleanup(); }
+});
+
+// The exact clobber clodex asked pinned by name: the Peers dialog knows only
+// hasToken, so a label-edit save OMITS token — the stored value must survive.
+test('uiSettings: a label-edit save with token-omitting entries preserves prior tokens (no clobber)', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    const { uiSettings } = stores;
+    uiSettings.set({ peers: [
+      { id: 'a', label: 'A', url: 'http://a', token: 'tok-a' },
+      { id: 'b', label: 'B', url: 'http://b', token: 'tok-b' },
+    ] });
+    // Simulate the dialog's collectPeers output: NO token key (it only had hasToken),
+    // with one label edited.
+    uiSettings.set({ peers: [
+      { id: 'a', label: 'A-renamed', url: 'http://a' },
+      { id: 'b', label: 'B', url: 'http://b' },
+    ] });
+    const peers = uiSettings.get().peers;
+    assert.strictEqual(peers.find((p) => p.id === 'a').label, 'A-renamed', 'label edit applied');
+    assert.strictEqual(peers.find((p) => p.id === 'a').token, 'tok-a', 'omitted token carried forward (not wiped)');
+    assert.strictEqual(peers.find((p) => p.id === 'b').token, 'tok-b', 'sibling token untouched');
+  } finally { cleanup(); }
+});
+
+test('uiSettings: an explicit empty token clears it; a dropped row drops its token', () => {
+  const { stores, cleanup } = freshStores();
+  try {
+    const { uiSettings } = stores;
+    uiSettings.set({ peers: [
+      { id: 'a', label: 'A', url: 'http://a', token: 'tok-a' },
+      { id: 'b', label: 'B', url: 'http://b', token: 'tok-b' },
+    ] });
+    // '' clears a; b is dropped from the array entirely.
+    uiSettings.set({ peers: [
+      { id: 'a', label: 'A', url: 'http://a', token: '' },
+    ] });
+    const peers = uiSettings.get().peers;
+    assert.strictEqual('token' in peers.find((p) => p.id === 'a'), false, 'explicit empty token clears it');
+    assert.strictEqual(peers.find((p) => p.id === 'b'), undefined, 'dropped row is gone (token with it)');
+  } finally { cleanup(); }
+});
+
 test('persistence: setHoldUntil round-trips and clears to an ABSENT key', () => {
   const { stores, cleanup } = freshStores();
   try {

@@ -627,7 +627,11 @@ function registerIpcHandlers(deps) {
       theme: s.theme,
       remoteEnabled: s.remoteEnabled,
       remotePort: s.remotePort,
-      peers: s.peers,
+      // Peer auth token is WRITE-ONLY (docs/remote-auth-plan.md §4): the renderer
+      // sees only a `hasToken` boolean, never the value. The Peers dialog saves
+      // the array back, so an omitted `token` carries forward in sanitizePeers —
+      // the value never has to round-trip through the UI.
+      peers: (s.peers || []).map(({ token, ...rest }) => ({ ...rest, hasToken: !!token })),
     };
   });
   handle('settings:set', (_e, partial) => {

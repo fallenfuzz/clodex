@@ -2816,6 +2816,9 @@ html, body {
 #peers-list .peer-row-advlabel:not(:first-of-type) { margin-left: 6px; }
 #peers-list .peer-row-port { flex: 0 0 70px; }
 #peers-list .peer-row-folder { flex: 1; }
+#peers-list .peer-row-token { flex: 0 0 150px; }
+#peers-list .peer-row-cleartoken { flex: none; font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 4px; cursor: pointer; }
+#peers-list .peer-row-cleartoken input { margin: 0; }
 #peers-list .peer-row input.invalid { border-color: var(--error); }
 /* "folder reported by the box" — a dim note on its own full-width line under the
    override inputs, shown only when the pre-fill came from the peer's live

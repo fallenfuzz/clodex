@@ -155,11 +155,17 @@ function createPeerWiring(deps) {
     const resolved = [];
     for (const p of s.peers || []) {
       if (p.disabled) continue;   // paused: PeerManager.sync sheds it (no connection)
+      // Carry the operator auth token so the peer client presents Bearer on a
+      // tokened remote wire (docs/remote-auth-plan.md §4). Absent for untokened
+      // peers, so the wire to them is unchanged. Tunneled peers hit loopback on
+      // the far side and usually need no token — but if that node sets one, it
+      // rides through here too.
+      const token = (typeof p.token === 'string' && p.token) ? p.token : null;
       if (p.sshHost) {
         const url = getTunnelManager() ? getTunnelManager().urlFor(p.id) : null;
-        resolved.push({ id: p.id, label: p.label, url: url || 'http://127.0.0.1:1' });
+        resolved.push({ id: p.id, label: p.label, url: url || 'http://127.0.0.1:1', token });
       } else {
-        resolved.push({ id: p.id, label: p.label, url: p.url });
+        resolved.push({ id: p.id, label: p.label, url: p.url, token });
       }
     }
     getPeerManager().sync(resolved);
