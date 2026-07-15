@@ -478,7 +478,7 @@ const { classifyNotification } = require('./attention');
 const { InjectQueue, isInjectInFlight, canFireCompact } = require('./inject-queue');
 const { parkDelivery, drainPending, hasPending, countPending, parkIdInUse, claimParkedById } = require('./pending-store');
 const { enqueueOutbox, claimOutbox, outboxHasOrigin, listOutboxOrigins } = require('./peer-outbox');
-const { parseIntent, shadowIntentKey } = require('./intent-scanner');
+const { parseIntent, looksLikeIntent, shadowIntentKey } = require('./intent-scanner');
 const { intentEnabled } = require('./intent-catalog');
 const { isFilenameToken, parseAndValidate, DEFAULT_MAX_BYTES } = require('./exec-schema');
 const { parseRemindSpec } = require('./remind-schedule');
@@ -860,6 +860,7 @@ const SessionManager = createSessionManager({
     outboxHasOrigin,
     parkDelivery,
     parkIdInUse,
+    looksLikeIntent,
     parseAndValidate,
     parseCtxFile,
     parseIntent,

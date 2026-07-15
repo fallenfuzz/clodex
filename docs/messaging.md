@@ -81,6 +81,15 @@ compact there can still be dropped by the CLI (documented degradation).
 - `shadowIntentKey` gives each occurrence a stable identity for the dedupe
   ledger; `urgent` is folded into the key so an urgent retry isn't swallowed
   as a duplicate of the original.
+- **Near-miss bounce**: a top-level line that cleans to `[agent:…` but parses
+  to nothing (typo'd verb, malformed args) synthesizes ONE `unknown` intent
+  per batch (`looksLikeIntent`, counter for the rest), which `_handleIntent`
+  bounces back naming the line and the valid verbs — before the intent gate,
+  agent sessions only. Near-misses inside a captured body stay body text, so
+  quoting examples in a dm is safe. Same family: a dm whose target is neither
+  a local agent, a `name@peer` route, nor a socket peer bounces
+  (`NOT delivered: no agent named …`), as does a dm to a bash session and an
+  unknown `context` sub — all were previously silent drops.
 
 ## 3. Local DM delivery
 

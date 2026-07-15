@@ -123,6 +123,7 @@ function createSessionManager(deps) {
     canFireCompact,
     lastTranscriptWrite,
     log,
+    looksLikeIntent,
     memoryStore,
     mergeClaudeSystemPrompt,
     mergeCodexInstructions,
@@ -1651,11 +1652,27 @@ function createSessionManager(deps) {
         try { JSON.parse(t); return true; } catch { return false; }
       };
       let i = 0;
+      // One synthesized `unknown` per batch, with a counter for the rest: a
+      // near-miss line ([agent:-shaped but parses to nothing) at THIS level was
+      // previously dropped in silence — a typo'd verb cost the agent a whole
+      // failed attempt with zero feedback. Near-misses INSIDE a captured body
+      // never reach here (parseIntent returns null for them, so the body
+      // capture keeps them as text) — quoting inside a dm stays safe. Capped
+      // at one intent so a pasted doc full of examples yields one bounce, not
+      // one per line.
+      let unknown = null;
       while (i < lines.length) {
         const line = lines[i].trim();
         i++;
         const intent = parseIntent(line);
-        if (!intent || intent.type === 'escape') continue;
+        if (!intent || intent.type === 'escape') {
+          const nearMiss = !intent && looksLikeIntent(line);
+          if (nearMiss) {
+            if (unknown) unknown.more++;
+            else { unknown = { type: 'unknown', text: nearMiss.slice(0, 160), more: 0 }; intents.push(unknown); }
+          }
+          continue;
+        }
 
         // exec bodies are JSON DATA, not free text. The shared greedy capture
         // below would swallow any prose a seat writes on FOLLOWING lines into the
@@ -1757,6 +1774,31 @@ function createSessionManager(deps) {
     async _handleIntent(senderName, intent) {
       const session = this.sessions.get(senderName);
 
+      // Near-miss bounce (synthesized in _extractIntents): a `[agent:…]`-shaped
+      // line that parsed to nothing used to vanish in silence — the agent
+      // believed it acted and nothing happened. Diagnostic, not a capability,
+      // so it runs BEFORE the intent gate (a seat's allowlist never contains
+      // 'unknown', and "the unknown intent is disabled" would be nonsense).
+      // Agent sessions only: bash panes never produce it (_scanPtyOutput calls
+      // parseIntent directly), and a bounce injected into a shell would be
+      // typed at the prompt. Echoing the bounce back at column 1 would bounce
+      // again — that requires the agent to actively quote it unescaped, same
+      // exposure every existing bounce already has.
+      if (intent.type === 'unknown') {
+        if (session && session.agentType) {
+          const more = intent.more ? ` (+${intent.more} more unrecognized [agent:…] lines this turn)` : '';
+          this._injectText(session,
+            `[agent:?] unrecognized intent \`${intent.text}\`${more} — nothing was done. `
+            + 'Valid intents: dm, resend, who, name, context, memory, spawn, file, exec, remind, notify-user. '
+            + 'To quote an intent literally, escape it as \\[agent:…].', { parkable: true });
+        }
+        this._broadcast('ipc-message', {
+          type: 'intent', from: senderName, to: senderName,
+          body: `unrecognized intent bounced: ${intent.text}`,
+        });
+        return;
+      }
+
       // Per-session intent gating (SEND side). Read the SENDER's allowlist FRESH
       // from persistence on every fire — same as the exec per-command grant below
       // — so a checklist toggle applies WITHOUT a respawn. `intentEnabled` treats
@@ -1836,7 +1878,36 @@ function createSessionManager(deps) {
               await Transport.send(peer.socket, {
                 type: 'dm', from: senderName, body: intent.body,
               });
+            } else {
+              // No local session, no federated route, no socket peer: the
+              // message has nowhere to go. This used to fall through to the
+              // ipc-log broadcast alone — a typo'd target name lost the dm
+              // with zero feedback to the sender.
+              if (session) {
+                this._injectText(session,
+                  `[agent:dm] NOT delivered: no agent named "${intent.target}". Check [agent:who] for reachable peers.`,
+                  { parkable: true });
+              }
+              this._broadcast('ipc-message', {
+                type: 'dm', from: senderName, to: intent.target,
+                body: `UNDELIVERED (no such agent): ${intent.body}`,
+              });
+              break;
             }
+          } else {
+            // Target EXISTS but is a bash session — not DM-able (no registry,
+            // no socket, can't process intents). Same silent-loss hole as the
+            // missing-target case above.
+            if (session) {
+              this._injectText(session,
+                `[agent:dm] NOT delivered: "${intent.target}" is a bash session — bash sessions can't receive dms.`,
+                { parkable: true });
+            }
+            this._broadcast('ipc-message', {
+              type: 'dm', from: senderName, to: intent.target,
+              body: `UNDELIVERED (bash session): ${intent.body}`,
+            });
+            break;
           }
           this._broadcast('ipc-message', {
             type: 'dm', from: senderName, to: intent.target, body: intent.body,
@@ -2730,6 +2801,12 @@ function createSessionManager(deps) {
       const cmd = map && map[sub];
       if (!cmd) {
         console.warn(`[agent:context ${sub}] from ${session.name}: unsupported for type ${session.type}`);
+        // Loud like memory's unknown-sub bounce — a typo'd sub used to be a
+        // console line the agent never saw, so its compact/clear silently
+        // didn't happen.
+        this._injectText(session,
+          `[agent:context] unknown or unsupported sub-command "${sub}" for a ${session.type} session (use compact|clear|reload)`,
+          { parkable: true });
         return;
       }
       // In-flight guard: while a self-compact is in flight (LATCH set, guard set,

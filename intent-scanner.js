@@ -134,6 +134,21 @@ function parseIntent(rawLine) {
   return null;
 }
 
+// Near-miss detector for the silent-drop bounce: a line that LOOKS like an
+// intent emission (cleans to `[agent:` at its start) yet parses to nothing —
+// a typo'd verb, a malformed arg list, a made-up example. parseIntent must
+// keep returning null for these: it doubles as the dm-body BOUNDARY in
+// _extractIntents, so recognizing near-misses there would truncate any body
+// that quotes an unescaped example. The caller consults this only at the TOP
+// LEVEL of its scan, where such a line is otherwise dropped in silence.
+// Escaped \[agent: lines never match — the backslash survives cleanLine.
+// Returns the CLEANED line (ANSI/decorators stripped, ready for a bounce
+// message) on a match, null otherwise.
+function looksLikeIntent(rawLine) {
+  const cleaned = cleanLine(rawLine).trim();
+  return cleaned.startsWith('[agent:') ? cleaned : null;
+}
+
 // Stable identity of one intent occurrence for the wire-vs-jsonl shadow
 // differ (both paths see the same assistant text, so the same intent hashes
 // to the same key on both sides). Body capped so a huge dm doesn't bloat
@@ -142,8 +157,11 @@ function shadowIntentKey(agent, intent) {
   // urgent is part of the identity: a held dm RESENT with the flag inside the
   // dedupe TTL must dispatch, not be swallowed as a duplicate of the bounce.
   const head = (intent.sub || intent.target || intent.name || intent.id || intent.cmd || intent.spec || '') + (intent.urgent ? '+urgent' : '');
-  const body = (intent.body || intent.path || '').trim().slice(0, 200);
+  // `text` = the synthesized `unknown` intent's raw line: without it every
+  // near-miss in a turn would collapse to one dedupe key and only the first
+  // distinct typo would bounce.
+  const body = (intent.body || intent.path || intent.text || '').trim().slice(0, 200);
   return `${agent}|${intent.type}|${head}|${body}`;
 }
 
-module.exports = { ANSI_RE, PREFIX_CHARS, cleanLine, parseIntent, shadowIntentKey };
+module.exports = { ANSI_RE, PREFIX_CHARS, cleanLine, parseIntent, looksLikeIntent, shadowIntentKey };

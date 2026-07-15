@@ -5,7 +5,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const {
-  cleanLine, parseIntent, shadowIntentKey, ANSI_RE, PREFIX_CHARS,
+  cleanLine, parseIntent, looksLikeIntent, shadowIntentKey, ANSI_RE, PREFIX_CHARS,
 } = require('../intent-scanner');
 
 test('cleanLine: strips ANSI escapes', () => {
@@ -217,4 +217,32 @@ test('shadowIntentKey: body is trimmed and capped at 200 chars', () => {
   const long = parseIntent('[agent:dm bob] ' + 'z'.repeat(500));
   const key = shadowIntentKey('a', long);
   assert.strictEqual(key, 'a|dm|bob|' + 'z'.repeat(200));
+});
+
+// --- looksLikeIntent (near-miss detector for the silent-drop bounce) ---------
+// Returns the CLEANED line on a match so the bounce can quote it without ANSI
+// noise; null otherwise. parseIntent stays null for near-misses by design (it
+// is the dm-body boundary), so this is a SEPARATE question asked only at the
+// top level of _extractIntents.
+
+test('looksLikeIntent: typo\'d verb matches and returns the cleaned line', () => {
+  assert.strictEqual(looksLikeIntent('[agent:frobnicate now]'), '[agent:frobnicate now]');
+  assert.strictEqual(looksLikeIntent('\x1b[1m• [agent:dmm bob] hi\x1b[0m'), '[agent:dmm bob] hi');
+});
+
+test('looksLikeIntent: escape, prose, and mid-line mentions do not match', () => {
+  assert.strictEqual(looksLikeIntent('\\[agent:dm bob] literal'), null);
+  assert.strictEqual(looksLikeIntent('see the [agent:dm] docs'), null);
+  assert.strictEqual(looksLikeIntent('plain prose'), null);
+  assert.strictEqual(looksLikeIntent(''), null);
+});
+
+test('looksLikeIntent: matches lines parseIntent ALSO matches (caller filters on null parse first)', () => {
+  assert.strictEqual(looksLikeIntent('[agent:who]'), '[agent:who]');
+});
+
+test('shadowIntentKey: unknown intents key on their text, so distinct near-misses stay distinct', () => {
+  const a = shadowIntentKey('x', { type: 'unknown', text: '[agent:aaa]' });
+  const b = shadowIntentKey('x', { type: 'unknown', text: '[agent:bbb]' });
+  assert.notStrictEqual(a, b);
 });

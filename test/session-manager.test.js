@@ -1149,9 +1149,9 @@ test('create: an EMPTY execCommands grant writes NO key (absent ≡ [] ≡ no gr
 // after each body line and stops at the first complete value — no brace lexer.
 // Scoped to exec; dm/memory/context keep the greedy capture. These drive the
 // real _extractIntents with the real parseIntent + the 64KB region cap injected.
-const { parseIntent: parseIntentReal } = require('../intent-scanner');
+const { parseIntent: parseIntentReal, looksLikeIntent: looksLikeIntentReal } = require('../intent-scanner');
 function mkExtract() {
-  return mk({ parseIntent: parseIntentReal, execBodyCap: 64 * 1024 });
+  return mk({ parseIntent: parseIntentReal, looksLikeIntent: looksLikeIntentReal, execBodyCap: 64 * 1024 });
 }
 const execBodyOf = (m, text) => {
   const found = m._extractIntents(text).filter((x) => x.type === 'exec');
@@ -1732,4 +1732,102 @@ test('_relayClaimedDm: terminal-leg from is origin-normalized to OUR label for t
     rv: 1, to: 'murmur', finalTarget: 'murmur@murmurfi', from: 'degen', body: 'x', hops: 1,
   });
   assert.strictEqual(bare.dm[0].from, 'degen@docker', 'bare from gets qualified with hub label');
+});
+
+// --- Silent-drop bounces: unknown intents, undeliverable dms, context typos ---
+// Three feedback holes of the same family, each of which used to swallow an
+// agent's action in silence: (1) a `[agent:…]`-shaped line that parses to
+// nothing (typo'd verb / malformed args) was dropped by _extractIntents;
+// (2) a dm to a target that is neither a local agent, a `name@peer` route,
+// nor a socket peer fell through to the ipc-log broadcast alone; (3) an
+// unknown `context` sub-command was a console.warn the agent never saw.
+
+function mkBounce() {
+  const injected = [];
+  const broadcasts = [];
+  const m = mk({
+    getPersistence: () => ({ list: () => [], get: () => null }),
+    registry: { listPeers: () => [], getPeer: () => null },
+    getPeerManager: () => null,
+    peerStatusLabel: () => 'idle',
+    parseIntent: parseIntentReal,
+    looksLikeIntent: looksLikeIntentReal,
+  });
+  m._injectText = (_s, text) => injected.push(text);
+  m._broadcast = (_ch, msg) => broadcasts.push(msg);
+  m.sessions.set('a', { name: 'a', type: 'claude', agentType: 'claude', workspaceId: 'ws1' });
+  m.sessions.set('sh', { name: 'sh', workspaceId: 'ws1' }); // bash: no agentType
+  return { m, injected, broadcasts };
+}
+
+test('extract: a top-level near-miss line synthesizes ONE unknown intent, counting the rest', () => {
+  const { m } = mkBounce();
+  const found = m._extractIntents('prose\n[agent:frobnicate now]\nmore prose\n[agent:dmm b] typo');
+  const unknown = found.filter((x) => x.type === 'unknown');
+  assert.strictEqual(unknown.length, 1, 'capped at one unknown per batch');
+  assert.strictEqual(unknown[0].text, '[agent:frobnicate now]', 'carries the first offending line');
+  assert.strictEqual(unknown[0].more, 1, 'later near-misses only bump the counter');
+});
+
+test('extract: near-misses inside a dm body stay body text — quoting is safe', () => {
+  const { m } = mkBounce();
+  const found = m._extractIntents('[agent:dm b] look at this example:\n[agent:frobnicate now]\ntrailing prose');
+  assert.strictEqual(found.length, 1, 'only the dm fires');
+  assert.strictEqual(found[0].type, 'dm');
+  assert.match(found[0].body, /\[agent:frobnicate now\]/, 'the near-miss was captured as body');
+});
+
+test('extract: escaped and mid-line [agent: text never synthesize unknown', () => {
+  const { m } = mkBounce();
+  const found = m._extractIntents('\\[agent:dm b] literal\nsee the [agent:dm] docs for details');
+  assert.strictEqual(found.length, 0);
+});
+
+test('unknown: bounces to an agent sender naming the line and the escape, before the gate', async () => {
+  const injected = [];
+  const m = mk({
+    // Empty allowlist gates EVERYTHING — unknown must still bounce as itself,
+    // not as "the unknown intent is disabled" nonsense.
+    getPersistence: () => ({ list: () => [], get: (n) => (n === 'a' ? { intents: [] } : null) }),
+  });
+  m._injectText = (_s, text) => injected.push(text);
+  m._broadcast = () => {};
+  m.sessions.set('a', { name: 'a', agentType: 'claude', workspaceId: 'ws1' });
+  await m._handleIntent('a', { type: 'unknown', text: '[agent:frobnicate now]', more: 2 });
+  assert.strictEqual(injected.length, 1);
+  assert.match(injected[0], /^\[agent:\?\] unrecognized intent `\[agent:frobnicate now\]`/);
+  assert.match(injected[0], /\+2 more/);
+  assert.match(injected[0], /escape it as \\\[agent:/);
+});
+
+test('unknown: never injects into a bash session', async () => {
+  const { m, injected, broadcasts } = mkBounce();
+  await m._handleIntent('sh', { type: 'unknown', text: '[agent:x]', more: 0 });
+  assert.strictEqual(injected.length, 0, 'nothing typed at a shell prompt');
+  assert.strictEqual(broadcasts.length, 1, 'still visible in the ipc log');
+});
+
+test('dm: a target that exists nowhere bounces to the sender instead of vanishing', async () => {
+  const { m, injected, broadcasts } = mkBounce();
+  await m._handleIntent('a', { type: 'dm', target: 'nosuch', body: 'hello?' });
+  assert.strictEqual(injected.length, 1);
+  assert.match(injected[0], /NOT delivered: no agent named "nosuch"/);
+  assert.match(injected[0], /\[agent:who\]/, 'points at the discovery intent');
+  assert.match(broadcasts[0].body, /^UNDELIVERED \(no such agent\)/);
+});
+
+test('dm: a bash-session target bounces (exists, but not DM-able)', async () => {
+  const { m, injected, broadcasts } = mkBounce();
+  await m._handleIntent('a', { type: 'dm', target: 'sh', body: 'ping' });
+  assert.strictEqual(injected.length, 1);
+  assert.match(injected[0], /"sh" is a bash session/);
+  assert.match(broadcasts[0].body, /^UNDELIVERED \(bash session\)/);
+});
+
+test('context: an unknown sub-command bounces to the agent, not just console.warn', async () => {
+  const { m, injected } = mkBounce();
+  await m._handleIntent('a', { type: 'context', sub: 'compress', body: '' });
+  assert.strictEqual(injected.length, 1);
+  assert.match(injected[0], /unknown or unsupported sub-command "compress"/);
+  assert.match(injected[0], /compact\|clear\|reload/);
 });
