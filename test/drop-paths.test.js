@@ -5,7 +5,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { shellQuotePath, dropText } = require('../renderer/lib/drop-paths');
+const { shellQuotePath, atMentionPath, dropText } = require('../renderer/lib/drop-paths');
 
 test('shellQuotePath: a plain path stays bare', () => {
   assert.strictEqual(shellQuotePath('/Users/me/project/file.js'), '/Users/me/project/file.js');
@@ -36,4 +36,29 @@ test('dropText: empty or all-falsy input produces the empty string (no lone spac
   assert.strictEqual(dropText([]), '');
   assert.strictEqual(dropText(null), '');
   assert.strictEqual(dropText([null, '']), '');
+});
+
+test('atMentionPath: plain path gets the @ prefix', () => {
+  assert.strictEqual(atMentionPath('/Users/me/project/file.js'), '@/Users/me/project/file.js');
+});
+
+test('atMentionPath: spaces are backslash-escaped (the CLI completion form)', () => {
+  assert.strictEqual(
+    atMentionPath('/Users/me/Library/Application Support/x.json'),
+    '@/Users/me/Library/Application\\ Support/x.json',
+  );
+});
+
+test('atMentionPath: mention-breaking bytes bail to null (caller falls back to shell quoting)', () => {
+  assert.strictEqual(atMentionPath(`/tmp/it's here.txt`), null);
+  assert.strictEqual(atMentionPath('/tmp/$(x).txt'), null);
+});
+
+test('dropText claude style: @-mentions, per-path shell fallback for unmentionables', () => {
+  assert.strictEqual(dropText(['/a/b.js', '/c d.txt'], 'claude'), '@/a/b.js @/c\\ d.txt ');
+  assert.strictEqual(dropText([`/it's.txt`], 'claude'), `'/it'\\''s.txt' `);
+});
+
+test('dropText default style: shell quoting unchanged', () => {
+  assert.strictEqual(dropText(['/a/b', '/c d']), `/a/b '/c d' `);
 });

@@ -655,9 +655,12 @@ terminalContainer.addEventListener('drop', (e) => {
     return;
   }
   const { webUtils } = window.require('electron');
+  // Claude sessions get @-mention form (CLI attaches the file itself — no agent
+  // Read round-trip); bash/codex get shell-quoted paths.
+  const style = sessionTypeOf(activeSession) === 'claude' ? 'claude' : 'shell';
   const text = dropText(files.map((f) => {
     try { return webUtils.getPathForFile(f); } catch { return null; }
-  }));
+  }), style);
   if (!text) return;
   window.api.writeToSession(activeSession, text);
   entry.terminal.focus();

@@ -19,12 +19,30 @@ function shellQuotePath(p) {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-// The full drop payload for a list of paths. Empty/absent input → '' (caller
-// skips the write rather than typing a lone space).
-function dropText(paths) {
-  const list = (paths || []).filter(Boolean);
-  if (!list.length) return '';
-  return list.map(shellQuotePath).join(' ') + ' ';
+// Claude sessions get @-mention form instead: the CLI reads/attaches the file
+// itself at prompt-submit — no agent Read round-trip. The @ parser terminates
+// on unescaped whitespace and does NOT understand shell quoting, so spaces are
+// backslash-escaped (the form the CLI's own path completion produces). Other
+// mention-breaking bytes can't be escaped — those paths fall back to plain
+// shell quoting (the agent reads; correct, just one round-trip slower).
+const AT_SAFE = /^[A-Za-z0-9_\/.+,~= -]+$/;
+
+function atMentionPath(p) {
+  const s = String(p);
+  if (!AT_SAFE.test(s)) return null;
+  return '@' + s.replace(/ /g, '\\ ');
 }
 
-module.exports = { shellQuotePath, dropText };
+// The full drop payload for a list of paths. Empty/absent input → '' (caller
+// skips the write rather than typing a lone space). style 'claude' prefers
+// @-mentions per path, falling back to shell quoting path-by-path.
+function dropText(paths, style) {
+  const list = (paths || []).filter(Boolean);
+  if (!list.length) return '';
+  const render = style === 'claude'
+    ? (p) => atMentionPath(p) ?? shellQuotePath(p)
+    : shellQuotePath;
+  return list.map(render).join(' ') + ' ';
+}
+
+module.exports = { shellQuotePath, atMentionPath, dropText };
