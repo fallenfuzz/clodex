@@ -100,6 +100,33 @@ claimed column).
    for current hot files instead of hardcoding names — the pot is what
    keeps it from decaying into a stale map. Delivered as a skill, NOT an
    MCP server (per-turn schema tax).
+
+   IMPLEMENTED (07-16): canonical skill source `docs/skills/grok.md`
+   (install to `~/.clodex/skills/grok.md`; unscoped library-first,
+   manually enabled while it proves itself, workspace-scope promotion
+   only after the kill-criterion clears). Claude-only — no Codex
+   skill-injection yet; every clodex-repo agent is Claude, so acceptable.
+   The pot read is `pot-cli.js` (+ `file-heat.js` + `fs-util.js`),
+   materialized into `~/.clodex/bin/` at every launch by `pot-bin.js`
+   (the app's own copy is sealed in app.asar) — overwrite-always kills
+   version drift; the require closure is pinned by
+   `test/pot-cli-closure.test.js` so a new require can't silently strand
+   the CLI. The CLI reuses the tier-1 `aggregateStates` (no ad-hoc
+   re-ranking — that drift IS the "stale map" failure).
+
+   KILL-CRITERION (pot-measured, ~5-day recheck, pre-registered):
+   at go-live, WRITE DOWN the baseline — a dated file
+   `~/.clodex/pot-baselines/grok-<date>.json` (or in-repo under
+   `docs/skills/` if preferred) holding the top-5 structured-lookup-
+   eligible hot rows VERBATIM (file, approxReadTokens, segments), so the
+   recheck compares recorded numbers, not memory. Re-check after ~5 days
+   on ≥1 agent running the skill: KEEP only if, on those baselined files,
+   carriage (approxReadTokens) drops ≥25% OR segments drop ≥1/3 versus
+   baseline — the walking-in-segments signal the skill claims to shrink.
+   Otherwise DELETE the skill (the heat was irreducible first-read
+   carriage, not skill-addressable). No correctness regression is
+   permitted regardless of the carriage win — a single wrong pointer that
+   causes a real incident fails the criterion outright.
 2. **read-once hook — DEMOTED, not built (07-15 correction).** Its
    pre-registered kill-criterion fired before implementation: honest
    redundant-re-read headroom on disciplined agents is ~2% per-window,

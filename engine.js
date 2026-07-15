@@ -39,6 +39,7 @@ const pty = require('node-pty');
 const { ensureDir, atomicWriteFileSync, readJsonSafe } = require('./fs-util');
 const { pathFor, runDirFor } = require('./clodex-paths');
 const { runLegacySweep, findOrphans } = require('./legacy-sweep');
+const { materializePotCli } = require('./pot-bin');
 
 function createEngine({ userDataPath, seams = {}, log }) {
   // Individual consts (not a destructure-with-defaults) so each seam name is
@@ -1395,7 +1396,9 @@ const sandbox = createSandbox({
   const { persistence, templates, workspaces, promptLibrary,
     agentDefaults, agentLibrary, skillLibrary, execLibrary, reminders, notifications, uiSettings, renameWorkspaceScope } = stores;
 
-
+  // Materialize the boiling-pot CLI closure into ~/.clodex/bin/ (grok skill reads
+  // it from there; the app's own copy is sealed in app.asar). Overwrite-always.
+  try { materializePotCli({ root: REGISTRY_DIR, srcDir: __dirname, log }); } catch {}
 
   proxyPoller.start();
   manager.startPendingPoll();
