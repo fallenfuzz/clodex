@@ -429,6 +429,23 @@ html, body {
 .session-ctx[data-level="mid"]  { color: var(--warn);  background: color-mix(in srgb, var(--warn) 14%, transparent); }
 .session-ctx[data-level="high"] { color: var(--error); background: color-mix(in srgb, var(--error) 16%, transparent); }
 
+/* Thinking-duration pill: elapsed minutes once a turn runs past 2m (a normal
+   turn stays badge-free — the amber dot already covers "busy"); error tint
+   from 10m, where "is it wedged?" becomes a fair question. */
+.session-think {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 9px;
+  line-height: 14px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.session-think:empty { display: none; }
+.session-think[data-state="on"]   { color: var(--warn);  background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.session-think[data-state="long"] { color: var(--error); background: color-mix(in srgb, var(--error) 16%, transparent); }
+
 /* Per-tab cache-warmth pill: minutes remaining, amber; red when expiry is
    imminent (<5m); "cold"/"?" grey. */
 .session-warm {

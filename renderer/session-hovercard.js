@@ -95,6 +95,14 @@ function initSessionHovercard({ sessionList, proxyState, ctxPct, ctxTokens, prox
     const st = proxyState.get(name);
     const p = st && st.payload;
     const rows = [];
+    // Live thinking duration off the row's stamp (set on the ENTRY into
+    // thinking) — no threshold here, unlike the badge: once you're hovering
+    // you asked, so even "thinking · 4s" is the answer.
+    if (item.dataset.activity === 'thinking' && item.dataset.thinkingSince) {
+      const s = Math.max(0, Math.round((Date.now() - Number(item.dataset.thinkingSince)) / 1000));
+      const txt = s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+      rows.push(statRow('thinking', esc(txt)));
+    }
     const warm = warmthRow(name);
     if (warm) rows.push(statRow('cache', esc(warm.text), ` data-state="${warm.state}"`));
     const ctx = contextText(name, p && p.linked ? p : null);

@@ -336,6 +336,7 @@ function addSessionToSidebar(name, type, cwd, label, backend = null) {
         ${cwdLabel ? `<span class="session-cwd">${cwdLabel}</span>` : ''}
         <span class="session-badges">
           ${type === 'claude' ? '<span class="session-pending" title="Parked messages waiting — click to deliver now"></span>' : ''}
+          <span class="session-think"></span>
           <span class="session-warm"></span>
           <span class="session-ctx"></span>
         </span>
@@ -1263,7 +1264,18 @@ window.api.onSessionExit((name) => {
 
 window.api.onSessionActivity((name, state) => {
   const el = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
-  if (el) el.dataset.activity = state;
+  if (!el) return;
+  // Thinking-duration stamp: the amber dot alone makes a 3s turn and a wedged
+  // agent look identical. Stamp the ENTRY into thinking (not every repeat
+  // event) so the badge tick + hover card can show elapsed time; any other
+  // state clears both.
+  if (state === 'thinking') {
+    if (el.dataset.activity !== 'thinking') el.dataset.thinkingSince = String(Date.now());
+  } else if (el.dataset.thinkingSince) {
+    delete el.dataset.thinkingSince;
+    applyThinkBadge(el);
+  }
+  el.dataset.activity = state;
 });
 
 // Needs-attention badge: the session's CLI is blocked on the human (permission
@@ -1781,6 +1793,30 @@ window.api.onSessionProxy((name, payload) => {
   if (name === activeSession) renderProxyBar();
 });
 
+// Thinking-duration badge — the wedge tell Bogdan asked for mid-debug: the
+// amber dot pulses identically for a 3s turn and a permanently-stuck agent.
+// Quiet for the first 2 minutes (normal turns stay badge-free), then shows
+// elapsed minutes; at 10 minutes the pill shifts to the error tint — long
+// enough that "is it wedged?" is a fair question, without claiming it IS
+// (deep Fable turns can run that long legitimately). Driven off the row's
+// thinkingSince stamp (set on the ENTRY into thinking in onSessionActivity),
+// ticked by the shared 1s interval below.
+const THINK_BADGE_MS = 2 * 60 * 1000;
+const THINK_LONG_MS = 10 * 60 * 1000;
+function applyThinkBadge(el) {
+  const badge = el.querySelector('.session-think');
+  if (!badge) return;
+  const since = Number(el.dataset.thinkingSince || 0);
+  const elapsed = since ? Date.now() - since : 0;
+  if (el.dataset.activity !== 'thinking' || elapsed < THINK_BADGE_MS) {
+    badge.textContent = '';
+    badge.dataset.state = '';
+    return;
+  }
+  badge.textContent = `${Math.floor(elapsed / 60000)}m`;
+  badge.dataset.state = elapsed >= THINK_LONG_MS ? 'long' : 'on';
+}
+
 // --- Subagent child rows -----------------------------------------------------
 // Task/background subagents a session spawns share the parent's session_id on
 // the wire, so the parent's /_status record carries them in `payload.subagents`
@@ -1964,6 +2000,7 @@ function checkWarmthCooldown(name) {
 // aren't rebuilt out from under the cursor.
 setInterval(() => {
   for (const name of proxyState.keys()) { applyWarmBadge(name); checkWarmthCooldown(name); }
+  for (const el of sessionList.querySelectorAll('.session-item[data-thinking-since]')) applyThinkBadge(el);
   tickProxyBar();
 }, 1000);
 
@@ -3334,7 +3371,13 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
     // event may be a turn away.
     const item = sessionList.querySelector(`[data-name="${CSS.escape(entry.name)}"]`);
     if (item) {
-      if (entry.activity) item.dataset.activity = entry.activity;
+      // A reattached thinking dot gets a fresh stamp — the true start was lost
+      // with the detached window's events, so the badge undercounts rather
+      // than guesses.
+      if (entry.activity) {
+        item.dataset.activity = entry.activity;
+        if (entry.activity === 'thinking') item.dataset.thinkingSince = String(Date.now());
+      }
       if (entry.attention) {
         item.dataset.attention = entry.attention.kind;
         item.dataset.attentionMsg = entry.attention.message || '';
