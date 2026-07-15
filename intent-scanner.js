@@ -144,6 +144,45 @@ function parseIntent(rawLine) {
   return null;
 }
 
+// Fenced code blocks are QUOTES. A markdown fence only RENDERS as a quoted
+// block — in the raw turn text every line inside it is still its own line at
+// column 1, so before this, an intent-shaped example inside a fence FIRED
+// (observed live: a documentation block sent two real dms). fencedLines maps
+// each line of a turn to whether it sits in a fence (delimiter lines
+// inclusive); the caller treats fenced lines as literal text — no intent
+// parse, no body boundary, no near-miss bounce. Only LINE-anchored fences
+// count: inline backticks are already safe (all intent regexes are
+// ^-anchored, mid-line never fires), so there is no character-level backtick
+// counting. CommonMark rules, pragmatically: an opener is 3+ backticks or
+// tildes after optional indentation (info string allowed); the closer must
+// use the opener's char, run at least as long, and carry nothing but
+// whitespace — anything else is fence CONTENT (``` inside a ~~~ block stays
+// literal). An unclosed fence runs to end of turn: correct markdown
+// semantics, and the failure mode (a real intent below swallowed as quoted
+// text) is visible in the rendered output, unlike the misfire it replaces.
+function fencedLines(lines) {
+  const fenced = new Array(lines.length).fill(false);
+  let open = null; // { ch, len } of the current opener
+  for (let k = 0; k < lines.length; k++) {
+    const m = lines[k].match(/^\s*(`{3,}|~{3,})(.*)$/);
+    if (m) {
+      const ch = m[1][0];
+      if (!open) {
+        open = { ch, len: m[1].length };
+        fenced[k] = true;
+        continue;
+      }
+      if (ch === open.ch && m[1].length >= open.len && !m[2].trim()) {
+        open = null;
+        fenced[k] = true;
+        continue;
+      }
+    }
+    if (open) fenced[k] = true;
+  }
+  return fenced;
+}
+
 // Near-miss detector for the silent-drop bounce: a line that LOOKS like an
 // intent emission (cleans to `[agent:` at its start) yet parses to nothing —
 // a typo'd verb, a malformed arg list, a made-up example. parseIntent must
@@ -174,4 +213,4 @@ function shadowIntentKey(agent, intent) {
   return `${agent}|${intent.type}|${head}|${body}`;
 }
 
-module.exports = { ANSI_RE, PREFIX_CHARS, cleanLine, parseIntent, looksLikeIntent, shadowIntentKey };
+module.exports = { ANSI_RE, PREFIX_CHARS, cleanLine, parseIntent, fencedLines, looksLikeIntent, shadowIntentKey };

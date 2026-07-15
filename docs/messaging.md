@@ -79,6 +79,15 @@ compact there can still be dropped by the CLI (documented degradation).
   a body runs from the intent line to the next column-1 real intent or end
   of turn (applies to dm, memory remember, remind, notify-user, context
   compact/reload).
+- **Fenced code blocks are quotes** (`fencedLines`, pure leaf in the
+  scanner): a line inside a ```/~~~ fence is literal text at every level of
+  `_extractIntents` — no intent parse, no body boundary, no near-miss
+  bounce. Line-anchored fences only (inline backticks were already safe —
+  mid-line never fires); closer must match the opener's char and length,
+  unclosed fences run to end of turn. The PTY scan path (`_scanPtyOutput`,
+  bash panes) is deliberately fence-BLIND: fence state over an unbounded
+  terminal stream would let one `cat`ed markdown file disable intent
+  scanning for the pane's life.
 - `[agent:end]` (bare-only) is the explicit body TERMINATOR: it closes an
   open capture via the generic any-intent boundary and is itself discarded —
   `_extractIntents` never emits it, `_handleIntent` early-returns defensively.

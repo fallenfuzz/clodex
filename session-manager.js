@@ -123,6 +123,7 @@ function createSessionManager(deps) {
     canFireCompact,
     lastTranscriptWrite,
     log,
+    fencedLines,
     looksLikeIntent,
     memoryStore,
     mergeClaudeSystemPrompt,
@@ -1347,6 +1348,12 @@ function createSessionManager(deps) {
       const lines = session.lineBuffer.split(/\r?\n/);
       session.lineBuffer = lines.pop() || '';
 
+      // Deliberately NOT fence-aware (unlike _extractIntents): this path is
+      // line-at-a-time over an unbounded terminal stream, so fence state
+      // would have to persist on the session — and one `cat`ed markdown file
+      // with an unclosed fence would then silently disable intent scanning
+      // for the rest of the pane's life. Turn text has a natural end; a PTY
+      // doesn't.
       for (const line of lines) {
         const intent = parseIntent(line);
         // `end` is the body terminator — meaningless on the line-at-a-time
@@ -1660,6 +1667,13 @@ function createSessionManager(deps) {
         try { JSON.parse(t); return true; } catch { return false; }
       };
       let i = 0;
+      // Fence map for the whole turn (intent-scanner.fencedLines): a line
+      // inside a ```/~~~ code block is a QUOTE — literal text at every level
+      // of this scan (no intent parse, no body boundary, no near-miss
+      // bounce). Before this, an intent-shaped example inside a fence FIRED
+      // (a fence only renders as a block; raw turn text keeps each line at
+      // column 1 — observed live, a documentation block sent two real dms).
+      const fenced = fencedLines(lines);
       // One synthesized `unknown` per batch, with a counter for the rest: a
       // near-miss line ([agent:-shaped but parses to nothing) at THIS level was
       // previously dropped in silence — a typo'd verb cost the agent a whole
@@ -1671,7 +1685,9 @@ function createSessionManager(deps) {
       let unknown = null;
       while (i < lines.length) {
         const line = lines[i].trim();
+        const inFence = fenced[i];
         i++;
+        if (inFence) continue;
         const intent = parseIntent(line);
         // `end` is a pure body terminator: as `next` inside a capture loop it
         // ends the body (the generic boundary check below covers it — any
@@ -1707,7 +1723,8 @@ function createSessionManager(deps) {
           let j = i;
           let complete = jsonComplete(buf); // may already be complete on the intent line
           while (!complete && j < lines.length) {
-            const next = parseIntent(lines[j]);
+            // fenced lines are quoted text — never a boundary
+            const next = fenced[j] ? null : parseIntent(lines[j]);
             if (next && next.type !== 'escape') break; // a col-1 intent ends the body
             const grown = buf + '\n' + lines[j];
             if (Buffer.byteLength(grown, 'utf8') > execBodyCap) break; // cap the region
@@ -1746,7 +1763,9 @@ function createSessionManager(deps) {
           || (intent.type === 'context' && (intent.sub === 'compact' || intent.sub === 'reload'))) {
           const body = [];
           while (i < lines.length) {
-            const next = parseIntent(lines[i]);
+            // fenced lines are quoted text — part of the body, never a
+            // boundary (an intent-shaped example in a code block stays text)
+            const next = fenced[i] ? null : parseIntent(lines[i]);
             if (next && next.type !== 'escape') break;
             body.push(lines[i]);
             i++;
@@ -1808,7 +1827,7 @@ function createSessionManager(deps) {
           this._injectText(session,
             `[agent:?] unrecognized intent \`${intent.text}\`${more} — nothing was done. `
             + 'Valid intents: dm, resend, who, name, context, memory, spawn, file, exec, remind, notify-user, end. '
-            + 'To quote an intent literally, escape it as \\[agent:…].', { parkable: true });
+            + 'To quote an intent literally, put it in a ``` code fence or escape it as \\[agent:…].', { parkable: true });
         }
         this._broadcast('ipc-message', {
           type: 'intent', from: senderName, to: senderName,

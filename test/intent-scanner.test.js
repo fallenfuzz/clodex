@@ -5,7 +5,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const {
-  cleanLine, parseIntent, looksLikeIntent, shadowIntentKey, ANSI_RE, PREFIX_CHARS,
+  cleanLine, parseIntent, fencedLines, looksLikeIntent, shadowIntentKey, ANSI_RE, PREFIX_CHARS,
 } = require('../intent-scanner');
 
 test('cleanLine: strips ANSI escapes', () => {
@@ -251,4 +251,37 @@ test('shadowIntentKey: unknown intents key on their text, so distinct near-misse
   const a = shadowIntentKey('x', { type: 'unknown', text: '[agent:aaa]' });
   const b = shadowIntentKey('x', { type: 'unknown', text: '[agent:bbb]' });
   assert.notStrictEqual(a, b);
+});
+
+// --- fencedLines: code fences are quotes ---
+
+test('fencedLines: marks opener, interior, and closer; text outside stays unfenced', () => {
+  const f = fencedLines(['prose', '```', '[agent:who]', '```', '[agent:who]']);
+  assert.deepStrictEqual(f, [false, true, true, true, false]);
+});
+
+test('fencedLines: info string on the opener; indented fences count', () => {
+  assert.deepStrictEqual(fencedLines(['```js', 'code', '```']), [true, true, true]);
+  assert.deepStrictEqual(fencedLines(['  ```', 'code', '  ```']), [true, true, true]);
+});
+
+test('fencedLines: closer must match char and length — mismatches are content', () => {
+  // ``` inside a ~~~ block is content, not a closer
+  assert.deepStrictEqual(fencedLines(['~~~', '```', 'x', '~~~', 'out']),
+    [true, true, true, true, false]);
+  // a shorter run does not close a longer opener
+  assert.deepStrictEqual(fencedLines(['````', '```', 'x', '````', 'out']),
+    [true, true, true, true, false]);
+  // a longer run does close
+  assert.deepStrictEqual(fencedLines(['```', 'x', '`````']), [true, true, true]);
+  // trailing text disqualifies a closer (```js mid-block is content)
+  assert.deepStrictEqual(fencedLines(['```', '```js', 'x', '```']), [true, true, true, true]);
+});
+
+test('fencedLines: unclosed fence runs to end of turn', () => {
+  assert.deepStrictEqual(fencedLines(['```', 'a', 'b']), [true, true, true]);
+});
+
+test('fencedLines: inline backticks are not fences', () => {
+  assert.deepStrictEqual(fencedLines(['see `[agent:who]` inline', 'a ``` b']), [false, false]);
 });

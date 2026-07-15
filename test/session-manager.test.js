@@ -23,6 +23,7 @@ function mk(overrides = {}) {
     getPersistence: () => ({ list: () => [], get: () => null }),
     notifyOS: () => {},
     intentEnabled, // real pure leaf — the fire-time gate needs it on every _handleIntent
+    fencedLines: require('../intent-scanner').fencedLines, // real pure leaf — _extractIntents maps fences unconditionally
     fs: require('node:fs'), // real — create()'s pre-spawn cwd validation stats it
     ...overrides,
   };
@@ -1339,6 +1340,53 @@ test('[agent:end]: escaped \\[agent:end] stays literal body text, not a boundary
   const m = mkExtract();
   const out = m._extractIntents('[agent:dm clodex] quoting the terminator:\n\\[agent:end]\nstill the body');
   assert.strictEqual(out[0].body, 'quoting the terminator:\n\\[agent:end]\nstill the body');
+});
+
+// --- fenced code blocks are quotes (_extractIntents + fencedLines) ---
+// The misfire this closes fired live: an operator-facing reply documented the
+// [agent:end] terminator with example dm lines inside a ``` fence — a fence
+// only RENDERS as a block, the raw turn text kept each example at column 1,
+// and both examples went out as real dms to nonexistent agents.
+
+test('fence: an intent-shaped line inside a code fence does not fire and does not bounce', () => {
+  const m = mkExtract();
+  const out = m._extractIntents([
+    'This is how you would send a dm:',
+    '```',
+    '[agent:dm alice] the message body',
+    '[agent:frobnicate now]',
+    '```',
+    'And that concludes the documentation.',
+  ].join('\n'));
+  assert.deepStrictEqual(out, [], 'no intent fired, no unknown synthesized');
+});
+
+test('fence: a real intent after a closed fence still fires', () => {
+  const m = mkExtract();
+  const out = m._extractIntents('```\n[agent:dm alice] example\n```\n[agent:dm bob] real message');
+  assert.deepStrictEqual(out.map((x) => x.type), ['dm']);
+  assert.strictEqual(out[0].target, 'bob');
+});
+
+test('fence: inside a dm body, a fenced example is body text, not a boundary', () => {
+  const m = mkExtract();
+  const out = m._extractIntents([
+    '[agent:dm clodex] here is the incantation:',
+    '```',
+    '[agent:who]',
+    '```',
+    'end of message',
+  ].join('\n'));
+  assert.deepStrictEqual(out.map((x) => x.type), ['dm']);
+  assert.strictEqual(out[0].body,
+    'here is the incantation:\n```\n[agent:who]\n```\nend of message',
+    'fence delimiters and quoted intent all delivered as body text');
+});
+
+test('fence: unclosed fence quotes the rest of the turn (markdown semantics)', () => {
+  const m = mkExtract();
+  const out = m._extractIntents('```\n[agent:dm clodex] never fires');
+  assert.deepStrictEqual(out, []);
 });
 
 test('remind: multi-line reminder text is captured greedily (allow-set), stops at next intent', () => {
