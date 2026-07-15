@@ -76,4 +76,39 @@ function reqLine(p) {
   return `req ${total}`;
 }
 
-module.exports = { turnStat, turnSeg, turnLine, reqSeg, reqLine };
+// Cost, same live-first policy (operator ruling 07-15, reversing the earlier
+// cumulative-first call: THREE surfaces were showing three different cost
+// scopes — raw wire-session spend, the W2 lifetime overlay's additive-across-
+// restarts figure, wirescope's per-registration figure — under near-identical
+// labels). The number that answers "what is this costing me NOW" is
+// since-compact spend; the cumulative figure (whatever scope the payload's
+// producer gave it — overlay lifetime or wire-session) rides the tooltip,
+// labeled neutrally as "total" precisely because its scope varies.
+// { text, tip } — text keeps the ~$ estimate marker.
+function fmtCost(v) { return v >= 1 ? v.toFixed(2) : v.toFixed(4); }
+function costSeg(p) {
+  const total = p && p.cost && typeof p.cost.usd === 'number' ? p.cost.usd : null;
+  const sc = p && p.sinceCompact;
+  const now = sc && typeof sc.estUsd === 'number' ? sc.estUsd : null;
+  if (now != null) {
+    const since = sc.compacted ? 'since the last compact' : 'since session start (never compacted)';
+    const tail = total != null && sc.compacted ? ` — $${fmtCost(total)} total` : '';
+    return { text: `~$${fmtCost(now)}`, tip: `Estimated spend ${since} (whole tree incl. subagents)${tail}` };
+  }
+  if (total == null) return null;
+  return { text: `~$${fmtCost(total)}`, tip: 'Estimated total spend (spans compacts)' };
+}
+
+// Hovercard cost line, mirroring turnLine/reqLine: both numbers inline.
+function costLine(p) {
+  const total = p && p.cost && typeof p.cost.usd === 'number' ? p.cost.usd : null;
+  const sc = p && p.sinceCompact;
+  const now = sc && typeof sc.estUsd === 'number' ? sc.estUsd : null;
+  if (now != null && sc.compacted) {
+    return total != null ? `~$${fmtCost(now)} ($${fmtCost(total)} total)` : `~$${fmtCost(now)}`;
+  }
+  if (total == null) return now != null ? `~$${fmtCost(now)}` : null;
+  return `~$${fmtCost(total)}`;
+}
+
+module.exports = { turnStat, turnSeg, turnLine, reqSeg, reqLine, costSeg, costLine };

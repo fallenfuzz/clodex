@@ -5,7 +5,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { turnStat, turnSeg, turnLine, reqSeg, reqLine } = require('../renderer/lib/turn-stat');
+const { turnStat, turnSeg, turnLine, reqSeg, reqLine, costSeg, costLine } = require('../renderer/lib/turn-stat');
 
 const full = { turns: 143, context: { turns: 12 } };
 
@@ -79,4 +79,49 @@ test('reqLine: both inline post-compact, plain otherwise', () => {
   assert.strictEqual(reqLine({ cost: { requests: 61 }, sinceCompact: { requests: 61, compacted: false } }), 'req 61');
   assert.strictEqual(reqLine({ cost: { requests: 1008 } }), 'req 1008');
   assert.strictEqual(reqLine({}), null);
+});
+
+// ── costSeg / costLine (live-first cost, operator ruling 07-15) ──────────────
+// The three-scopes incident pinned here: p.cost.usd's scope varies by producer
+// (raw wire-session vs the W2 lifetime overlay's additive-across-restarts
+// figure), so the tooltip calls it just "total" — only since-compact is stable.
+
+const costPayload = { cost: { usd: 225.35 }, sinceCompact: { estUsd: 15.07, compacted: true } };
+
+test('costSeg: since-compact spend leads, cumulative in tooltip as plain total', () => {
+  const seg = costSeg(costPayload);
+  assert.strictEqual(seg.text, '~$15.07');
+  assert.match(seg.tip, /since the last compact/);
+  assert.match(seg.tip, /\$225\.35 total/);
+});
+
+test('costSeg: never-compacted says since-start honestly, no redundant total', () => {
+  const seg = costSeg({ cost: { usd: 15.07 }, sinceCompact: { estUsd: 15.07, compacted: false } });
+  assert.strictEqual(seg.text, '~$15.07');
+  assert.match(seg.tip, /never compacted/);
+  assert.ok(!seg.tip.includes('total'));
+});
+
+test('costSeg: sub-dollar keeps 4 decimals', () => {
+  const seg = costSeg({ cost: { usd: 0.4321 }, sinceCompact: { estUsd: 0.1234, compacted: true } });
+  assert.strictEqual(seg.text, '~$0.1234');
+});
+
+test('costSeg: older proxy (no sinceCompact) degrades to cumulative with spans-compacts tip', () => {
+  const seg = costSeg({ cost: { usd: 225.35 }, sinceCompact: null });
+  assert.strictEqual(seg.text, '~$225.35');
+  assert.match(seg.tip, /spans compacts/);
+});
+
+test('costSeg: no cost at all → null (renderer falls through to CLI side-channel)', () => {
+  assert.strictEqual(costSeg({}), null);
+  assert.strictEqual(costSeg(null), null);
+  assert.strictEqual(costSeg({ cost: { usd: null } }), null);
+});
+
+test('costLine: both inline post-compact, plain otherwise', () => {
+  assert.strictEqual(costLine(costPayload), '~$15.07 ($225.35 total)');
+  assert.strictEqual(costLine({ cost: { usd: 15.07 }, sinceCompact: { estUsd: 15.07, compacted: false } }), '~$15.07');
+  assert.strictEqual(costLine({ cost: { usd: 225.35 } }), '~$225.35');
+  assert.strictEqual(costLine({}), null);
 });

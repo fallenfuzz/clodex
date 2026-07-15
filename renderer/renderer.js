@@ -12,7 +12,7 @@ const { attentionNotice, mentionNotice, badgeTitle, createWebNotifier } = requir
 const { detectNotice: sandboxDetectNotice, statusNotice: sandboxStatusNotice, openUrl: sandboxOpenUrl } = require('./lib/sandbox-view');
 const { SANDBOX_PLACEMENT_CWD, hasSandboxPeer, nextCwd: placementNextCwd, richFieldsGreyed } = require('./lib/placement');
 const { dropText } = require('./lib/drop-paths');
-const { turnSeg, reqSeg } = require('./lib/turn-stat');
+const { turnSeg, reqSeg, costSeg } = require('./lib/turn-stat');
 const { renderAppendChecklist, collectAppendChecklist, renderAgentChecklist, collectAgentChecklist, renderExecChecklist, collectExecChecklist, renderIntentChecklist, collectIntentChecklist, renderBuiltinChecklist, collectBuiltinChecklist, renderInjectChecklist, collectInjectChecklist, renderToolChecklist, collectToolChecklist, renderSkillChecklist, collectSkillChecklist, setChecklistAll, wireBulkToggles, setPromptLibCache, setAgentLibCache, setSkillLibCache, setExecLibCache, setClaudeToolsCache, setDefaultToolDenyCache, getPromptLibCache, getSkillLibCache, getDefaultToolDenyCache } = require('./lib/checklists');
 const { autoEnabledFor, reconcilePartialSelection } = require('../scope-util');
 const { parseSkillFrontmatter } = require('../skills-util');
@@ -1724,10 +1724,10 @@ function renderProxyBar() {
     }
     segs.push(`<span class="px-seg px-warm">${txt}</span>`);
   }
-  if (p.cost && p.cost.usd != null) {
-    // ~ signals "estimate"; drop the cryptic "px est." label. Trim decimals once
-    // the number is large enough that 4 places are just noise.
-    const costTxt = p.cost.usd >= 1 ? p.cost.usd.toFixed(2) : p.cost.usd.toFixed(4);
+  const cSeg = costSeg(p);
+  if (cSeg) {
+    // Live-first cost via the shared turn-stat leaf: since-compact spend leads,
+    // the cumulative figure rides the tooltip (same policy as turn/req segs).
     // When wirescope advertises the cost-over-time timeline, the cost number
     // opens a native breakdown popover (read-carriage vs output, cumulative),
     // which itself links out to the full /_timeline dashboard. Stays plain text
@@ -1735,9 +1735,9 @@ function renderProxyBar() {
     const timeline = !!(p.capabilities && p.capabilities.context_timeline && p.base && p.sessionId)
       || peerQueries.includes('cost');
     if (timeline) {
-      segs.push(`<span class="px-seg px-cost px-ctx-btn" data-act="cost" title="Estimated spend since session start — click for the over-time breakdown">~$${costTxt}</span>`);
+      segs.push(`<span class="px-seg px-cost px-ctx-btn" data-act="cost" title="${esc(cSeg.tip)} — click for the over-time breakdown">${esc(cSeg.text)}</span>`);
     } else {
-      segs.push(`<span class="px-seg px-cost" title="Estimated spend since session start (wirescope)">~$${costTxt}</span>`);
+      segs.push(`<span class="px-seg px-cost" title="${esc(cSeg.tip)} (wirescope)">${esc(cSeg.text)}</span>`);
     }
   } else if (sc && typeof sc.cost === 'number' && sc.cost > 0) {
     // Wire-off fallback (Bedrock/Vertex or no proxy): the wirescope cost
