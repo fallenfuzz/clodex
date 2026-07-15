@@ -26,6 +26,9 @@
       <span id="diag-text">Sessions can't start</span>
     </div>
     <div id="sidebar-footer">
+      <button id="pot-open" title="Boiling pot — where token carriage concentrates across agents" type="button">
+        <span class="pot-label">Boiling Pot</span>
+      </button>
       <button id="inbox-open" title="Operator inbox — notes agents raised for you" type="button">
         <span class="inbox-label">Inbox</span>
         <span class="inbox-count zero" id="inbox-count">0</span>
@@ -181,6 +184,23 @@
     <div id="inbox-list"></div>
     <div id="inbox-empty" class="hint">
       No notes yet. Agents raise one with <code>[agent:notify-user]</code> when they're blocked on a decision only you can make — it lands here and fires a notification.
+    </div>
+  </div>
+
+  <!-- Boiling pot drawer. A global, cross-agent ranking of where token CARRIAGE
+       concentrates (docs/boiling-pot-plan.md). Pulled fresh on open, not live. -->
+  <div id="pot-drawer" class="hidden">
+    <div id="pot-header">
+      <span class="prompts-title">Boiling Pot</span>
+      <button id="pot-refresh" title="Refresh" type="button">Refresh</button>
+      <button id="pot-close" title="Close" type="button">×</button>
+    </div>
+    <div id="pot-legend" class="hint">
+      Files ranked by tokens <strong>carried</strong> into context across every agent — carriage, not read count. A file walked slice-by-slice piles up <strong>segments</strong> (distinct ranges); that walking is what a caching/trim treatment targets. <strong>~tokens</strong> is a ranking approximation (bytes/4, line-slice estimated), <em>not</em> a billing number.
+    </div>
+    <div id="pot-list"></div>
+    <div id="pot-empty" class="hint">
+      Nothing in the pot yet. As agents read and edit files, this ranks where token carriage concentrates — the files worth caching, trimming, or reading in fewer, wider passes.
     </div>
   </div>
 

@@ -2212,7 +2212,7 @@ html, body {
 
 /* Agents library drawer (mirrors the prompts drawer) */
 
-#agents-drawer, #skills-drawer, #templates-drawer, #exec-drawer, #inbox-drawer {
+#agents-drawer, #skills-drawer, #templates-drawer, #exec-drawer, #inbox-drawer, #pot-drawer {
   position: fixed;
   top: 0;
   left: var(--sidebar-width);
@@ -2226,9 +2226,12 @@ html, body {
   box-shadow: 4px 0 20px rgba(0, 0, 0, 0.4);
 }
 
-#agents-drawer.hidden, #skills-drawer.hidden, #templates-drawer.hidden, #exec-drawer.hidden, #inbox-drawer.hidden { display: none; }
+/* The pot is a data table, not a list — wider so its columns breathe. */
+#pot-drawer { width: 440px; }
 
-#agents-header, #skills-header, #templates-header, #exec-header, #inbox-header {
+#agents-drawer.hidden, #skills-drawer.hidden, #templates-drawer.hidden, #exec-drawer.hidden, #inbox-drawer.hidden, #pot-drawer.hidden { display: none; }
+
+#agents-header, #skills-header, #templates-header, #exec-header, #inbox-header, #pot-header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2249,7 +2252,7 @@ html, body {
 
 #agents-new:hover, #skills-new:hover, #templates-new:hover, #exec-new:hover { opacity: 0.85; }
 
-#agents-close, #skills-close, #templates-close, #exec-close, #inbox-close {
+#agents-close, #skills-close, #templates-close, #exec-close, #inbox-close, #pot-close {
   background: transparent;
   border: none;
   color: var(--text-dim);
@@ -2261,18 +2264,89 @@ html, body {
   padding: 0;
 }
 
-#agents-close:hover, #skills-close:hover, #templates-close:hover, #exec-close:hover, #inbox-close:hover {
+#agents-close:hover, #skills-close:hover, #templates-close:hover, #exec-close:hover, #inbox-close:hover, #pot-close:hover {
   background: var(--sidebar-hover);
   color: var(--text);
 }
 
-#agents-list, #skills-list, #templates-list, #exec-list, #inbox-list {
+#agents-list, #skills-list, #templates-list, #exec-list, #inbox-list, #pot-list {
   flex: 1;
   overflow-y: auto;
   padding: 6px 8px;
 }
 
-#agents-empty, #skills-empty, #templates-empty, #exec-empty, #inbox-empty {
+/* Boiling pot table. A ranking read, not a live feed — dense monospace numbers,
+   one row per file, header row pinned by document order (not sticky). */
+#pot-refresh {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 11px;
+  cursor: pointer;
+}
+#pot-refresh:hover { background: var(--sidebar-hover); color: var(--text); }
+
+#pot-legend {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  line-height: 1.5;
+}
+
+.pot-row {
+  display: grid;
+  grid-template-columns: 1fr 3.2em 3.2em 4em 4.2em;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+}
+/* A 6th column (tier-2 redundancy) rides only when the wirescope join is live;
+   the list gets .has-redundant so every row grows the extra track in lockstep. */
+#pot-list.has-redundant .pot-row { grid-template-columns: 1fr 3em 3em 3.8em 4em 4em; }
+
+.pot-head {
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+}
+.pot-row:not(.pot-head):hover { background: var(--sidebar-hover); }
+
+.pot-file { overflow: hidden; }
+.pot-base { display: block; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pot-dir { display: block; color: var(--text-dim); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.pot-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+.pot-head .pot-num { text-align: right; }
+/* Carriage is the ranked quantity — give it the emphasis. */
+.pot-carriage { color: var(--text); font-weight: 600; }
+
+#pot-open {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+#pot-open:hover { background: var(--sidebar-hover); color: var(--text); }
+
+#agents-empty, #skills-empty, #templates-empty, #exec-empty, #inbox-empty, #pot-empty {
   padding: 20px;
   text-align: center;
   color: var(--text-dim);

@@ -23,6 +23,7 @@ const skillAutoSet = (skillLib, session) => new Set(autoEnabledFor(
   (skillLib || []).map((s) => ({ name: s.name, meta: parseSkillFrontmatter(s.content || '').meta })), session));
 const { createIpcLog } = require('./ipc-log');
 const { createInboxDrawer } = require('./inbox-drawer');
+const { createPotDrawer } = require('./pot-drawer');
 const { createTermSearch } = require('./term-search');
 const { initBanners } = require('./banners');
 const { initThemes } = require('./themes');
@@ -2319,6 +2320,11 @@ const { appendIpcEntry } = createIpcLog({ sessions, getActiveSession: () => acti
 // — driven by the `notify` ipc broadcast and its own window.api queries, so it
 // takes no core state.
 createInboxDrawer();
+
+// Boiling-pot drawer (pot-drawer.js). Self-contained — a global, cross-agent
+// file-heat ranking pulled fresh on open via window.api.potSnapshot; no core
+// state. Sidebar-footer button next to Inbox.
+createPotDrawer();
 
 // ---------------------------------------------------------------------------
 // Peered Clodexes — self-contained subsystem (peers-ui.js). Owns the peer bar,
