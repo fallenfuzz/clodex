@@ -499,7 +499,10 @@
         <span class="hint-text">Traffic goes via &lt;proxy&gt;/agent/&lt;name&gt;/… — Claude: ANTHROPIC_BASE_URL · Codex: openai_base_url.</span>
       </label>
       <label id="resume-row">Resume from session ID
-        <input type="text" id="input-resume" placeholder="(new session)" spellcheck="false">
+        <div class="dir-picker">
+          <input type="text" id="input-resume" placeholder="(new session)" spellcheck="false">
+          <button id="btn-find-session" class="secondary" type="button" data-tip="Find an existing session on this machine to resume">Find…</button>
+        </div>
         <label style="display: flex; align-items: center; gap: 6px; margin-top: 4px; font-weight: normal;">
           <input type="checkbox" id="input-fork" style="margin: 0;">
           <span class="hint-text" style="margin: 0;">Fork instead of resume (branch into new session, original untouched).</span>
@@ -539,6 +542,21 @@
         <div style="flex: 1;"></div>
         <button id="peer-session-cancel" class="secondary">Cancel</button>
         <button id="peer-session-create">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Discover Sessions dialog — adopt claude/codex sessions started outside
+       clodex (global scan of ~/.claude/projects + live foreign processes). -->
+  <div id="discovery-overlay" class="hidden">
+    <div id="discovery-dialog">
+      <h3>Discover Sessions</h3>
+      <p class="hint-text">Claude/Codex conversations on this machine that Clodex isn't already managing — including ones started in a plain terminal. Adopt one to fill the New Session form with its type, directory, and session ID, so you can pick tools/prompts/proxy before resuming it. Adopting doesn't attach to a running process; it spawns a fresh Clodex-managed instance that resumes the same conversation.</p>
+      <div id="discovery-list" class="discovery-list"><div class="discovery-empty">Scanning…</div></div>
+      <div class="dialog-actions">
+        <button id="discovery-refresh" class="secondary" type="button">Rescan</button>
+        <div style="flex: 1;"></div>
+        <button id="discovery-close" class="secondary">Close</button>
       </div>
     </div>
   </div>
@@ -707,6 +725,14 @@
           <button id="prefs-remote-token-clear" class="secondary" type="button" style="flex: none;">Clear</button>
         </div>
         <span id="prefs-remote-token-state" class="hint-text" style="display: block; margin-top: 6px;"></span>
+      </section>
+      <section>
+        <h4>Session discovery</h4>
+        <p class="hint-text">Clodex can find Claude/Codex conversations on this machine that it isn't managing — including ones you started in a plain terminal — and let you adopt them (File ▸ Discover Sessions…). When enabled below, it checks on startup and offers any it finds; adopting resumes the conversation in a Clodex-managed session (it never attaches to a running process or spawns anything automatically).</p>
+        <label style="display: flex; align-items: center; gap: 8px;">
+          <input type="checkbox" id="prefs-discover-on-startup" style="margin: 0;">
+          <span>Offer to adopt external sessions on startup</span>
+        </label>
       </section>
       <section>
         <h4>Claude MCP</h4>

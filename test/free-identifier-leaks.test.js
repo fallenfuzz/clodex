@@ -53,6 +53,7 @@ const SCANNED_MODULES = [
   'claude-env.js',
   'relay-protocol.js',
   'session-restore.js',
+  'session-discovery.js',
   'engine.js',
   'headless-main.js',
   'sandbox.js',

@@ -95,6 +95,10 @@ const DEFAULT_UI_SETTINGS = {
   // default — it mutates the on-disk transcript (wirescope backs up + integrity-
   // gates; clodex fails safe to the original on any error). Needs a live proxy.
   compactOnResume: false,
+  // Startup session discovery: on launch, scan ~/.claude/projects for recent
+  // transcripts clodex doesn't track and offer to adopt them. OFF by default —
+  // an opt-in convenience; only the focused/most-recent window ever triggers it.
+  discoverOnStartup: false,
   // Built-in Claude Design MCP: the CLI auto-injects the claude.ai `claude_design`
   // connector (20 `mcp__claude_design__*` tools, ~4k tok/turn cache carriage) on
   // every launch for entitled accounts, with no honored global opt-out. The PRIMARY
@@ -1264,6 +1268,7 @@ function initStores(userDataPath, { log, registryDir } = {}) {
           wirescopeDir: typeof raw?.wirescopeDir === 'string' ? raw.wirescopeDir : DEFAULT_UI_SETTINGS.wirescopeDir,
           wirescopePort: Number.isInteger(raw?.wirescopePort) ? raw.wirescopePort : DEFAULT_UI_SETTINGS.wirescopePort,
           compactOnResume: typeof raw?.compactOnResume === 'boolean' ? raw.compactOnResume : DEFAULT_UI_SETTINGS.compactOnResume,
+          discoverOnStartup: typeof raw?.discoverOnStartup === 'boolean' ? raw.discoverOnStartup : DEFAULT_UI_SETTINGS.discoverOnStartup,
           disableClaudeDesignMcp: typeof raw?.disableClaudeDesignMcp === 'boolean' ? raw.disableClaudeDesignMcp : DEFAULT_UI_SETTINGS.disableClaudeDesignMcp,
           theme: THEME_KEYS.includes(raw?.theme) ? raw.theme : DEFAULT_UI_SETTINGS.theme,
           remoteEnabled: typeof raw?.remoteEnabled === 'boolean' ? raw.remoteEnabled : DEFAULT_UI_SETTINGS.remoteEnabled,
@@ -1293,6 +1298,7 @@ function initStores(userDataPath, { log, registryDir } = {}) {
         wirescopeDir: partial?.wirescopeDir ?? cur.wirescopeDir,
         wirescopePort: partial?.wirescopePort ?? cur.wirescopePort,
         compactOnResume: partial?.compactOnResume ?? cur.compactOnResume,
+        discoverOnStartup: partial?.discoverOnStartup ?? cur.discoverOnStartup,
         disableClaudeDesignMcp: partial?.disableClaudeDesignMcp ?? cur.disableClaudeDesignMcp,
         theme: THEME_KEYS.includes(partial?.theme) ? partial.theme : cur.theme,
         remoteEnabled: partial?.remoteEnabled ?? cur.remoteEnabled,

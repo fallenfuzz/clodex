@@ -1309,6 +1309,30 @@ function createSessionManager(deps) {
       return this.list().filter(s => s.workspaceId === workspaceId);
     }
 
+    // Live PTY child pids of the sessions Clodex owns. Session-discovery uses
+    // this to exclude Clodex's own agents from the "foreign live process" scan.
+    livePids() {
+      const pids = new Set();
+      for (const s of this.sessions.values()) {
+        if (s.pty && Number.isInteger(s.pty.pid)) pids.add(s.pty.pid);
+      }
+      return pids;
+    }
+
+    // Every Claude/Codex conversation id Clodex knows about — the live session
+    // id plus each persisted entry's full sessionIds history. Session-discovery
+    // subtracts this from the on-disk scan so already-adopted transcripts don't
+    // show up as "new".
+    trackedSessionIds() {
+      const ids = new Set();
+      for (const s of this.sessions.values()) if (s.sessionId) ids.add(s.sessionId);
+      for (const e of getPersistence().list()) {
+        if (e.sessionId) ids.add(e.sessionId);
+        if (Array.isArray(e.sessionIds)) for (const id of e.sessionIds) ids.add(id);
+      }
+      return ids;
+    }
+
     // Parked-DM count for one session (0 for non-claude). Lets the reattach
     // snapshot seed the ✉ badge without waiting for the next poll delta.
     pendingCountFor(name) {

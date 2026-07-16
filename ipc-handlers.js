@@ -28,6 +28,7 @@
 
 const { pathFor } = require('./clodex-paths');
 const { validateExecDef } = require('./exec-schema');
+const sessionDiscovery = require('./session-discovery');
 
 function registerIpcHandlers(deps) {
   const {
@@ -498,6 +499,31 @@ function registerIpcHandlers(deps) {
     out.sort((a, b) => (Date.parse(b.lastActive || 0) || 0) - (Date.parse(a.lastActive || 0) || 0));
     return { ok: true, sessions: out, activeId };
   });
+
+  // --- Session discovery (adopt sessions started OUTSIDE clodex) ----------
+  // Global scan of ~/.claude/projects (every slug, not just one session's cwd)
+  // for recent transcripts clodex doesn't already track, plus foreign live
+  // claude/codex processes on this box. The renderer surfaces these so the
+  // operator can adopt one — adoption is just a normal create() with resumeId set
+  // to the discovered sessionId, so nothing new is needed on the spawn side.
+  handle('discovery:scan', async (_e, opts) => {
+    try {
+      const maxAgeMs = (opts && Number(opts.maxAgeMs)) || sessionDiscovery.DEFAULT_MAX_AGE_MS;
+      const tracked = manager.trackedSessionIds();
+      const disk = sessionDiscovery.discoverAdoptable({ tracked, maxAgeMs, readMeta: readSessionMeta });
+      let live = [];
+      if (!opts || opts.live !== false) {
+        try { live = await sessionDiscovery.discoverLiveProcesses({ ownPids: manager.livePids() }); } catch {}
+      }
+      // Cross-reference: flag disk rows whose cwd matches a live foreign process
+      // so the UI can mark "running now". Best-effort — cwd may be null either side.
+      const liveCwds = new Set(live.map((p) => p.cwd).filter(Boolean));
+      for (const r of disk) r.liveInCwd = !!(r.cwd && liveCwds.has(r.cwd));
+      return { ok: true, disk, live };
+    } catch (e) {
+      return { ok: false, error: e.message, disk: [], live: [] };
+    }
+  });
   // --- Touched-files feed + peek/diff -----------------------------------
   // The feed is the session's in-memory ring (facts: tool + path + when, from
   // the wire receipts or the legacy jsonl tap). Peek/diff are read-only looks
@@ -631,6 +657,7 @@ function registerIpcHandlers(deps) {
       wirescopePort: s.wirescopePort,
       disableClaudeDesignMcp: s.disableClaudeDesignMcp,
       compactOnResume: s.compactOnResume,
+      discoverOnStartup: s.discoverOnStartup,
       theme: s.theme,
       remoteEnabled: s.remoteEnabled,
       remotePort: s.remotePort,

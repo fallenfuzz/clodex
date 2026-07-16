@@ -1508,7 +1508,7 @@ html, body {
 
 /* Dialog */
 
-#dialog-overlay, #prefs-overlay, #args-overlay, #peers-overlay, #peer-session-overlay, #sandbox-overlay {
+#dialog-overlay, #prefs-overlay, #args-overlay, #peers-overlay, #peer-session-overlay, #sandbox-overlay, #discovery-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
@@ -1518,9 +1518,68 @@ html, body {
   z-index: 100;
 }
 
-#dialog-overlay.hidden, #prefs-overlay.hidden, #args-overlay.hidden, #peers-overlay.hidden, #peer-session-overlay.hidden, #sandbox-overlay.hidden {
+#dialog-overlay.hidden, #prefs-overlay.hidden, #args-overlay.hidden, #peers-overlay.hidden, #peer-session-overlay.hidden, #sandbox-overlay.hidden, #discovery-overlay.hidden {
   display: none;
 }
+
+/* Discover Sessions can open ON TOP of the New Session dialog (via the Resume
+   field's "Find…" button), so it sits one layer above the shared z100 modals. */
+#discovery-overlay { z-index: 150; }
+
+/* Discover Sessions dialog — a scrollable list of adoptable sessions. */
+#discovery-dialog {
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 640px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+#discovery-dialog h3 { margin: 0; }
+.discovery-list {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 120px;
+  max-height: 50vh;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.discovery-empty { padding: 24px; text-align: center; opacity: 0.6; }
+.discovery-group-head {
+  padding: 6px 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.6;
+  position: sticky;
+  top: 0;
+  background: var(--sidebar-bg);
+}
+.discovery-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+.discovery-item:first-child { border-top: none; }
+.discovery-meta { flex: 1; min-width: 0; }
+.discovery-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.discovery-sub { font-size: 12px; opacity: 0.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.discovery-live-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ok);
+  border: 1px solid var(--ok);
+  border-radius: 4px;
+  padding: 1px 5px;
+  text-transform: uppercase;
+}
+.discovery-item button { flex-shrink: 0; }
 
 /* Lightweight text-input modal (promptText): a real in-app replacement for the
    no-op window.prompt(). Sits above the New Session dialog (z100) and the

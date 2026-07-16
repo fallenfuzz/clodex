@@ -1125,16 +1125,20 @@ async function refreshNewSessionTools(disabledSet = null) {
   renderToolChecklist(inputToolsList, disabled, (res && res.ok && res.effective) || {});
 }
 
-async function openDialog() {
+// prefill (optional): seed the dialog for adopting an existing session —
+// { name, type, cwd, resumeId }. Everything else stays at the normal new-session
+// defaults, so the operator can still pick tools/prompts/proxy before Create runs
+// the SAME create() path (resumeId set = resume the conversation).
+async function openDialog(prefill = null) {
   editingTemplateId = null;
   setDialogMode('create'); // reset chrome if the last use was a template edit
   sessionCounter++;
-  inputName.value = `session-${sessionCounter}`;
-  inputType.value = 'claude';
-  inputCwd.value = homeDir;
+  inputName.value = (prefill && prefill.name) || `session-${sessionCounter}`;
+  inputType.value = (prefill && prefill.type) || 'claude';
+  inputCwd.value = (prefill && prefill.cwd) || homeDir;
   inputTemplate.value = '';
   inputSystemPrompt.value = '';
-  inputResume.value = '';
+  inputResume.value = (prefill && prefill.resumeId) || '';
   inputFork.checked = false;
   if (inputStripLevel) inputStripLevel.value = '0'; // default off each open
   if (inputAutoCompact) inputAutoCompact.checked = true; // default ON (opt-out unchecked)
@@ -1168,6 +1172,10 @@ async function openDialog() {
   inputPlacement.value = 'host';
   placementRow.style.display = showPlacementSelector(boxes) ? '' : 'none';
   greyRichFields(false);
+  // Adopting an existing session: retitle so it's clear this resumes a
+  // conversation rather than starting fresh. Purely cosmetic — the Resume field
+  // carries the id and drives the behavior.
+  if (prefill && prefill.resumeId) dialogTitle.textContent = 'Adopt Session';
   dialogOverlay.classList.remove('hidden');
   setTimeout(() => inputName.select(), 50);
 }
@@ -1439,7 +1447,9 @@ function submitDialog() {
   else doCreate();
 }
 
-document.getElementById('btn-new').addEventListener('click', openDialog);
+// Arrow-wrapped: a bare `openDialog` reference would pass the click MouseEvent as
+// the prefill arg (openDialog(prefill) now takes one), mis-seeding the dialog.
+document.getElementById('btn-new').addEventListener('click', () => openDialog());
 // Sidebar-header toolbar siblings of + (new session): new sandbox opens the
 // sandbox panel (P2's box list owns creation — no inline create flow), add peer
 // opens the peers-SETUP dialog. Both are just openers; Cmd+T still maps to +.
@@ -2785,6 +2795,169 @@ window.api.onRequestSwitchSession((name) => switchSession(name));
 window.api.onRequestOpenNewDialog(() => openDialog());
 
 // ---------------------------------------------------------------------------
+// Discover Sessions dialog — adopt claude/codex sessions started outside clodex
+// ---------------------------------------------------------------------------
+const discoveryOverlay = document.getElementById('discovery-overlay');
+const discoveryList = document.getElementById('discovery-list');
+const discoveryRefresh = document.getElementById('discovery-refresh');
+const discoveryClose = document.getElementById('discovery-close');
+
+function closeDiscovery() { discoveryOverlay.classList.add('hidden'); }
+
+// A short, unique clodex session name derived from a cwd's basename (or type).
+function suggestAdoptName(cwd, type) {
+  const base = (cwd && cwd.split('/').filter(Boolean).pop()) || type;
+  let name = String(base).replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 48) || type;
+  if (!sessions.has(name)) return name;
+  for (let i = 2; i < 100; i++) { const c = `${name}-${i}`; if (!sessions.has(c)) return c; }
+  return `${name}-${Date.now().toString(36)}`;
+}
+
+function relTime(ts) {
+  if (!ts) return '';
+  const ms = Date.now() - (typeof ts === 'number' ? ts : Date.parse(ts));
+  if (!(ms >= 0)) return '';
+  const min = Math.round(ms / 60000);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  return `${Math.round(hr / 24)}d ago`;
+}
+
+// Adopt = fill the New Session dialog (already open behind the picker) with the
+// chosen session's type/cwd/id and a suggested name, then return to it. The
+// operator customizes tools/prompts/proxy/etc. and hits Create, which runs the
+// normal create() path (resumeId set → resumes the conversation). If the dialog
+// wasn't already open (Find opened straight from a fresh state), open it
+// pre-filled instead.
+function adoptSession(rec) {
+  closeDiscovery();
+  const prefill = {
+    name: suggestAdoptName(rec.cwd, rec.type),
+    type: rec.type,
+    cwd: rec.cwd || homeDir,
+    resumeId: rec.sessionId,
+  };
+  if (!dialogOverlay.classList.contains('hidden')) {
+    // Dialog is open — fill it in place without resetting the operator's other
+    // choices. Type change drives the type-dependent sections (skills/tools/…).
+    inputName.value = prefill.name;
+    if (inputType.value !== prefill.type) { inputType.value = prefill.type; applyTypeDefaults(); }
+    inputCwd.value = prefill.cwd;
+    inputResume.value = prefill.resumeId;
+    inputFork.checked = false;
+    refreshNewSessionSkills();
+    refreshNewSessionTools();
+    dialogTitle.textContent = 'Adopt Session';
+    setTimeout(() => inputName.select(), 50);
+  } else {
+    openDialog(prefill);
+  }
+}
+
+function renderDiscovery(res) {
+  discoveryList.textContent = '';
+  const disk = (res && res.disk) || [];
+  const live = (res && res.live) || [];
+  if (!disk.length && !live.length) {
+    const empty = document.createElement('div');
+    empty.className = 'discovery-empty';
+    empty.textContent = 'No adoptable sessions found. Everything on this machine is already managed by Clodex.';
+    discoveryList.appendChild(empty);
+    return;
+  }
+  const addGroupHead = (text) => {
+    const h = document.createElement('div');
+    h.className = 'discovery-group-head';
+    h.textContent = text;
+    discoveryList.appendChild(h);
+  };
+  const addItem = (rec, { liveBadge = false } = {}) => {
+    const item = document.createElement('div');
+    item.className = 'discovery-item';
+    const meta = document.createElement('div');
+    meta.className = 'discovery-meta';
+    const title = document.createElement('div');
+    title.className = 'discovery-title';
+    title.textContent = rec.title || rec.cwd || rec.sessionId;
+    const sub = document.createElement('div');
+    sub.className = 'discovery-sub';
+    const bits = [rec.type];
+    if (rec.cwd) bits.push(rec.cwd);
+    if (rec.turns) bits.push(`${rec.turns} turns`);
+    const when = relTime(rec.lastActive || rec.mtime);
+    if (when) bits.push(when);
+    sub.textContent = bits.join(' · ');
+    meta.appendChild(title);
+    meta.appendChild(sub);
+    item.appendChild(meta);
+    if (liveBadge || rec.liveInCwd) {
+      const badge = document.createElement('span');
+      badge.className = 'discovery-live-badge';
+      badge.textContent = 'live';
+      badge.title = 'A claude/codex process is running in this directory right now';
+      item.appendChild(badge);
+    }
+    const btn = document.createElement('button');
+    btn.textContent = 'Adopt';
+    btn.addEventListener('click', () => adoptSession(rec));
+    item.appendChild(btn);
+    discoveryList.appendChild(item);
+  };
+
+  if (disk.length) {
+    addGroupHead(`Recent conversations (${disk.length})`);
+    for (const rec of disk) addItem(rec);
+  }
+  // Live foreign processes whose transcript wasn't in the disk list (e.g. a
+  // brand-new session with no cwd match). Adopting needs a sessionId, which the
+  // process lens doesn't carry — so these are informational unless matched.
+  const unmatchedLive = live.filter((p) => p.cwd && !disk.some((d) => d.cwd === p.cwd));
+  if (unmatchedLive.length) {
+    addGroupHead(`Running now, no resumable transcript found (${unmatchedLive.length})`);
+    for (const p of unmatchedLive) {
+      const item = document.createElement('div');
+      item.className = 'discovery-item';
+      const meta = document.createElement('div');
+      meta.className = 'discovery-meta';
+      const title = document.createElement('div');
+      title.className = 'discovery-title';
+      title.textContent = p.cwd || `pid ${p.pid}`;
+      const sub = document.createElement('div');
+      sub.className = 'discovery-sub';
+      sub.textContent = `${p.type} · pid ${p.pid}`;
+      meta.appendChild(title); meta.appendChild(sub);
+      item.appendChild(meta);
+      const badge = document.createElement('span');
+      badge.className = 'discovery-live-badge';
+      badge.textContent = 'live';
+      item.appendChild(badge);
+      discoveryList.appendChild(item);
+    }
+  }
+}
+
+async function openDiscovery() {
+  discoveryOverlay.classList.remove('hidden');
+  discoveryList.textContent = '';
+  const scanning = document.createElement('div');
+  scanning.className = 'discovery-empty';
+  scanning.textContent = 'Scanning…';
+  discoveryList.appendChild(scanning);
+  const res = await window.api.discoverSessions({});
+  renderDiscovery(res);
+}
+
+if (discoveryRefresh) discoveryRefresh.addEventListener('click', () => openDiscovery());
+if (discoveryClose) discoveryClose.addEventListener('click', () => closeDiscovery());
+if (discoveryOverlay) discoveryOverlay.addEventListener('click', (e) => { if (e.target === discoveryOverlay) closeDiscovery(); });
+window.api.onRequestOpenDiscovery(() => openDiscovery());
+// "Find…" next to the Resume field opens the picker on top of the New Session
+// dialog; adopting a row fills this dialog's fields in place.
+const btnFindSession = document.getElementById('btn-find-session');
+if (btnFindSession) btnFindSession.addEventListener('click', () => openDiscovery());
+
+// ---------------------------------------------------------------------------
 // Preferences dialog
 // ---------------------------------------------------------------------------
 
@@ -2795,6 +2968,7 @@ const prefsCodexBox = document.getElementById('prefs-codex-components');
 const prefsProxyEnabled = document.getElementById('prefs-proxy-enabled');
 const prefsDisableDesignMcp = document.getElementById('prefs-disable-design-mcp');
 const prefsCompactOnResume = document.getElementById('prefs-compact-on-resume');
+const prefsDiscoverOnStartup = document.getElementById('prefs-discover-on-startup');
 const prefsToolsRow = document.getElementById('prefs-tools-row');
 const prefsToolsList = document.getElementById('prefs-tools-list');
 wireBulkToggles(prefsToolsRow, prefsToolsList);
@@ -3959,6 +4133,7 @@ async function openPrefs() {
   prefsProxyEnabled.checked = !!s.proxyEnabled;
   prefsDisableDesignMcp.checked = s.disableClaudeDesignMcp !== false;
   prefsCompactOnResume.checked = !!s.compactOnResume;
+  if (prefsDiscoverOnStartup) prefsDiscoverOnStartup.checked = !!s.discoverOnStartup;
   prefsRemoteEnabled.checked = !!s.remoteEnabled;
   prefsRemoteToken.value = '';
   renderRemoteTokenState(!!s.remoteHasToken);
@@ -3993,6 +4168,7 @@ document.getElementById('btn-prefs-save').addEventListener('click', async () => 
     proxyEnabled: prefsProxyEnabled.checked,
     disableClaudeDesignMcp: prefsDisableDesignMcp.checked,
     compactOnResume: prefsCompactOnResume.checked,
+    discoverOnStartup: prefsDiscoverOnStartup ? prefsDiscoverOnStartup.checked : false,
     remoteEnabled: prefsRemoteEnabled.checked,
   });
   // Default tool denies live in a separate store (the "*" agent-default), so
@@ -4341,4 +4517,30 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
   if (firstHealthy) switchSession(firstHealthy);
   // Focus the first restored session
   switchSession(restored[0].name);
+})();
+
+// Opt-in startup session discovery: if enabled, scan for adoptable external
+// sessions once the app has settled and open the picker only when there's
+// something to adopt. Gated on the preference (default off) so launch is silent
+// unless the operator asked for it; File ▸ Discover Sessions… is always available
+// regardless. Window gate: only the OS-focused window at launch runs this — every
+// restored workspace window loads this same script, and without the gate all of
+// them would pop the picker at once. document.hasFocus() is the codebase's
+// established "is this the active window" idiom (see the notifier gates above).
+(async function maybeDiscoverOnStartup() {
+  try {
+    if (!document.hasFocus()) return;
+    const s = await window.api.getSettings();
+    if (!s || !s.discoverOnStartup) return;
+    // Let restore + reattach finish painting before we scan/prompt.
+    await new Promise((r) => setTimeout(r, 1500));
+    // Re-check focus after the settle delay — the operator may have clicked into
+    // another window meanwhile; don't steal focus with an unexpected modal.
+    if (!document.hasFocus()) return;
+    const res = await window.api.discoverSessions({});
+    const disk = (res && res.disk) || [];
+    if (!disk.length) return;
+    renderDiscovery(res);
+    discoveryOverlay.classList.remove('hidden');
+  } catch {}
 })();
