@@ -1184,7 +1184,7 @@ function createSessionManager(deps) {
         // _shuttingDown), so an unflagged exit means the process died on its
         // own — the renderer uses that to surface it instead of silently
         // dropping the tab.
-        const expected = !!(session._userKilled || session._shuttingDown);
+        const expected = !!(session._userKilled || session._shuttingDown || session._archived);
         // Send the exit event BEFORE cleanup so the renderer can still resolve
         // the session → workspace → window mapping. Otherwise the sidebar
         // tab sticks around as a "dead" entry.
@@ -1202,8 +1202,11 @@ function createSessionManager(deps) {
         if (getRemoteServer()) { try { getRemoteServer().notifyExit(name, exitCode); } catch {} }
         // Agents keep their entry on natural exit (they get --resume'd next
         // launch). A shell exiting naturally (user typed `exit`) is done —
-        // don't respawn it forever. Quit-kills keep entries for restore.
-        if (!agentType && !session._shuttingDown && !session._userKilled) {
+        // don't respawn it forever. Quit-kills keep entries for restore. An
+        // ARCHIVED shell keeps its entry too — archive stamped the record and
+        // stopped the PTY on purpose; dropping it here would turn archive into
+        // delete for a bash session (agents are already spared by agentType).
+        if (!agentType && !session._shuttingDown && !session._userKilled && !session._archived) {
           getPersistence().remove(name);
         }
         this._cleanup(name);
@@ -1284,9 +1287,32 @@ function createSessionManager(deps) {
       const s = this.sessions.get(name);
       if (!s) return;
       log.info('session', `kill ${name} (user-initiated) pid=${s.pty.pid}`);
-      // User-initiated kill — forget this session so it doesn't resume on relaunch
+      // User-initiated kill — the reshaped DELETE action (right-click "Delete
+      // Session…"): forget this session so it doesn't resume on relaunch. Along
+      // with Delete Workspace, the only path that drops a record; ✕ / ⌘W archive
+      // instead (archive() keeps it). The delete handler removes any worktree.
       s._userKilled = true;
       getPersistence().remove(name);
+      try { s.pty.kill(); } catch {}
+      setTimeout(() => {
+        try { process.kill(s.pty.pid, 'SIGKILL'); } catch {}
+      }, 5000);
+    }
+
+    // Archive: stop the PTY but KEEP the persistence record (stamped archivedAt),
+    // so the conversation can be resumed later. This is the reshaped ✕ / ⌘W
+    // gesture (delete moved to the right-click menu). Unlike kill(), _userKilled
+    // stays false so _cleanup doesn't drop parked DMs, and the record is stamped
+    // BEFORE teardown so a fast onExit can't race the mark. The _archived flag
+    // marks the exit expected and — load-bearing for a bash/shell archive —
+    // stops onExit from dropping the record on its natural-exit path (only an
+    // agent's entry survives there otherwise). Restore-spawn filters archivedAt.
+    async archive(name) {
+      const s = this.sessions.get(name);
+      if (!s) return;
+      log.info('session', `archive ${name} pid=${s.pty.pid}`);
+      getPersistence().setArchived(name, true);
+      s._archived = true;
       try { s.pty.kill(); } catch {}
       setTimeout(() => {
         try { process.kill(s.pty.pid, 'SIGKILL'); } catch {}

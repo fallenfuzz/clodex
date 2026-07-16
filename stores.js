@@ -452,6 +452,18 @@ function initStores(userDataPath, { log, registryDir } = {}) {
       else delete entry.worktree;
       this._save(all);
     },
+    // Manual archive: an archived session keeps its record (so it can be resumed
+    // later) but has no running PTY and is skipped by restore-spawn. Stamps
+    // archivedAt for the sidebar's status filter + sort/display; clearing it
+    // (unarchive) drops the key so a resumed session carries none.
+    setArchived(name, archived) {
+      const all = this._load();
+      const entry = all.find(s => s.name === name);
+      if (!entry) return;
+      if (archived) entry.archivedAt = Date.now();
+      else delete entry.archivedAt;
+      this._save(all);
+    },
     setExtraArgs(name, extraArgs) {
       const all = this._load();
       const entry = all.find(s => s.name === name);

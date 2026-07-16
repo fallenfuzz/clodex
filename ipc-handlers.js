@@ -151,7 +151,28 @@ function registerIpcHandlers(deps) {
 
   handle('session:list', (e) => manager.listForWorkspace(workspaceOfSender(e)));
   handle('session:listAll', () => manager.list());
-  handle('session:kill', (_e, name) => manager.kill(name));
+  // session:kill is now the DELETE action (right-click "Delete Session…"): it
+  // forgets the record and, for a worktree-backed session, removes the checkout
+  // too — grabbed BEFORE the kill (kill removes the record), awaited AFTER the
+  // PTY exits so git isn't racing a live cwd, and its failure returned so the
+  // renderer can toast it (not the PR's fire-and-forget setTimeout 6s). The
+  // session is deleted regardless — a worktree-remove failure leaves { ok:true,
+  // worktreeRemoved:false, error } so the row still goes.
+  handle('session:kill', async (_e, name) => {
+    const entry = persistence.get(name);
+    const worktree = entry && entry.worktree && entry.worktree.path ? entry.worktree : null;
+    await manager.kill(name);
+    if (!worktree) return { ok: true };
+    await waitForSessionExit(name);
+    const r = await gitWorktree.removeWorktree(worktree.path).catch((e) => ({ ok: false, error: e.message }));
+    if (r && r.ok) {
+      log.info('worktree', `removed ${worktree.path} (branch ${worktree.branch}) after deleting ${name}`);
+      return { ok: true, worktreeRemoved: true };
+    }
+    const error = (r && r.error) || 'unknown error';
+    log.info('worktree', `remove failed for ${worktree.path} after deleting ${name}: ${error}`);
+    return { ok: true, worktreeRemoved: false, error };
+  });
   // Operator flush of a session's parked DMs (sidebar ✉ badge click). Operator-only
   // by construction — no agent intent maps here.
   handle('session:flushPending', (_e, name) => manager.flushPending(name));
@@ -580,14 +601,34 @@ function registerIpcHandlers(deps) {
     const includePr = !opts || opts.includePr !== false;
     try {
       const meta = await sessionMeta.metaFor(sessions, { includePr });
+      // Fold in the persisted created/archive stamps so one call feeds the whole
+      // toolbar (the render engine merges these onto rows by name; archivedAt
+      // drives the status filter + the archived-row recency stand-in).
       for (const s of list) {
         if (!meta[s.name]) meta[s.name] = {};
         meta[s.name].createdAt = s.createdAt || null;
+        meta[s.name].archivedAt = s.archivedAt || null;
       }
       return { ok: true, meta };
     } catch (err) {
       return { ok: false, error: err.message, meta: {} };
     }
+  });
+
+  // Archive / unarchive — the reshaped ✕ / ⌘W path. Archiving stops the PTY but
+  // keeps the record (stamped archivedAt); the renderer swaps the live row for an
+  // archived placeholder. Unarchive just clears the stamp — the operator resumes
+  // it through the normal retry/resume-spawn path, so the record must be clean
+  // BEFORE the respawn's own upsert (which would otherwise re-inherit archivedAt).
+  handle('session:archive', async (_e, name) => {
+    if (!persistence.get(name)) return { ok: false, error: 'Session not found' };
+    await manager.archive(name);
+    return { ok: true };
+  });
+  handle('session:unarchive', (_e, name) => {
+    if (!persistence.get(name)) return { ok: false, error: 'Session not found' };
+    persistence.setArchived(name, false);
+    return { ok: true };
   });
   // --- Touched-files feed + peek/diff -----------------------------------
   // The feed is the session's in-memory ring (facts: tool + path + when, from
@@ -1259,7 +1300,7 @@ function registerIpcHandlers(deps) {
       }] : []),
       { type: 'separator' },
       {
-        label: 'Kill Session',
+        label: 'Delete Session…',
         click: () => e.sender.send('session:context-action', { action: 'kill', name }),
       },
     ], e);
@@ -1417,8 +1458,9 @@ function registerIpcHandlers(deps) {
     popupMenu(template, e);
   });
 
-  // Native confirm for remote restart — mirrors dialog:confirmKill. The peer's
-  // sessions resume via the normal quit/restore lifecycle, so the copy says so.
+  // Native confirm for remote restart — same native showMessageBox pattern as
+  // the local dialogs. The peer's sessions resume via the normal quit/restore
+  // lifecycle, so the copy says so.
   handle('dialog:confirmPeerRestart', async (_e, label) => {
     const result = await showMessageBox({
       type: 'question',
@@ -1460,8 +1502,8 @@ function registerIpcHandlers(deps) {
   });
 
   // Native confirm for killing a session ON a peer — destructive (removes it on
-  // the remote box, no resume), distinct from local Detach/Hide. Mirrors
-  // confirmKill's copy but names the host so it's unmistakably the remote one.
+  // the remote box, no resume; there's no archive over the wire), distinct from
+  // local Detach/Hide. Names the host so it's unmistakably the remote one.
   handle('dialog:confirmPeerKill', async (_e, name, label) => {
     const result = await showMessageBox({
       type: 'warning',
@@ -1492,14 +1534,23 @@ function registerIpcHandlers(deps) {
     return result.response === 0;
   });
 
+  // The DELETE confirm (the ✕ / ⌘W gesture archives instead — no dialog). Delete
+  // forgets the session for good; a worktree-backed one additionally removes its
+  // checkout, so the confirm names the branch/path when there is one. Returns a
+  // bool; session:kill does the actual delete + worktree removal.
   handle('dialog:confirmKill', async (_e, name) => {
+    const entry = persistence.get(name);
+    const worktree = entry && entry.worktree && entry.worktree.path ? entry.worktree : null;
+    const detail = 'This forgets the session entirely — its conversation can\'t be resumed. '
+      + 'To keep it, archive it instead (the ✕ button or ⌘W).'
+      + (worktree ? `\n\nThis session runs in a git worktree (branch "${worktree.branch}" at ${worktree.path}); deleting also runs \`git worktree remove --force\`.` : '');
     const result = await showMessageBox({
       type: 'warning',
-      buttons: ['Kill', 'Cancel'],
+      buttons: ['Delete', 'Cancel'],
       defaultId: 1,
       cancelId: 1,
-      message: `Kill session "${name}"?`,
-      detail: 'This ends the agent process. The conversation history is preserved and can be resumed later.',
+      message: `Delete session "${name}"?`,
+      detail,
     });
     return result.response === 0;
   });

@@ -362,6 +362,105 @@ function addFailedSessionToSidebar(entry) {
   insertLocalSessionRow(item);
 }
 
+// A lightweight ARCHIVED placeholder row (no terminal, no live PTY). Clicking it
+// resumes the session (unarchive → resume-spawn); the ✕ deletes it for good.
+// Mirrors the failed-row gesture. Seeds sidebarMeta so the status filter, sort,
+// and grouping see it — its archivedAt doubles as the recency stand-in.
+function addArchivedSessionToSidebar(entry) {
+  if (sessionList.querySelector(`[data-name="${CSS.escape(entry.name)}"]`)) return;
+  const item = document.createElement('div');
+  item.className = 'session-item archived';
+  item.dataset.name = entry.name;
+  item.dataset.cwd = entry.cwd || '';
+  item.dataset.type = entry.type;
+  if (entry.backend) item.dataset.backend = entry.backend;
+  const displayName = entry.label || entry.name;
+  item.innerHTML = `
+    <span class="session-chip" data-type="${esc(entry.type)}"${entry.backend ? ` data-backend="${esc(entry.backend)}"` : ''}>${typeGlyph(entry.type, entry.backend)}</span>
+    <div class="session-info">
+      <div class="session-name">${esc(displayName)}</div>
+      <div class="session-meta">
+        <span class="session-archived-label">archived — click to resume</span>
+      </div>
+    </div>
+    <button class="session-close" data-tip="Delete archived session">&times;</button>
+  `;
+
+  // Click (except close) resumes: clear the archive stamp FIRST so the resume's
+  // own upsert doesn't re-inherit it, then spawn from the persisted entry.
+  item.addEventListener('click', async (e) => {
+    if (e.target.closest('.session-close')) return;
+    await window.api.unarchiveSession(entry.name);
+    const res = await window.api.retrySpawnSession(entry.name);
+    if (!res || !res.ok) { alert(`Resume failed: ${(res && res.error) || 'unknown error'}`); return; }
+    item.remove();
+    sidebarMeta.delete(entry.name);
+    createTerminal(entry.name);
+    addSessionToSidebar(entry.name, entry.type, entry.cwd, entry.label, entry.backend || null);
+    if (entry.createdAt) sidebarMeta.set(entry.name, { ...(sidebarMeta.get(entry.name) || {}), createdAt: entry.createdAt });
+    switchSession(entry.name);
+    refreshSidebarView();
+  });
+
+  item.querySelector('.session-close').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (confirm(`Delete archived session "${entry.name}"? It isn't running — this just removes the saved entry.`)) {
+      await window.api.forgetSession(entry.name);
+      item.remove();
+      sidebarMeta.delete(entry.name);
+      refreshSidebarView();
+    }
+  });
+
+  insertLocalSessionRow(item);
+  sidebarMeta.set(entry.name, {
+    ...(sidebarMeta.get(entry.name) || {}),
+    lastActivityTs: entry.archivedAt || null,
+    createdAt: entry.createdAt || null,
+    archivedAt: entry.archivedAt || null,
+  });
+}
+
+// The reshaped ✕ / ⌘W gesture: archive (stop the PTY, keep the record) and swap
+// the live row for an archived placeholder. The swap can't happen synchronously
+// — archiveSession triggers a session-exit — so we stash the row's identity here
+// and let onSessionExit rebuild it as archived (staying silent; an archive exit
+// is expected). Peer rows never reach here (they detach/hide instead).
+const archivingSessions = new Map(); // name -> { name, type, cwd, label, backend, archivedAt, createdAt }
+async function archiveSessionRow(name) {
+  const item = sessionList.querySelector(`[data-name="${CSS.escape(name)}"]`);
+  if (!item) return;
+  const nameEl = item.querySelector('.session-name');
+  const displayed = nameEl ? nameEl.textContent : name;
+  const meta = sidebarMeta.get(name) || {};
+  archivingSessions.set(name, {
+    name,
+    type: item.dataset.type,
+    cwd: item.dataset.cwd || '',
+    label: displayed && displayed !== name ? displayed : null,
+    backend: item.dataset.backend || null,
+    archivedAt: Date.now(),
+    createdAt: meta.createdAt || null,
+  });
+  const res = await window.api.archiveSession(name);
+  if (!res || !res.ok) {
+    archivingSessions.delete(name);
+    showToast(`Archive failed: ${(res && res.error) || 'unknown error'}`, { kind: 'error', duration: 10000, name });
+  }
+}
+
+// The reshaped right-click "Delete Session…": confirm (worktree-aware, native),
+// then delete. session:kill removes the record + any worktree checkout (awaited
+// main-side); a worktree-removal failure comes back on { error } to toast while
+// the row still goes (session-exit removes it).
+async function deleteSessionRow(name) {
+  if (!(await window.api.confirmKill(name))) return;
+  const res = await window.api.killSession(name);
+  if (res && res.error) {
+    showToast(`Worktree removal failed: ${res.error}`, { kind: 'warn', duration: 12000, name });
+  }
+}
+
 function addSessionToSidebar(name, type, cwd, label, backend = null) {
   const item = document.createElement('div');
   item.className = 'session-item';
@@ -389,7 +488,7 @@ function addSessionToSidebar(name, type, cwd, label, backend = null) {
         </span>
       </div>
     </div>
-    <button class="session-close" data-tip="Kill session">&times;</button>
+    <button class="session-close" data-tip="Archive session">&times;</button>
   `;
 
   item.addEventListener('click', (e) => {
@@ -398,11 +497,10 @@ function addSessionToSidebar(name, type, cwd, label, backend = null) {
     switchSession(name);
   });
 
-  item.querySelector('.session-close').addEventListener('click', async (e) => {
+  // ✕ archives now (instant, resumable) — delete moved to the right-click menu.
+  item.querySelector('.session-close').addEventListener('click', (e) => {
     e.stopPropagation();
-    if (await window.api.confirmKill(name)) {
-      window.api.killSession(name);
-    }
+    archiveSessionRow(name);
   });
 
   // Click the ✉ parked-message chip to flush that session's queue NOW (operator
@@ -497,10 +595,8 @@ window.api.onSessionContextAction(({ action, name, type, cwd, backend }) => {
       }
       break;
     }
-    case 'kill':
-      window.api.confirmKill(name).then((ok) => {
-        if (ok) window.api.killSession(name);
-      });
+    case 'kill': // right-click "Delete Session…" — the real delete (confirm + worktree)
+      deleteSessionRow(name);
       break;
     case 'export':
       window.api.exportSessionMarkdown(name).then((res) => {
@@ -844,8 +940,8 @@ async function refreshSidebarMeta({ includePr = true } = {}) {
 function onViewControlChange() {
   sidebarView = {
     group: sbGroup.value, sort: sbSort.value,
-    // status has no control yet (archive is a later kill-flow slice) — preserve
-    // the current value (default 'active') rather than reading a null select.
+    // Guarded read: sbStatus is the Active/Archived/All select; the fallback
+    // preserves the current value if the control is ever absent.
     status: sbStatus ? sbStatus.value : sidebarView.status,
     activity: sbActivity.value,
     search: sbSearch.value,
@@ -2018,7 +2114,17 @@ window.api.onPtyData((name, data) => {
 });
 
 window.api.onSessionExit((name, code, meta) => {
+  // Archive in flight (✕ / ⌘W): this exit IS the archive. Drop the live tab +
+  // terminal, then rebuild the row as an archived placeholder in place — no app
+  // restart needed — and stay silent (an archive exit is expected).
+  const archivedEntry = archivingSessions.get(name);
   removeSession(name);
+  if (archivedEntry) {
+    archivingSessions.delete(name);
+    addArchivedSessionToSidebar(archivedEntry);
+    refreshSidebarView();
+    return;
+  }
   // Deliberate exits (user kill, restart, app quit) arrive expected:true and
   // stay silent, as does a clean self-exit (code 0, no signal — the user typed
   // `exit`/quit in the pane they were looking at). What's left is the session
@@ -3075,7 +3181,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Cmd+W — kill active session (or close dialog if open)
+  // Cmd+W — archive active session (or close dialog if open). ✕'s twin.
   if (e.key === 'w') {
     e.preventDefault();
     e.stopPropagation();
@@ -3089,9 +3195,7 @@ document.addEventListener('keydown', (e) => {
         // selection (the session keeps running on its owner regardless).
         peerHideFromList(entry.peer.id, entry.peer.name);
       } else {
-        window.api.confirmKill(target).then((ok) => {
-          if (ok) window.api.killSession(target);
-        });
+        archiveSessionRow(target);
       }
     }
     return;
@@ -3160,9 +3264,7 @@ document.addEventListener('keydown', (e) => {
       if (entry && entry.peer) {
         peerHideFromList(entry.peer.id, entry.peer.name);
       } else {
-        window.api.confirmKill(target).then((ok) => {
-          if (ok) window.api.killSession(target);
-        });
+        archiveSessionRow(target);
       }
     }
     return;
@@ -4903,6 +5005,11 @@ document.getElementById('btn-args-save').addEventListener('click', async () => {
 
   let firstHealthy = null;
   for (const entry of restored) {
+    if (entry.archived) {
+      // Archived — no PTY; a lightweight placeholder that resumes on click.
+      addArchivedSessionToSidebar(entry);
+      continue;
+    }
     if (entry.failed) {
       // Render as a ghost entry — no xterm, but visible in the sidebar so
       // the user can either retry it or forget it.

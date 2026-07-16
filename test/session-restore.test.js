@@ -97,6 +97,30 @@ test('skips an already-running session — no re-spawn, flushes buffered replay'
   assert.ok(!('failed' in out[0]));
 });
 
+test('archived session is NOT spawned and comes back archived:true', async () => {
+  const created = [];
+  const manager = {
+    sessions: new Map(),
+    async create(name) { created.push(name); },
+    pendingCountFor: () => 0,
+  };
+  const persistence = fakePersistence([
+    { name: 'zed', type: 'claude', cwd: '/w/z', label: 'Z', archivedAt: 1234, createdAt: 1000 },
+  ]);
+
+  const out = await restoreSessionsForWorkspace({
+    workspaceId: 'ws1', persistence, manager, ...noopDeps,
+  });
+
+  assert.strictEqual(created.length, 0, 'an archived session is never spawned');
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].archived, true);
+  assert.strictEqual(out[0].archivedAt, 1234);
+  assert.strictEqual(out[0].createdAt, 1000);
+  assert.ok(!('replay' in out[0]), 'no PTY, no replay');
+  assert.deepStrictEqual(persistence.calls, [['listForWorkspace', 'ws1']], 'store untouched');
+});
+
 test('keeps a failed spawn in persistence and returns failed:true', async () => {
   const manager = {
     sessions: new Map(),

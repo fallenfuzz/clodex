@@ -33,6 +33,8 @@ const API_CONTRACT = [
   { name: 'noteCwd', kind: 'invoke', channel: 'session:noteCwd' },
   { name: 'listSessions', kind: 'invoke', channel: 'session:list' },
   { name: 'killSession', kind: 'invoke', channel: 'session:kill' },
+  { name: 'archiveSession', kind: 'invoke', channel: 'session:archive' },
+  { name: 'unarchiveSession', kind: 'invoke', channel: 'session:unarchive' },
   { name: 'flushPending', kind: 'invoke', channel: 'session:flushPending' },
   { name: 'retrySpawnSession', kind: 'invoke', channel: 'session:retrySpawn' },
   { name: 'forgetSession', kind: 'invoke', channel: 'session:forget' },
