@@ -26,6 +26,7 @@ const ROOT = path.join(__dirname, '..');
 // Every module extracted from main.js. New extraction phases MUST add their
 // modules here (M5: ipc-handlers, remote-wiring, peer-wiring, app-menus).
 const SCANNED_MODULES = [
+  'dev-reload.js',
   'session-manager.js',
   'app-menus.js',
   'ipc-handlers.js',
