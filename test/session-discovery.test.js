@@ -59,6 +59,24 @@ test('scanClaudeDisk: finds all recent transcripts across slugs, newest-first', 
   assert.strictEqual(rows[0].type, 'claude');
 });
 
+test('scanClaudeDisk: sorts by the displayed key (lastActive) when it diverges from mtime', () => {
+  const now = Date.now();
+  // 'newfile' has the newer mtime but the OLDER lastActive; 'newmeta' is the
+  // reverse. The rows must come back in lastActive order (newmeta first) so the
+  // list matches what the picker shows (relTime(lastActive || mtime)).
+  const home = fakeProjects([
+    { slug: '-a', sessionId: 'newfile', cwd: '/a', mtimeMs: now - 1000 },
+    { slug: '-b', sessionId: 'newmeta', cwd: '/b', mtimeMs: now - 5000 },
+  ]);
+  const readMeta = (file) => ({
+    title: null,
+    turns: null,
+    last: file.includes('newfile') ? now - 6000 : now - 500,
+  });
+  const rows = withHome(home, () => d.scanClaudeDisk({ readMeta }));
+  assert.deepStrictEqual(rows.map((r) => r.sessionId), ['newmeta', 'newfile']);
+});
+
 test('scanClaudeDisk: honors the age cutoff', () => {
   const now = Date.now();
   const home = fakeProjects([

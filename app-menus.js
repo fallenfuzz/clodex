@@ -407,6 +407,13 @@ function createAppMenus(deps) {
             },
           },
           {
+            label: 'Discover Sessions…',
+            click: () => {
+              const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+              if (win) win.webContents.send('request-open-discovery');
+            },
+          },
+          {
             label: 'Prompts…',
             click: () => {
               const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
