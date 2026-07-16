@@ -39,7 +39,7 @@ const { initChecklistPopovers } = require('./popovers/checklist-popovers');
 const { initContextPopover } = require('./popovers/context-popover');
 const { initSessionMenus } = require('./popovers/session-menus');
 const { initPeersUi } = require('./peers-ui');
-const { initWorkspacePanes } = require('./panes/workspace-panes');
+const { initWorkspacePopover } = require('./popovers/workspace-popover');
 
 // ---------------------------------------------------------------------------
 // State
@@ -1157,10 +1157,6 @@ function switchSession(name) {
   }
 
   renderPeerBar();
-
-  // Workspace panes (Explorer/SCM/Worktrees) scope to the active session — nudge
-  // whichever is open to re-pull for the newly-focused session.
-  if (typeof refreshWorkspacePanes === 'function') refreshWorkspacePanes();
 
   // Fit and focus after becoming visible. Peer terminals in read-only mode
   // keep the owner's geometry (letterbox) — fitting would be a resize we
@@ -3119,14 +3115,18 @@ createInboxDrawer();
 // state. Sidebar-footer button next to Inbox.
 createPotDrawer();
 
-// Workspace panes — Explorer / Source Control / Worktrees (panes/workspace-
-// panes.js). Docked drawers left of the terminal, one open at a time, each
-// scoped to the active session's cwd (resolved server-side by the fs:/scm:/
-// worktree: IPC). refreshWorkspacePanes re-pulls the open pane when the active
-// session changes.
-const { refreshOpenPane: refreshWorkspacePanes } = initWorkspacePanes({
+// Workspace popover — one floating workbench (Files / Source Control / Worktrees)
+// for a chosen session (popovers/workspace-popover.js). Scopes to the SELECTED
+// session's cwd (its own dropdown, default = active), resolved server-side by the
+// fs:/scm:/worktree: IPC. Opened from the toolbar button + the View-menu event.
+const { openWorkspace } = initWorkspacePopover({
   getActiveSession: () => activeSession,
+  getSessions: () => sessions,
+  showToast,
 });
+const btnWorkspace = document.getElementById('btn-workspace');
+if (btnWorkspace) btnWorkspace.addEventListener('click', () => openWorkspace());
+if (window.api.onRequestOpenWorkspace) window.api.onRequestOpenWorkspace(() => openWorkspace());
 
 // ---------------------------------------------------------------------------
 // Peered Clodexes — self-contained subsystem (peers-ui.js). Owns the peer bar,

@@ -443,28 +443,6 @@ function createAppMenus(deps) {
           },
           { type: 'separator' },
           {
-            label: 'Explorer',
-            click: () => {
-              const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
-              if (win) win.webContents.send('request-open-explorer');
-            },
-          },
-          {
-            label: 'Source Control',
-            click: () => {
-              const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
-              if (win) win.webContents.send('request-open-scm');
-            },
-          },
-          {
-            label: 'Worktrees',
-            click: () => {
-              const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
-              if (win) win.webContents.send('request-open-worktrees');
-            },
-          },
-          { type: 'separator' },
-          {
             label: 'Rename Workspace…',
             click: () => {
               const win = BrowserWindow.getFocusedWindow();
@@ -501,6 +479,14 @@ function createAppMenus(deps) {
       {
         label: 'View',
         submenu: [
+          {
+            label: 'Workspace…',
+            click: () => {
+              const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+              if (win) win.webContents.send('request-open-workspace');
+            },
+          },
+          { type: 'separator' },
           { role: 'reload' },
           { role: 'forceReload' },
           { role: 'toggleDevTools' },

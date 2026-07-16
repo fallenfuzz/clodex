@@ -19,6 +19,7 @@
         <button id="btn-new-sandbox" data-tip="New sandbox">&#9635;</button>
         <button id="btn-add-peer" data-tip="Add peer">&#8644;</button>
         <button id="btn-discover" data-tip="Discover sessions on this machine">&#9906;</button>
+        <button id="btn-workspace" data-tip="Workspace files, source control, and worktrees for a session">&#9707;</button>
       </div>
     </div>
     <div id="sidebar-filterbar">
@@ -60,11 +61,6 @@
       <span id="diag-text">Sessions can't start</span>
     </div>
     <div id="sidebar-footer">
-      <div class="sidebar-pane-buttons">
-        <button id="explorer-open" title="File explorer + editor (active session's directory)" type="button">Files</button>
-        <button id="scm-open" title="Source control (git) for the active session" type="button">Source</button>
-        <button id="worktrees-open" title="Manage git worktrees for the active session's repo" type="button">Worktrees</button>
-      </div>
       <button id="pot-open" data-tip="Boiling pot — where token carriage concentrates across agents" type="button">
         <span class="pot-label">Boiling Pot</span>
       </button>
@@ -258,72 +254,79 @@
     </div>
   </div>
 
-  <!-- File explorer + editor pane (scoped to the active session's cwd) -->
-  <div id="explorer-drawer" class="hidden pane-drawer">
-    <div class="pane-header">
-      <span class="prompts-title">Explorer</span>
-      <span class="pane-scope" id="explorer-scope"></span>
-      <button id="explorer-refresh" title="Refresh" type="button">Refresh</button>
-      <button id="explorer-close" title="Close" type="button">×</button>
-    </div>
-    <div class="pane-body">
-      <div id="explorer-tree" class="explorer-tree"></div>
-      <div id="explorer-editor" class="explorer-editor hidden">
-        <div class="explorer-editor-bar">
-          <span id="explorer-editor-path" class="explorer-editor-path"></span>
-          <span id="explorer-dirty" class="explorer-dirty hidden" title="Unsaved changes">●</span>
-          <button id="explorer-save" type="button" disabled>Save</button>
+  <!-- Workspace popover — files, source control, and worktrees for one session,
+       scoped to the selected session's cwd (resolved server-side by name). -->
+  <div id="workspace-overlay" class="hidden">
+    <div id="workspace-modal">
+      <div class="workspace-topbar">
+        <span class="workspace-title">Workspace</span>
+        <select id="workspace-session" class="sidebar-select" data-tip="Session whose directory this workspace scopes to"></select>
+        <div class="workspace-tabs">
+          <button type="button" class="workspace-tab active" id="workspace-tab-files" data-tab="files">Files</button>
+          <button type="button" class="workspace-tab" id="workspace-tab-scm" data-tab="scm">Source Control</button>
+          <button type="button" class="workspace-tab" id="workspace-tab-worktrees" data-tab="worktrees">Worktrees</button>
         </div>
-        <textarea id="explorer-textarea" class="explorer-textarea" spellcheck="false" wrap="off"></textarea>
-        <div id="explorer-editor-note" class="explorer-editor-note hidden"></div>
+        <button type="button" class="popover-close" id="workspace-close" title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="workspace-body">
+        <div class="workspace-left">
+          <!-- Files: lazy tree -->
+          <div id="ws-files-panel" class="workspace-panel">
+            <div class="workspace-panel-bar">
+              <span id="ws-files-scope" class="workspace-scope"></span>
+              <button id="ws-files-refresh" type="button">Refresh</button>
+            </div>
+            <div id="ws-tree" class="ws-tree"></div>
+            <div id="ws-files-empty" class="hint hidden">No local session selected, or its directory isn't readable.</div>
+          </div>
+          <!-- Source control -->
+          <div id="ws-scm-panel" class="workspace-panel hidden">
+            <div class="ws-branchbar">
+              <select id="ws-branch-select" class="sidebar-select" data-tip="Switch branch"></select>
+              <span id="ws-aheadbehind" class="ws-aheadbehind"></span>
+              <button id="ws-fetch" class="ws-remote-btn" data-tip="git fetch --all" type="button">⟳</button>
+              <button id="ws-pull" class="ws-remote-btn" data-tip="git pull --ff-only" type="button">↓</button>
+              <button id="ws-push" class="ws-remote-btn" data-tip="git push" type="button">↑</button>
+              <button id="ws-newbranch" class="ws-remote-btn" data-tip="Create a new branch" type="button">+</button>
+              <button id="ws-scm-refresh" class="ws-remote-btn" data-tip="Refresh" type="button">⟲</button>
+            </div>
+            <div id="ws-changes" class="ws-changes"></div>
+            <div id="ws-commit-box" class="ws-commit-box">
+              <textarea id="ws-commit-msg" class="ws-commit-msg" placeholder="Commit message (staged changes)" spellcheck="false" rows="2"></textarea>
+              <button id="ws-commit-btn" type="button" disabled>Commit</button>
+            </div>
+            <div id="ws-scm-empty" class="hint hidden">No local session selected, or its directory isn't a git repository.</div>
+          </div>
+          <!-- Worktrees (full width; the shared editor hides for this tab) -->
+          <div id="ws-worktrees-panel" class="workspace-panel hidden">
+            <div class="workspace-panel-bar">
+              <span class="workspace-scope">Worktrees for this session's repository</span>
+              <button id="ws-worktrees-refresh" type="button">Refresh</button>
+            </div>
+            <div id="ws-worktrees-list" class="worktrees-list"></div>
+            <div class="worktrees-add">
+              <input type="text" id="ws-worktree-branch" class="sidebar-search" placeholder="new branch name" spellcheck="false" autocomplete="off">
+              <input type="text" id="ws-worktree-base" class="sidebar-search" placeholder="base branch (optional)" spellcheck="false" autocomplete="off" list="ws-worktree-base-list">
+              <datalist id="ws-worktree-base-list"></datalist>
+              <button id="ws-worktree-add" type="button">Create worktree</button>
+            </div>
+            <div id="ws-worktrees-empty" class="hint hidden">No local session selected, or its directory isn't a git repository.</div>
+          </div>
+        </div>
+        <!-- Shared editor / diff area (Files edits here; Source shows diffs here) -->
+        <div id="ws-editor" class="workspace-editor">
+          <div class="ws-editor-bar">
+            <span id="ws-editor-path" class="ws-editor-path"></span>
+            <span id="ws-dirty" class="ws-dirty hidden" data-tip="Unsaved changes">●</span>
+            <button id="ws-save" type="button" disabled>Save</button>
+          </div>
+          <textarea id="ws-textarea" class="ws-textarea hidden" spellcheck="false" wrap="off"></textarea>
+          <div id="ws-diff" class="ws-diff hidden"></div>
+          <div id="ws-editor-note" class="ws-editor-note hidden"></div>
+          <div id="ws-editor-placeholder" class="ws-editor-placeholder">Select a file to view or edit.</div>
+        </div>
       </div>
     </div>
-    <div id="explorer-empty" class="hint">No active session, or its directory isn't readable. Explorer scopes to the focused session's working directory.</div>
-  </div>
-
-  <!-- Source control (git) pane -->
-  <div id="scm-drawer" class="hidden pane-drawer">
-    <div class="pane-header">
-      <span class="prompts-title">Source Control</span>
-      <button id="scm-refresh" title="Refresh" type="button">Refresh</button>
-      <button id="scm-close" title="Close" type="button">×</button>
-    </div>
-    <div class="pane-body">
-      <div id="scm-branchbar" class="scm-branchbar">
-        <select id="scm-branch-select" class="sidebar-select" title="Switch branch"></select>
-        <span id="scm-aheadbehind" class="scm-aheadbehind"></span>
-        <button id="scm-fetch" class="scm-remote-btn" title="git fetch --all" type="button">⟳</button>
-        <button id="scm-pull" class="scm-remote-btn" title="git pull --ff-only" type="button">↓</button>
-        <button id="scm-push" class="scm-remote-btn" title="git push" type="button">↑</button>
-        <button id="scm-newbranch" class="scm-remote-btn" title="Create a new branch" type="button">+</button>
-      </div>
-      <div id="scm-changes" class="scm-changes"></div>
-      <div id="scm-commit-box" class="scm-commit-box">
-        <textarea id="scm-commit-msg" class="scm-commit-msg" placeholder="Commit message (staged changes)" spellcheck="false" rows="2"></textarea>
-        <button id="scm-commit-btn" type="button" disabled>Commit</button>
-      </div>
-    </div>
-    <div id="scm-empty" class="hint">No active session, or its directory isn't a git repository.</div>
-    <div id="scm-remote-out" class="scm-remote-out hidden"></div>
-  </div>
-
-  <!-- Worktree management pane -->
-  <div id="worktrees-drawer" class="hidden pane-drawer">
-    <div class="pane-header">
-      <span class="prompts-title">Worktrees</span>
-      <button id="worktrees-refresh" title="Refresh" type="button">Refresh</button>
-      <button id="worktrees-close" title="Close" type="button">×</button>
-    </div>
-    <div class="pane-body">
-      <div id="worktrees-list" class="worktrees-list"></div>
-      <div class="worktrees-add">
-        <input type="text" id="worktree-new-branch" class="sidebar-search" placeholder="new branch name" spellcheck="false" autocomplete="off">
-        <input type="text" id="worktree-new-base" class="sidebar-search" placeholder="base branch (optional)" spellcheck="false" autocomplete="off" list="worktree-pane-base-list">
-        <datalist id="worktree-pane-base-list"></datalist>
-        <button id="worktree-add-btn" type="button">Create worktree</button>
-      </div>
-    </div>
-    <div id="worktrees-empty" class="hint">No active session, or its directory isn't a git repository.</div>
   </div>
 
   <div id="main">
