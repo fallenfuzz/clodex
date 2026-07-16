@@ -133,20 +133,42 @@ state): mark `session._dead` (later pty ops on a dead handle throw a native
 error that takes the process down) → `_sendToSession('session-exit')`
 **before** `_cleanup` (cleanup removes the session from the map that window
 resolution needs; the reverse order strands a dead sidebar tab) → remote
-notify → persistence (only a *bash natural exit* removes the entry) →
-`_cleanup`.
+notify → persistence (only a *bash natural exit* removes the entry — an
+`_archived` bash shell keeps it) → `_cleanup`. The `expected` flag on the
+exit event folds in `_archived` alongside `_userKilled`/`_shuttingDown`, so
+an archive exit stays silent (no crash toast).
 
 `_cleanup` runs on every exit path; the parked-DM dir is removed **only on
 explicit user-kill** (`_userKilled`) — unconditional removal would eat
-parked mail on restart/quit.
+parked mail on restart/quit. Archive keeps `_userKilled` false so it doesn't.
+
+**✕ / Cmd+W = archive, not delete** (reshaped v0.15.x, PR #1). Both stop the
+PTY but **keep** the record, stamped `archivedAt` (`manager.archive` →
+`persistence.setArchived`). The session-exit lands with the row queued in the
+renderer's `archivingSessions` map, so `onSessionExit` tears the live tab down
+and rebuilds it in place as a **dimmed archived row** (`.session-item.archived`,
+"archived — click to resume") — no app restart. Clicking it unarchives
+(`setArchived(false)`) then resume-spawns; its ✕ forgets the entry. Archived
+rows surface via the sidebar status filter (Active/Archived/All).
+
+**Real delete = right-click "Delete Session…"** + native confirm (the only
+record-dropper besides Delete Workspace). It routes through `manager.kill`
+(`_userKilled` → `persistence.remove`); the `session:kill` handler additionally
+grabs worktree provenance *before* the kill, `await`s `waitForSessionExit`, then
+`await`s `gitWorktree.removeWorktree` — **awaited, toasted on failure**, not the
+old fire-and-forget `setTimeout`. The session is deleted regardless; a
+worktree-removal failure returns `{ok:true, worktreeRemoved:false, error}` so
+the renderer toasts it while the row still goes.
 
 | Event | sessions.json | Process | UI |
 |---|---|---|---|
-| Kill from UI (X / Cmd+W) | removed | killed (SIGKILL fallback 5s) | tab removed |
+| Archive (✕ / Cmd+W) | kept, `archivedAt` stamped | killed (SIGKILL fallback 5s) | live tab → dimmed archived row |
+| Delete (right-click "Delete Session…") | removed (+ worktree removed, awaited) | killed (SIGKILL fallback 5s) | tab removed |
 | Natural exit (agent) | kept → `--resume` next open | dead | tab removed |
-| Natural exit (bash) | removed | dead | tab removed |
+| Natural exit (bash) | removed (unless `_archived`) | dead | tab removed |
 | App quit | kept | all killed (`killAll`, `_shuttingDown`) | windows closed |
 | Restore failure | kept, returned `{failed:true}` | never spawned | failed ghost tab (retry / forget) |
+| Restore (archived) | kept | never spawned | dimmed archived row (click = resume) |
 
 `restartSession(name, opts)` (main.js — shared by the local IPC handler and
 the peer restart endpoint): kill → `waitForSessionExit` (polls the map;
@@ -157,11 +179,13 @@ re-assert stripLevel + label. On failure it **upserts the entry back**
 `opts.fresh` drops the resumeId (required for skill roster changes, which
 are frozen on resume).
 
-Restore (`app:restore-sessions`) has two branches: already-running sessions
-flush their `pendingOutput` as replay (no respawn); cold entries spawn with
-`--resume`. Failures do **not** remove persistence — the entry comes back
-`{failed:true}` for the renderer's ghost-tab retry/forget UI (silently
-wiping it caused the pre-v0.5.3 "upgrade kills my agents" reports).
+Restore (`app:restore-sessions`) has three branches: an entry with `archivedAt`
+comes back `{archived:true}` and is **never spawned** (rendered as a dimmed
+archived row); already-running sessions flush their `pendingOutput` as replay
+(no respawn); cold entries spawn with `--resume`. Failures do **not** remove
+persistence — the entry comes back `{failed:true}` for the renderer's ghost-tab
+retry/forget UI (silently wiping it caused the pre-v0.5.3 "upgrade kills my
+agents" reports).
 
 ## 5. Persistence (stores.js)
 
@@ -173,9 +197,11 @@ three markdown libraries under `~/.clodex/` (prompt/agent/skill libraries).
 
 sessions.json entries carry the full respawn recipe (type/cwd/extraArgs/
 sessionId/workspaceId/prompt refs/proxy tri-state/agents/deny/tools/skills)
-plus setter-added `sessionIds[]` history, label, stripLevel, and
-`autoCompact` (stored only as `false` to opt out). Writes validate before
-backing up to `.bak`; load falls back to the backup.
+plus setter-added `sessionIds[]` history, label, stripLevel, `createdAt`,
+`worktree` provenance (`setWorktree`, cleared on delete's worktree removal),
+`archivedAt` (`setArchived`, present only while archived), and `autoCompact`
+(stored only as `false` to opt out). Writes validate before backing up to
+`.bak`; load falls back to the backup.
 
 **templates.json** stores reusable session configs. Base fields
 (`id/name/type/cwd/extraArgs`) plus the config subset snapshotted by the
@@ -209,8 +235,10 @@ carry `workspaceId`; `session:list` is sender-scoped, `session:listAll`
 feeds the tray. Closing a window detaches its sessions: `pty-data` buffers
 into `session.pendingOutput` (2MB cap, oldest dropped) and replays on
 reopen; exit/activity events while detached are dropped and recomputed.
-**Delete Workspace…** (Window menu) is the only true delete: confirm →
-kill its sessions → remove the record → close the window.
+**Delete Workspace…** (Window menu) removes a whole workspace record: confirm →
+kill its sessions → remove the record → close the window. (For a single session,
+right-click **Delete Session…** is the per-session record-dropper; ✕ / Cmd+W
+archive instead — see §4.)
 
 ## Invariants (do not break)
 
@@ -218,7 +246,9 @@ kill its sessions → remove the record → close the window.
   `_cleanup`, persistence decision before cleanup.
 - JsonlWatcher starts reading at EOF on every symlink repoint.
 - Restore/respawn failure keeps the persisted entry (`{failed:true}`).
-- Parked-DM dir removal is gated on `_userKilled`.
+- ✕ / Cmd+W archive (keep the record, stamp `archivedAt`); only right-click
+  Delete Session… and Delete Workspace… drop a session record.
+- Parked-DM dir removal is gated on `_userKilled` — archive leaves it false.
 - Strip level is not a spawn arg — every kill+create path must re-assert it.
 - The append-prompt channel is static per protocol (see messaging.md §6);
   hook script bytes are test-pinned.
