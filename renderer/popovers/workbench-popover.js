@@ -310,7 +310,7 @@ function initWorkbenchPopover({ getActiveSession, showToast }) {
         e.stopPropagation();
         const paths = list.map((f) => f.path);
         const r = isStaged ? await api.scmUnstage(name, paths) : await api.scmStage(name, paths);
-        if (!r || !r.ok) toast(`Failed: ${(r && r.error) || 'unknown'}`);
+        if (!r || !r.ok) toast(`${isStaged ? 'Unstage' : 'Stage'} failed: ${(r && r.error) || 'unknown'}`);
         renderScm();
       });
       head.appendChild(btn);
