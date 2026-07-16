@@ -404,7 +404,7 @@ function addArchivedSessionToSidebar(entry) {
 
   item.querySelector('.session-close').addEventListener('click', async (e) => {
     e.stopPropagation();
-    if (confirm(`Delete archived session "${entry.name}"? It isn't running — this just removes the saved entry.`)) {
+    if (confirm(`Delete archived session "${displayName}"? It isn't running — this just removes the saved entry.`)) {
       await window.api.forgetSession(entry.name);
       item.remove();
       sidebarMeta.delete(entry.name);
@@ -1915,7 +1915,7 @@ async function doCreate() {
     const base = inputWorktreeBase.value.trim() || null; // null → repo default branch
     const wt = await window.api.createWorktree(cwd, branch, { base });
     if (!wt || !wt.ok) {
-      alert(`Failed to create git worktree: ${(wt && wt.error) || 'unknown error'}`);
+      showToast(`Worktree creation failed: ${(wt && wt.error) || 'unknown error'}`, { kind: 'error', duration: 10000 });
       return;
     }
     spawnCwd = wt.path;
@@ -3420,11 +3420,11 @@ function renderDiscovery(res) {
       const badge = document.createElement('span');
       badge.className = 'discovery-live-badge';
       badge.textContent = 'live';
-      badge.title = 'A claude/codex process is running in this directory right now';
+      badge.title = 'A Claude/Codex process is running in this directory right now';
       item.appendChild(badge);
     }
     const btn = document.createElement('button');
-    btn.textContent = 'Adopt';
+    btn.textContent = 'Adopt…';
     btn.addEventListener('click', () => adoptSession(rec));
     item.appendChild(btn);
     discoveryList.appendChild(item);
@@ -3456,6 +3456,7 @@ function renderDiscovery(res) {
       const badge = document.createElement('span');
       badge.className = 'discovery-live-badge';
       badge.textContent = 'live';
+      badge.title = 'A Claude/Codex process is running in this directory right now';
       item.appendChild(badge);
       discoveryList.appendChild(item);
     }

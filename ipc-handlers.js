@@ -1540,6 +1540,7 @@ function registerIpcHandlers(deps) {
   // bool; session:kill does the actual delete + worktree removal.
   handle('dialog:confirmKill', async (_e, name) => {
     const entry = persistence.get(name);
+    const displayName = (entry && entry.label) || name;
     const worktree = entry && entry.worktree && entry.worktree.path ? entry.worktree : null;
     const detail = 'This forgets the session entirely — its conversation can\'t be resumed. '
       + 'To keep it, archive it instead (the ✕ button or ⌘W).'
@@ -1549,7 +1550,7 @@ function registerIpcHandlers(deps) {
       buttons: ['Delete', 'Cancel'],
       defaultId: 1,
       cancelId: 1,
-      message: `Delete session "${name}"?`,
+      message: `Delete session "${displayName}"?`,
       detail,
     });
     return result.response === 0;
