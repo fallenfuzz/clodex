@@ -3495,6 +3495,10 @@ if (discoveryRefresh) discoveryRefresh.addEventListener('click', () => openDisco
 if (discoveryClose) discoveryClose.addEventListener('click', () => closeDiscovery());
 if (discoveryOverlay) discoveryOverlay.addEventListener('click', (e) => { if (e.target === discoveryOverlay) closeDiscovery(); });
 window.api.onRequestOpenDiscovery(() => openDiscovery());
+// Sidebar-toolbar entry — same action as File ▸ Discover Sessions…; the sidebar
+// is where sessions live, and the dialog's "Find…" sits below the fold.
+const btnDiscover = document.getElementById('btn-discover');
+if (btnDiscover) btnDiscover.addEventListener('click', () => openDiscovery());
 // "Find…" next to the Resume field opens the picker on top of the New Session
 // dialog; adopting a row fills this dialog's fields in place.
 const btnFindSession = document.getElementById('btn-find-session');
