@@ -66,10 +66,11 @@ function initWorkbenchPopover({ getActiveSession, showToast }) {
       return;
     }
     sessionSel.disabled = false;
+    // Each open follows the ACTIVE session (the one you're looking at), not the
+    // last dropdown pick — switching scope mid-open is what the dropdown is for.
     const active = getActiveSession && getActiveSession();
-    if (!list.some((s) => s.name === selName)) {
-      selName = list.some((s) => s.name === active) ? active : list[0].name;
-    }
+    if (list.some((s) => s.name === active)) selName = active;
+    else if (!list.some((s) => s.name === selName)) selName = list[0].name;
     for (const s of list) {
       const opt = document.createElement('option');
       opt.value = s.name; opt.textContent = s.label;
