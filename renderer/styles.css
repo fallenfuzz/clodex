@@ -161,7 +161,7 @@ html, body {
    two secondary openers (new sandbox ▣, add peer ⇄) read quieter in dim/border.
    All fill with a faint tint on hover rather than changing shape. */
 #sidebar-toolbar { display: flex; align-items: center; gap: 6px; }
-#btn-new, #btn-new-sandbox, #btn-add-peer, #btn-discover, #btn-workspace {
+#btn-new, #btn-new-sandbox, #btn-add-peer, #btn-discover, #btn-workbench {
   width: 28px;
   height: 28px;
   border: 1px solid var(--border);
@@ -183,7 +183,7 @@ html, body {
   font-weight: 600;
 }
 #btn-new:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-#btn-new-sandbox:hover, #btn-add-peer:hover, #btn-discover:hover, #btn-workspace:hover { color: var(--text); border-color: var(--text-dim); }
+#btn-new-sandbox:hover, #btn-add-peer:hover, #btn-discover:hover, #btn-workbench:hover { color: var(--text); border-color: var(--text-dim); }
 
 /* Sidebar filter bar — search box + group/sort/filter selects under the header.
    Distinct from #sidebar-toolbar (the header's + / sandbox / peer button row). */
@@ -2443,73 +2443,73 @@ html, body {
 
 #agents-drawer.hidden, #skills-drawer.hidden, #templates-drawer.hidden, #exec-drawer.hidden, #inbox-drawer.hidden, #pot-drawer.hidden { display: none; }
 
-/* Workspace popover — one floating workbench (Files / Source Control / Worktrees)
+/* Workbench popover — one floating workbench (Files / Source Control / Worktrees)
    for a chosen session. Modeled on the file-peek modal (centered overlay, dark
    backdrop) but larger: this is a working surface, not a peek. */
-#workspace-overlay {
+#workbench-overlay {
   position: fixed; inset: 0; z-index: 72;
   display: flex; align-items: stretch; justify-content: center;
   padding: 4vh 3vw; background: rgba(0, 0, 0, 0.55);
 }
-#workspace-modal {
+#workbench-modal {
   width: 100%; max-width: 1180px; max-height: 92vh;
   display: flex; flex-direction: column; overflow: hidden;
   background: var(--sidebar-bg); border: 1px solid var(--accent);
   border-radius: 8px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 }
-.workspace-topbar {
+.workbench-topbar {
   display: flex; align-items: center; gap: 10px;
   padding: 10px 14px; border-bottom: 1px solid var(--border); flex: none;
 }
-.workspace-title { font-size: 12px; font-weight: 600; flex: none; }
-#workspace-session { flex: 0 1 220px; min-width: 0; }
-.workspace-tabs { display: flex; gap: 4px; }
-.workspace-tab {
+.workbench-title { font-size: 12px; font-weight: 600; flex: none; }
+#workbench-session { flex: 0 1 220px; min-width: 0; }
+.workbench-tabs { display: flex; gap: 4px; }
+.workbench-tab {
   font-size: 11px; padding: 3px 12px; border-radius: 6px; cursor: pointer;
   background: transparent; color: var(--text-dim); border: 1px solid var(--border);
 }
-.workspace-tab:hover { color: var(--text); }
-.workspace-tab.active { color: var(--text); background: var(--active-bg); border-color: var(--accent); }
-#workspace-close { margin-left: auto; }
+.workbench-tab:hover { color: var(--text); }
+.workbench-tab.active { color: var(--text); background: var(--active-bg); border-color: var(--accent); }
+#workbench-close { margin-left: auto; }
 
-.workspace-body { flex: 1; display: flex; min-height: 0; }
-.workspace-left {
+.workbench-body { flex: 1; display: flex; min-height: 0; }
+.workbench-left {
   flex: 0 0 340px; display: flex; flex-direction: column;
   min-width: 0; border-right: 1px solid var(--border);
 }
 /* Worktrees tab has no editor — the left column fills the whole body. */
-.workspace-body.worktrees-mode .workspace-left { flex: 1; border-right: none; }
-.workspace-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.workspace-panel-bar {
+.workbench-body.worktrees-mode .workbench-left { flex: 1; border-right: none; }
+.workbench-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.workbench-panel-bar {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 10px; border-bottom: 1px solid var(--border); flex: none;
 }
-.workspace-scope { flex: 1; font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-panel-bar button, .ws-remote-btn {
+.workbench-scope { flex: 1; font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workbench-panel-bar button, .wb-remote-btn {
   background: transparent; border: 1px solid var(--border); color: var(--text-dim);
   border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer;
 }
-.workspace-panel-bar button:hover, .ws-remote-btn:hover { color: var(--text); background: var(--sidebar-hover); }
+.workbench-panel-bar button:hover, .wb-remote-btn:hover { color: var(--text); background: var(--sidebar-hover); }
 
 /* Shared editor / diff area (right of the left column) */
-.workspace-editor { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.ws-editor-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); flex: none; }
-.ws-editor-path { flex: 1; font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
-.ws-dirty { color: var(--warn, #d19a66); font-size: 14px; }
-.ws-editor-bar button { background: var(--accent); border: none; color: #fff; border-radius: 6px; padding: 3px 12px; font-size: 11px; cursor: pointer; }
-.ws-editor-bar button:disabled { opacity: 0.45; cursor: default; }
-.ws-textarea {
+.workbench-editor { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.wb-editor-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); flex: none; }
+.wb-editor-path { flex: 1; font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.wb-dirty { color: var(--warn, #d19a66); font-size: 14px; }
+.wb-editor-bar button { background: var(--accent); border: none; color: #fff; border-radius: 6px; padding: 3px 12px; font-size: 11px; cursor: pointer; }
+.wb-editor-bar button:disabled { opacity: 0.45; cursor: default; }
+.wb-textarea {
   flex: 1; width: 100%; box-sizing: border-box; resize: none;
   background: var(--bg); color: var(--text); border: none; outline: none;
   font-family: var(--mono, ui-monospace, monospace); font-size: 12px; line-height: 1.5;
   padding: 8px 12px; tab-size: 2; white-space: pre; overflow: auto;
 }
-.ws-diff { flex: 1; overflow: auto; padding: 8px 12px; font-family: var(--mono, ui-monospace, monospace); font-size: 11px; line-height: 1.45; }
-.ws-editor-note { padding: 12px; font-size: 12px; color: var(--text-dim); }
-.ws-editor-placeholder { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--text-dim); }
+.wb-diff { flex: 1; overflow: auto; padding: 8px 12px; font-family: var(--mono, ui-monospace, monospace); font-size: 11px; line-height: 1.45; }
+.wb-editor-note { padding: 12px; font-size: 12px; color: var(--text-dim); }
+.wb-editor-placeholder { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--text-dim); }
 
 /* Files tree */
-.ws-tree { flex: 1; overflow: auto; padding: 4px 0; min-height: 0; }
+.wb-tree { flex: 1; overflow: auto; padding: 4px 0; min-height: 0; }
 .explorer-row { display: flex; align-items: center; gap: 4px; padding: 2px 10px; font-size: 12px; cursor: pointer; white-space: nowrap; color: var(--text); }
 .explorer-row:hover { background: var(--sidebar-hover); }
 .explorer-row.selected { background: var(--active-bg); }
@@ -2518,10 +2518,10 @@ html, body {
 .explorer-name { overflow: hidden; text-overflow: ellipsis; }
 
 /* Source control */
-.ws-branchbar { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--border); flex: none; }
-.ws-branchbar .sidebar-select { flex: 1; min-width: 0; }
-.ws-aheadbehind { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
-.ws-changes { flex: 1; overflow: auto; padding: 4px 0; min-height: 0; }
+.wb-branchbar { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--border); flex: none; }
+.wb-branchbar .sidebar-select { flex: 1; min-width: 0; }
+.wb-aheadbehind { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.wb-changes { flex: 1; overflow: auto; padding: 4px 0; min-height: 0; }
 .scm-group-label { padding: 6px 10px 2px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
 .scm-group-label button { margin-left: auto; background: transparent; border: 1px solid var(--border); color: var(--text-dim); border-radius: 5px; font-size: 10px; padding: 1px 6px; cursor: pointer; }
 .scm-file { display: flex; align-items: center; gap: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer; white-space: nowrap; }
@@ -2537,10 +2537,10 @@ html, body {
 .scm-file:hover .scm-file-actions { display: flex; }
 .scm-file-actions button { background: transparent; border: none; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 0 2px; }
 .scm-file-actions button:hover { color: var(--text); }
-.ws-commit-box { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; flex: none; }
-.ws-commit-msg { width: 100%; box-sizing: border-box; resize: vertical; background: var(--input-bg, var(--active-bg)); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit; }
-.ws-commit-box button { background: var(--accent); border: none; color: #fff; border-radius: 6px; padding: 5px; font-size: 12px; cursor: pointer; }
-.ws-commit-box button:disabled { opacity: 0.45; cursor: default; }
+.wb-commit-box { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; flex: none; }
+.wb-commit-msg { width: 100%; box-sizing: border-box; resize: vertical; background: var(--input-bg, var(--active-bg)); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit; }
+.wb-commit-box button { background: var(--accent); border: none; color: #fff; border-radius: 6px; padding: 5px; font-size: 12px; cursor: pointer; }
+.wb-commit-box button:disabled { opacity: 0.45; cursor: default; }
 
 /* Worktrees */
 .worktrees-list { flex: 1; overflow: auto; padding: 4px 0; min-height: 0; }
@@ -2553,16 +2553,16 @@ html, body {
 .worktree-item button:hover { color: var(--text); background: var(--sidebar-hover); }
 .worktrees-add { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; flex: none; }
 .worktrees-add button { background: var(--accent); border: none; color: #fff; border-radius: 6px; padding: 5px; font-size: 12px; cursor: pointer; }
-/* Diff coloring inside .ws-diff is shared with the file-peek modal (.diff-* above). */
+/* Diff coloring inside .wb-diff is shared with the file-peek modal (.diff-* above). */
 
 /* Per-id display:none rules — the css-hidden-invariant test requires each
    class="hidden" id to have its own #id.hidden rule (a generic .hidden would let
    a mistyped id render always-visible). Covers every id the popover toggles. */
-#workspace-overlay.hidden,
-#ws-files-panel.hidden, #ws-scm-panel.hidden, #ws-worktrees-panel.hidden,
-#ws-editor.hidden, #ws-textarea.hidden, #ws-diff.hidden, #ws-editor-note.hidden,
-#ws-editor-placeholder.hidden, #ws-dirty.hidden,
-#ws-files-empty.hidden, #ws-scm-empty.hidden, #ws-worktrees-empty.hidden { display: none; }
+#workbench-overlay.hidden,
+#wb-files-panel.hidden, #wb-scm-panel.hidden, #wb-worktrees-panel.hidden,
+#wb-editor.hidden, #wb-textarea.hidden, #wb-diff.hidden, #wb-editor-note.hidden,
+#wb-editor-placeholder.hidden, #wb-dirty.hidden,
+#wb-files-empty.hidden, #wb-scm-empty.hidden, #wb-worktrees-empty.hidden { display: none; }
 
 #agents-header, #skills-header, #templates-header, #exec-header, #inbox-header, #pot-header {
   display: flex;

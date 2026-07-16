@@ -480,10 +480,10 @@ function createAppMenus(deps) {
         label: 'View',
         submenu: [
           {
-            label: 'Workspace…',
+            label: 'Workbench…',
             click: () => {
               const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
-              if (win) win.webContents.send('request-open-workspace');
+              if (win) win.webContents.send('request-open-workbench');
             },
           },
           { type: 'separator' },

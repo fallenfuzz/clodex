@@ -1,4 +1,4 @@
-// workspace-popover.js — one floating "Workspace" popover: Files (lazy tree +
+// workbench-popover.js — one floating "Workbench" popover: Files (lazy tree +
 // editor), Source Control (git status/stage/discard/commit/branch/remote), and
 // Worktrees, for a chosen session. Everything scopes to the SELECTED session's
 // working directory (dropdown at the top; default = active session), resolved
@@ -11,23 +11,23 @@
 // Source tab renders per-file diffs there (read-only). The Worktrees tab has no
 // editor and fills the width.
 //
-// Factory: initWorkspacePopover({ getActiveSession, showToast }).
-// Returns { openWorkspace, closeWorkspace }. Owns its own DOM + IPC.
+// Factory: initWorkbenchPopover({ getActiveSession, showToast }).
+// Returns { openWorkbench, closeWorkbench }. Owns its own DOM + IPC.
 
 const { renderDiffHtml } = require('../lib/render-html');
 
-function initWorkspacePopover({ getActiveSession, showToast }) {
+function initWorkbenchPopover({ getActiveSession, showToast }) {
   const $ = (id) => document.getElementById(id);
   const api = window.api;
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const toast = (msg) => { if (showToast) showToast(msg, { kind: 'error' }); else alert(msg); };
 
-  const overlay = $('workspace-overlay');
-  const bodyEl = overlay.querySelector('.workspace-body');
-  const sessionSel = $('workspace-session');
-  const tabs = { files: $('workspace-tab-files'), scm: $('workspace-tab-scm'), worktrees: $('workspace-tab-worktrees') };
-  const panels = { files: $('ws-files-panel'), scm: $('ws-scm-panel'), worktrees: $('ws-worktrees-panel') };
+  const overlay = $('workbench-overlay');
+  const bodyEl = overlay.querySelector('.workbench-body');
+  const sessionSel = $('workbench-session');
+  const tabs = { files: $('workbench-tab-files'), scm: $('workbench-tab-scm'), worktrees: $('workbench-tab-worktrees') };
+  const panels = { files: $('wb-files-panel'), scm: $('wb-scm-panel'), worktrees: $('wb-worktrees-panel') };
 
   let curTab = 'files';
   let selName = null; // selected session name (scope)
@@ -91,13 +91,13 @@ function initWorkspacePopover({ getActiveSession, showToast }) {
   // =========================================================================
   // Shared editor / diff area
   // =========================================================================
-  const edPath = $('ws-editor-path');
-  const edDirty = $('ws-dirty');
-  const edSave = $('ws-save');
-  const edTextarea = $('ws-textarea');
-  const edDiff = $('ws-diff');
-  const edNote = $('ws-editor-note');
-  const edPlaceholder = $('ws-editor-placeholder');
+  const edPath = $('wb-editor-path');
+  const edDirty = $('wb-dirty');
+  const edSave = $('wb-save');
+  const edTextarea = $('wb-textarea');
+  const edDiff = $('wb-diff');
+  const edNote = $('wb-editor-note');
+  const edPlaceholder = $('wb-editor-placeholder');
 
   let editingRel = null;      // rel path of the file open for editing, or null
   let editingBaseline = '';
@@ -152,7 +152,7 @@ function initWorkspacePopover({ getActiveSession, showToast }) {
     editingBaseline = res.content;
     setEditorDirty(false);
     showEditorOnly('text');
-    for (const r of $('ws-tree').querySelectorAll('.explorer-row')) {
+    for (const r of $('wb-tree').querySelectorAll('.explorer-row')) {
       r.classList.toggle('selected', r.dataset.rel === rel);
     }
   }
@@ -193,9 +193,9 @@ function initWorkspacePopover({ getActiveSession, showToast }) {
   // =========================================================================
   // Files tab — lazy tree
   // =========================================================================
-  const tree = $('ws-tree');
-  const filesScope = $('ws-files-scope');
-  const filesEmpty = $('ws-files-empty');
+  const tree = $('wb-tree');
+  const filesScope = $('wb-files-scope');
+  const filesEmpty = $('wb-files-empty');
   const expExpanded = new Set();
 
   async function renderExplorer() {
@@ -243,17 +243,17 @@ function initWorkspacePopover({ getActiveSession, showToast }) {
     }
   }
 
-  $('ws-files-refresh').addEventListener('click', () => renderExplorer());
+  $('wb-files-refresh').addEventListener('click', () => renderExplorer());
 
   // =========================================================================
   // Source control tab
   // =========================================================================
-  const scmChanges = $('ws-changes');
-  const scmEmpty = $('ws-scm-empty');
-  const scmBranchSel = $('ws-branch-select');
-  const scmAheadBehind = $('ws-aheadbehind');
-  const scmCommitMsg = $('ws-commit-msg');
-  const scmCommitBtn = $('ws-commit-btn');
+  const scmChanges = $('wb-changes');
+  const scmEmpty = $('wb-scm-empty');
+  const scmBranchSel = $('wb-branch-select');
+  const scmAheadBehind = $('wb-aheadbehind');
+  const scmCommitMsg = $('wb-commit-msg');
+  const scmCommitBtn = $('wb-commit-btn');
   let scmSelectedFile = null;
 
   const STATUS_CLASS = { M: 'modified', A: 'added', D: 'deleted', R: 'modified', C: 'modified', '?': 'untracked' };
@@ -379,10 +379,10 @@ function initWorkspacePopover({ getActiveSession, showToast }) {
     else if (showToast) showToast(`git ${op}: ${(r && r.output) || 'done'}`, { kind: 'info' });
     renderScm();
   });
-  remoteBtn('ws-fetch', 'fetch');
-  remoteBtn('ws-pull', 'pull');
-  remoteBtn('ws-push', 'push');
-  $('ws-newbranch').addEventListener('click', async () => {
+  remoteBtn('wb-fetch', 'fetch');
+  remoteBtn('wb-pull', 'pull');
+  remoteBtn('wb-push', 'push');
+  $('wb-newbranch').addEventListener('click', async () => {
     const name = activeName(); if (!name) return;
     const branch = prompt('New branch name (created from current HEAD):');
     if (!branch) return;
@@ -390,16 +390,16 @@ function initWorkspacePopover({ getActiveSession, showToast }) {
     if (!r || !r.ok) { toast(`Create branch failed: ${(r && r.error) || 'unknown'}`); return; }
     renderScm();
   });
-  $('ws-scm-refresh').addEventListener('click', () => renderScm());
+  $('wb-scm-refresh').addEventListener('click', () => renderScm());
 
   // =========================================================================
   // Worktrees tab
   // =========================================================================
-  const wtList = $('ws-worktrees-list');
-  const wtEmpty = $('ws-worktrees-empty');
-  const wtNewBranch = $('ws-worktree-branch');
-  const wtNewBase = $('ws-worktree-base');
-  const wtBaseList = $('ws-worktree-base-list');
+  const wtList = $('wb-worktrees-list');
+  const wtEmpty = $('wb-worktrees-empty');
+  const wtNewBranch = $('wb-worktree-branch');
+  const wtNewBase = $('wb-worktree-base');
+  const wtBaseList = $('wb-worktree-base-list');
 
   async function renderWorktrees() {
     const name = activeName();
@@ -448,7 +448,7 @@ function initWorkspacePopover({ getActiveSession, showToast }) {
     return row;
   }
 
-  $('ws-worktree-add').addEventListener('click', async () => {
+  $('wb-worktree-add').addEventListener('click', async () => {
     const name = activeName(); if (!name) return;
     const branch = wtNewBranch.value.trim();
     if (!branch) { wtNewBranch.focus(); return; }
@@ -460,7 +460,7 @@ function initWorkspacePopover({ getActiveSession, showToast }) {
     wtNewBranch.value = ''; wtNewBase.value = '';
     renderWorktrees();
   });
-  $('ws-worktrees-refresh').addEventListener('click', () => renderWorktrees());
+  $('wb-worktrees-refresh').addEventListener('click', () => renderWorktrees());
 
   // =========================================================================
   // Tabs + open/close
@@ -481,29 +481,29 @@ function initWorkspacePopover({ getActiveSession, showToast }) {
     }
     // Worktrees fills the width; Files/Source share the editor/diff area.
     const showEditor = tab !== 'worktrees';
-    $('ws-editor').classList.toggle('hidden', !showEditor);
+    $('wb-editor').classList.toggle('hidden', !showEditor);
     bodyEl.classList.toggle('worktrees-mode', tab === 'worktrees');
     refreshTab();
   }
 
   for (const k of Object.keys(tabs)) tabs[k].addEventListener('click', () => setTab(k));
 
-  async function openWorkspace(tab) {
+  async function openWorkbench(tab) {
     await fetchSessions();
     populateSessions();
     resetEditor();
     overlay.classList.remove('hidden');
     setTab(tab || 'files');
   }
-  function closeWorkspace() { overlay.classList.add('hidden'); }
+  function closeWorkbench() { overlay.classList.add('hidden'); }
 
-  $('workspace-close').addEventListener('click', () => closeWorkspace());
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeWorkspace(); });
+  $('workbench-close').addEventListener('click', () => closeWorkbench());
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeWorkbench(); });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !overlay.classList.contains('hidden')) closeWorkspace();
+    if (e.key === 'Escape' && !overlay.classList.contains('hidden')) closeWorkbench();
   });
 
-  return { openWorkspace, closeWorkspace };
+  return { openWorkbench, closeWorkbench };
 }
 
-module.exports = { initWorkspacePopover };
+module.exports = { initWorkbenchPopover };

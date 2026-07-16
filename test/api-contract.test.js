@@ -76,12 +76,12 @@ const PINNED_NAMES = [
   // Sidebar organization: per-session meta (timestamps + git/PR status) +
   // per-workspace view-state persistence (group/sort/filter/search).
   'sidebarMeta', 'getSidebarView', 'setSidebarView',
-  // Workspace popover: source control, worktree management, file explorer/editor,
+  // Workbench popover: source control, worktree management, file explorer/editor,
   // plus its single View-menu / toolbar open event.
   'scmStatus', 'scmDiff', 'scmStage', 'scmUnstage', 'scmDiscard', 'scmCommit',
   'scmBranches', 'scmCheckout', 'scmRemote', 'worktreeList', 'worktreeRemove',
   'fsList', 'fsRead', 'fsWrite',
-  'onRequestOpenWorkspace',
+  'onRequestOpenWorkbench',
 ];
 
 test('table is well-formed: every row has name, valid kind, non-empty channel', () => {

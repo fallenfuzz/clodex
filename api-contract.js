@@ -123,7 +123,7 @@ const API_CONTRACT = [
   { name: 'onRequestSwitchSession', kind: 'on', channel: 'request-switch-session' },
   { name: 'onRequestOpenNewDialog', kind: 'on', channel: 'request-open-new-dialog' },
   { name: 'onRequestOpenDiscovery', kind: 'on', channel: 'request-open-discovery' },
-  { name: 'onRequestOpenWorkspace', kind: 'on', channel: 'request-open-workspace' },
+  { name: 'onRequestOpenWorkbench', kind: 'on', channel: 'request-open-workbench' },
   { name: 'onRequestRenameWorkspace', kind: 'on', channel: 'request-rename-workspace' },
   { name: 'onRequestOpenPreferences', kind: 'on', channel: 'request-open-preferences' },
   { name: 'onRequestOpenPeersDialog', kind: 'on', channel: 'request-open-peers-dialog' },

@@ -39,7 +39,7 @@ const { initChecklistPopovers } = require('./popovers/checklist-popovers');
 const { initContextPopover } = require('./popovers/context-popover');
 const { initSessionMenus } = require('./popovers/session-menus');
 const { initPeersUi } = require('./peers-ui');
-const { initWorkspacePopover } = require('./popovers/workspace-popover');
+const { initWorkbenchPopover } = require('./popovers/workbench-popover');
 
 // ---------------------------------------------------------------------------
 // State
@@ -3115,17 +3115,17 @@ createInboxDrawer();
 // state. Sidebar-footer button next to Inbox.
 createPotDrawer();
 
-// Workspace popover — one floating workbench (Files / Source Control / Worktrees)
-// for a chosen session (popovers/workspace-popover.js). Scopes to the SELECTED
+// Workbench popover — one floating surface (Files / Source Control / Worktrees)
+// for a chosen session (popovers/workbench-popover.js). Scopes to the SELECTED
 // session's cwd (its own dropdown, default = active), resolved server-side by the
 // fs:/scm:/worktree: IPC. Opened from the toolbar button + the View-menu event.
-const { openWorkspace } = initWorkspacePopover({
+const { openWorkbench } = initWorkbenchPopover({
   getActiveSession: () => activeSession,
   showToast,
 });
-const btnWorkspace = document.getElementById('btn-workspace');
-if (btnWorkspace) btnWorkspace.addEventListener('click', () => openWorkspace());
-if (window.api.onRequestOpenWorkspace) window.api.onRequestOpenWorkspace(() => openWorkspace());
+const btnWorkbench = document.getElementById('btn-workbench');
+if (btnWorkbench) btnWorkbench.addEventListener('click', () => openWorkbench());
+if (window.api.onRequestOpenWorkbench) window.api.onRequestOpenWorkbench(() => openWorkbench());
 
 // ---------------------------------------------------------------------------
 // Peered Clodexes — self-contained subsystem (peers-ui.js). Owns the peer bar,
